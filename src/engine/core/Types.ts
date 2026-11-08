@@ -36,9 +36,27 @@ export interface EntityRecord {
   materialId: number;
   isActive: boolean;
   castShadows: boolean;
-  // Animation link
   animationClipIndex?: number;
   animationTime?: number;
+  lightId?: number;
+}
+
+// Light Entity Types
+export type LightType = 'SPOTLIGHT' | 'AREA_LIGHT';
+
+export interface LightRecord {
+  id: number;
+  entityId: number;
+  type: LightType;
+  color: [number, number, number]; // r, g, b (0..1)
+  intensity: number;               // 0.1..20.0
+  range: number;                   // 1.0..100.0
+  direction: [number, number, number];
+  innerAngle: number;
+  outerAngle: number;
+  width: number;
+  height: number;
+  normal: [number, number, number];
 }
 
 // PBR Material parameters in flat buffer (16 floats per material = 64 bytes)
@@ -55,7 +73,7 @@ export interface FlatMaterial {
 export interface MorphTargetData {
   name: string;
   deltaPositions: Float32Array; // 3 floats per vertex (dx, dy, dz)
-  deltaNormals?: Float32Array;   // 3 floats per vertex (dnx, dny, dnz)
+  deltaNormals?: Float32Array;
 }
 
 export interface SkeletonJoint {
@@ -64,19 +82,15 @@ export interface SkeletonJoint {
   inverseBindMatrix: Float32Array; // 16 floats
   localMatrix: Float32Array;       // 16 floats
   worldMatrix: Float32Array;       // 16 floats
-}
-
-export interface AnimationKeyframe<T> {
-  time: number;
-  value: T;
+  initialTranslation?: [number, number, number];
 }
 
 export interface AnimationChannel {
-  targetNode: number;
-  path: 'translation' | 'rotation' | 'scale' | 'weights';
+  targetNode: number; // joint index
+  path: 'translation' | 'rotation' | 'scale';
   times: Float32Array;
   values: Float32Array;
-  interpolation: 'LINEAR' | 'STEP' | 'CUBICSPLINE';
+  interpolation: 'LINEAR' | 'STEP';
 }
 
 export interface AnimationClip {
@@ -85,6 +99,7 @@ export interface AnimationClip {
   channels: AnimationChannel[];
 }
 
+// Engine Telemetry Stats
 export interface EngineStats {
   fps: number;
   frameTimeMs: number;
@@ -107,7 +122,7 @@ export interface DestroyerConfig {
   canvas: HTMLCanvasElement;
   enableSubgroups?: boolean;
   enableCulling?: boolean;
-  maxInstances?: number;
+  maxEntities?: number;
+  maxMaterials?: number;
   maxJoints?: number;
-  powerPreference?: GPUPowerPreference;
 }

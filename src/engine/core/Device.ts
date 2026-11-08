@@ -1,131 +1,247 @@
 /**
  * Destroyer Engine - WebGPU Device & Adapter Manager
- * Handles subgroup feature detection, canvas context configuration, and resilience.
+ * Robust mobile browser resilience, multi-tier fallback, and device loss management.
  */
 
 export interface DeviceInitResult {
   device: GPUDevice;
   adapter: GPUAdapter;
-  format: GPUTextureFormat;
-  subgroupsSupported: boolean;
+  hasSubgroups: boolean;
   subgroupMinSize: number;
   subgroupMaxSize: number;
-  error?: string;
+  presentationFormat: GPUTextureFormat;
 }
 
-export class DeviceManager {
-  private static instance: DeviceManager | null = null;
-  public adapter: GPUAdapter | null = null;
-  public device: GPUDevice | null = null;
-  public format: GPUTextureFormat = 'bgra8unorm';
-  public subgroupsSupported = false;
-  public subgroupMinSize = 0;
-  public subgroupMaxSize = 0;
+export type DeviceLostCallback = (info: GPUDeviceLostInfo) => void;
 
-  static getInstance(): DeviceManager {
-    if (!DeviceManager.instance) {
-      DeviceManager.instance = new DeviceManager();
-    }
-    return DeviceManager.instance;
+export class DeviceManager {
+  private device: GPUDevice | null = null;
+  private adapter: GPUAdapter | null = null;
+  private context: GPUCanvasContext | null = null;
+  private presentationFormat: GPUTextureFormat = 'bgra8unorm';
+  private hasSubgroups = false;
+  private subgroupMinSize = 4;
+  private subgroupMaxSize = 64;
+  private isLost = false;
+  private deviceLostCallbacks: DeviceLostCallback[] = [];
+
+  get isDeviceLost(): boolean {
+    return this.isLost;
   }
 
-  async init(enableSubgroups = true): Promise<DeviceInitResult> {
+  onDeviceLost(cb: DeviceLostCallback): () => void {
+    this.deviceLostCallbacks.push(cb);
+    return () => {
+      this.deviceLostCallbacks = this.deviceLostCallbacks.filter((c) => c !== cb);
+    };
+  }
+
+  async init(preferSubgroups = true): Promise<DeviceInitResult> {
+    this.isLost = false;
+
     if (typeof navigator === 'undefined' || !navigator.gpu) {
-      return {
-        device: null as unknown as GPUDevice,
-        adapter: null as unknown as GPUAdapter,
-        format: 'bgra8unorm',
-        subgroupsSupported: false,
-        subgroupMinSize: 0,
-        subgroupMaxSize: 0,
-        error: 'WebGPU is not supported in this browser. Please use Chrome 113+, Edge 113+, Firefox Nightly, or Safari 18+ with WebGPU enabled.'
-      };
+      throw new Error(
+        'WebGPU is not supported in this browser. Please use Chrome, Edge, or Safari with WebGPU enabled.'
+      );
     }
 
+    // Helper to request adapter across preference levels
+    const tryGetAdapter = async (): Promise<GPUAdapter | null> => {
+      const isMobile =
+        typeof navigator !== 'undefined' &&
+        /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+
+      // On mobile devices, low-power is the primary SoC GPU adapter
+      if (isMobile) {
+        try {
+          const a = await navigator.gpu.requestAdapter({ powerPreference: 'low-power' });
+          if (a) return a;
+        } catch (e) {
+          console.warn('requestAdapter low-power (mobile):', e);
+        }
+      }
+
+      // 1. Default adapter
+      try {
+        const a = await navigator.gpu.requestAdapter();
+        if (a) return a;
+      } catch (e) {
+        console.warn('requestAdapter default:', e);
+      }
+
+      // 2. Low-power adapter (desktop fallback)
+      if (!isMobile) {
+        try {
+          const a = await navigator.gpu.requestAdapter({ powerPreference: 'low-power' });
+          if (a) return a;
+        } catch (e) {
+          console.warn('requestAdapter low-power:', e);
+        }
+      }
+
+      // 3. High-performance adapter
+      try {
+        const a = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+        if (a) return a;
+      } catch (e) {
+        console.warn('requestAdapter high-performance:', e);
+      }
+
+      // 4. Software fallback adapter
+      try {
+        const a = await navigator.gpu.requestAdapter({ forceFallbackAdapter: true });
+        if (a) return a;
+      } catch (e) {
+        console.warn('requestAdapter fallback:', e);
+      }
+
+      return null;
+    };
+
+    let adapter: GPUAdapter | null = await tryGetAdapter();
+
+    // On mobile devices after reload or tab switch, GPU service may need a moment to settle
+    if (!adapter) {
+      const delays = [200, 400, 600, 900, 1200];
+      for (const delay of delays) {
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        adapter = await tryGetAdapter();
+        if (adapter) break;
+      }
+    }
+
+    if (!adapter) {
+      throw new Error(
+        'No compatible WebGPU adapter found. Please verify your browser supports WebGPU and hardware acceleration is enabled.'
+      );
+    }
+
+    this.adapter = adapter;
+    this.hasSubgroups = preferSubgroups && adapter.features.has('subgroups' as GPUFeatureName);
+
+    // Acquire device - Safe standard device acquisition
+    let device: GPUDevice | null = null;
     try {
-      const adapter = await navigator.gpu.requestAdapter({
-        powerPreference: 'high-performance'
-      });
-
-      if (!adapter) {
-        return {
-          device: null as unknown as GPUDevice,
-          adapter: null as unknown as GPUAdapter,
-          format: 'bgra8unorm',
-          subgroupsSupported: false,
-          subgroupMinSize: 0,
-          subgroupMaxSize: 0,
-          error: 'Failed to find a compatible WebGPU adapter. Please check your GPU hardware acceleration settings.'
-        };
+      device = await adapter.requestDevice();
+    } catch (err: any) {
+      console.warn('Primary requestDevice failed, attempting recovery after pause:', err);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      try {
+        const freshAdapter = await tryGetAdapter();
+        if (freshAdapter) {
+          this.adapter = freshAdapter;
+          device = await freshAdapter.requestDevice();
+        }
+      } catch (recoveryErr: any) {
+        console.error('Recovery requestDevice failed:', recoveryErr);
+        throw new Error(`WebGPU requestDevice failed: ${recoveryErr?.message || err?.message || String(recoveryErr)}`);
       }
+    }
 
-      this.adapter = adapter;
+    if (!device) {
+      throw new Error('Failed to acquire WebGPU device.');
+    }
 
-      // Check for WebGPU Subgroups feature
-      const hasSubgroups = adapter.features.has('subgroups');
-      const requiredFeatures: GPUFeatureName[] = [];
-      if (hasSubgroups && enableSubgroups) {
-        requiredFeatures.push('subgroups' as GPUFeatureName);
-        this.subgroupsSupported = true;
-      } else {
-        this.subgroupsSupported = false;
-      }
+    this.device = device;
+    this.presentationFormat = navigator.gpu.getPreferredCanvasFormat();
 
-      // Request device with requested features
-      const device = await adapter.requestDevice({
-        requiredFeatures,
-        requiredLimits: {
-          maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
-          maxComputeWorkgroupStorageSize: adapter.limits.maxComputeWorkgroupStorageSize,
+    // Listen to device loss
+    device.lost.then((info) => {
+      console.warn(`[WebGPU Device Lost]: reason=${info.reason}, message=${info.message}`);
+      this.isLost = true;
+      this.device = null;
+      this.deviceLostCallbacks.forEach((cb) => {
+        try {
+          cb(info);
+        } catch (e) {
+          console.error('Error in device lost callback:', e);
         }
       });
+    });
 
-      this.device = device;
-      this.format = navigator.gpu.getPreferredCanvasFormat();
-
-      // Read subgroup limits if available
-      this.subgroupMinSize = (adapter.limits as unknown as { minSubgroupSize?: number }).minSubgroupSize || (this.subgroupsSupported ? 32 : 0);
-      this.subgroupMaxSize = (adapter.limits as unknown as { maxSubgroupSize?: number }).maxSubgroupSize || (this.subgroupsSupported ? 64 : 0);
-
-      device.lost.then((info) => {
-        console.warn(`Destroyer WebGPU device lost: ${info.message} (reason: ${info.reason})`);
-      });
-
-      return {
-        device,
-        adapter,
-        format: this.format,
-        subgroupsSupported: this.subgroupsSupported,
-        subgroupMinSize: this.subgroupMinSize,
-        subgroupMaxSize: this.subgroupMaxSize,
-      };
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return {
-        device: null as unknown as GPUDevice,
-        adapter: null as unknown as GPUAdapter,
-        format: 'bgra8unorm',
-        subgroupsSupported: false,
-        subgroupMinSize: 0,
-        subgroupMaxSize: 0,
-        error: `WebGPU Initialization Error: ${msg}`
-      };
-    }
+    return {
+      device: this.device,
+      adapter: this.adapter,
+      hasSubgroups: this.hasSubgroups,
+      subgroupMinSize: this.subgroupMinSize,
+      subgroupMaxSize: this.subgroupMaxSize,
+      presentationFormat: this.presentationFormat,
+    };
   }
 
   configureCanvas(canvas: HTMLCanvasElement): GPUCanvasContext {
-    if (!this.device) {
-      throw new Error('Device not initialized before configuring canvas');
+    if (!this.device || this.isLost) {
+      throw new Error('Device not initialized or device was lost.');
     }
-    const context = canvas.getContext('webgpu') as GPUCanvasContext;
-    if (!context) {
-      throw new Error('Failed to obtain webgpu canvas context');
+    const ctx = canvas.getContext('webgpu');
+    if (!ctx) {
+      throw new Error('Failed to acquire WebGPU canvas context.');
     }
-    context.configure({
-      device: this.device,
-      format: this.format,
-      alphaMode: 'opaque'
-    });
-    return context;
+
+    this.context = ctx;
+
+    // Use opaque as standard for rock-solid 3D canvas compositing on mobile & desktop Chrome
+    try {
+      ctx.configure({
+        device: this.device,
+        format: this.presentationFormat,
+        alphaMode: 'opaque',
+      });
+    } catch (err) {
+      console.warn('Opaque configure failed, trying premultiplied fallback:', err);
+      try {
+        ctx.configure({
+          device: this.device,
+          format: this.presentationFormat,
+          alphaMode: 'premultiplied',
+        });
+      } catch (err2) {
+        console.error('Canvas configure failed:', err2);
+      }
+    }
+
+    return ctx;
+  }
+
+  getDevice(): GPUDevice {
+    if (!this.device || this.isLost) {
+      throw new Error('Device not initialized or device was lost.');
+    }
+    return this.device;
+  }
+
+  getContext(): GPUCanvasContext {
+    if (!this.context) {
+      throw new Error('Context not initialized.');
+    }
+    return this.context;
+  }
+
+  getFormat(): GPUTextureFormat {
+    return this.presentationFormat;
+  }
+
+  getSubgroupInfo() {
+    return {
+      supported: this.hasSubgroups,
+      minSize: this.subgroupMinSize,
+      maxSize: this.subgroupMaxSize,
+    };
+  }
+
+  dispose(): void {
+    if (this.context) {
+      try {
+        this.context.unconfigure();
+      } catch {
+        // ignore
+      }
+      this.context = null;
+    }
+    // We intentionally do not call this.device.destroy() during reload/restore
+    // because tearing down the IPC channel in Chromium causes subsequent requestAdapter
+    // and requestDevice calls to fail with 'No compatible WebGPU adapter found'.
+    this.device = null;
+    this.isLost = true;
   }
 }

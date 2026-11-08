@@ -6,11 +6,23 @@
 
 import { Mat4 } from '../math/Mat4';
 import {
+  DRAW_INDEXED_INDIRECT_STRIDE_BYTES,
   DRAW_INDEXED_INDIRECT_STRIDE_U32,
   EntityRecord,
   FlatMaterial,
-  MeshMetadata
+  MeshMetadata,
+  LightRecord,
 } from './Types';
+
+export interface AddEntityParams {
+  meshId: number;
+  materialId?: number;
+  worldMatrix: Float32Array;
+  sphereCenter: [number, number, number, number];
+  flags?: number;
+  animOffset?: number;
+  name?: string;
+}
 
 export class FlatEntityManager {
   public readonly maxEntities: number;
@@ -19,19 +31,12 @@ export class FlatEntityManager {
 
   public activeEntityCount = 0;
   public nextEntityId = 0;
+  public nextLightId = 0;
+
+  // Active Light Records
+  public lightRecords: LightRecord[] = [];
 
   // Contiguous Flat Buffers
-  // 1. GPU Entity Records (64 bytes each: mat4 (16 floats) + sphere (4 floats) + meta (4 u32))
-  // We can interleave into a single Float32Array / Uint32Array view for fastest GPU copy
-  // Struct:
-  // float[0..15]: worldMatrix (16 floats = 64 bytes)
-  // float[16..18]: sphereCenter.xyz
-  // float[19]: sphereRadius
-  // uint[20]: meshId
-  // uint[21]: materialId
-  // uint[22]: flags (bit 0 = active, bit 1 = castShadows)
-  // uint[23]: animOffset (joint offset in jointMatrices buffer)
-  // Total stride per entity = 24 * 4 = 96 bytes (aligned to 16 bytes for WGSL mat4 + vec4)
   public static readonly ENTITY_STRIDE_FLOATS = 24;
 
   public readonly entityBufferRaw: ArrayBuffer;
@@ -39,55 +44,68 @@ export class FlatEntityManager {
   public readonly entityUintView: Uint32Array;
 
   // Separate transforms for fast CPU-side updates
-  public readonly positions: Float32Array; // 3 floats per entity
-  public readonly rotations: Float32Array; // 4 floats per entity (quaternion: x, y, z, w)
-  public readonly scales: Float32Array;    // 3 floats per entity
+  public readonly positions: Float32Array;
+  public readonly rotations: Float32Array;
+  public readonly scales: Float32Array;
 
-  // Flat Materials Buffer (16 floats = 64 bytes per material)
+  // Flat Materials Buffer (16 floats per material = 64 bytes)
   public readonly materialBufferRaw: ArrayBuffer;
   public readonly materialFloatView: Float32Array;
   public readonly materialUintView: Uint32Array;
   public static readonly MATERIAL_STRIDE_FLOATS = 16;
   public materialCount = 0;
 
-  // Indirect Draw Commands (5 x uint32 per mesh = 20 bytes)
+  // Indirect Draw Commands & Mesh Registry
   public indirectCommandsData: Uint32Array;
   public meshRegistry: MeshMetadata[] = [];
 
-  // Flat Skeletal Joint Matrices (16 floats per joint)
+  // Skinned Joint Matrices
   public readonly jointMatrices: Float32Array;
   public totalJointsCount = 0;
 
-  // Entity records list for user inspection
-  public entityRecords: EntityRecord[] = [];
+  // Entity records list for inspection
+  public entityRecords: (EntityRecord & { name?: string })[] = [];
+
+  // WebGPU GPUBuffer References
+  private gpuEntityBuffer: GPUBuffer | null = null;
+  private gpuMaterialBuffer: GPUBuffer | null = null;
+  private gpuVisibleIndicesBuffer: GPUBuffer | null = null;
+  private gpuIndirectArgsBuffer: GPUBuffer | null = null;
+  private gpuJointMatricesBuffer: GPUBuffer | null = null;
+
+  // Cached visible indices and mesh instance counts to eliminate per-frame allocations
+  private meshCountsCache = new Uint32Array(128);
+  private indicesCache = new Uint32Array(128 * 10000);
 
   constructor(maxEntities = 50000, maxMaterials = 256, maxJoints = 2048) {
     this.maxEntities = maxEntities;
     this.maxMaterials = maxMaterials;
     this.maxJoints = maxJoints;
 
-    // Entity buffer
     this.entityBufferRaw = new ArrayBuffer(maxEntities * FlatEntityManager.ENTITY_STRIDE_FLOATS * 4);
     this.entityFloatView = new Float32Array(this.entityBufferRaw);
     this.entityUintView = new Uint32Array(this.entityBufferRaw);
 
-    // Transforms
     this.positions = new Float32Array(maxEntities * 3);
     this.rotations = new Float32Array(maxEntities * 4);
     this.scales = new Float32Array(maxEntities * 3);
 
-    // Materials buffer
     this.materialBufferRaw = new ArrayBuffer(maxMaterials * FlatEntityManager.MATERIAL_STRIDE_FLOATS * 4);
     this.materialFloatView = new Float32Array(this.materialBufferRaw);
     this.materialUintView = new Uint32Array(this.materialBufferRaw);
 
-    // Indirect commands data
     this.indirectCommandsData = new Uint32Array(128 * DRAW_INDEXED_INDIRECT_STRIDE_U32);
-
-    // Skinned Joints Buffer
     this.jointMatrices = new Float32Array(maxJoints * 16);
 
-    // Initialize default material 0
+    // Initialize joint matrices to identity
+    for (let i = 0; i < maxJoints; i++) {
+      this.jointMatrices[i * 16 + 0] = 1;
+      this.jointMatrices[i * 16 + 5] = 1;
+      this.jointMatrices[i * 16 + 10] = 1;
+      this.jointMatrices[i * 16 + 15] = 1;
+    }
+
+    // Default Material 0 (neutral PBR grey/cyan)
     this.registerMaterial({
       baseColor: [0.8, 0.8, 0.85, 1.0],
       emissiveColor: [0, 0, 0, 0],
@@ -98,13 +116,176 @@ export class FlatEntityManager {
     });
   }
 
-  registerMesh(metadata: Omit<MeshMetadata, 'id'>): number {
-    const id = this.meshRegistry.length;
-    const mesh: MeshMetadata = { ...metadata, id };
-    this.meshRegistry.push(mesh);
+  get registeredMeshes(): MeshMetadata[] {
+    return this.meshRegistry;
+  }
 
-    // Prepare indirect draw command for this mesh:
-    // [indexCount, instanceCount = 0, firstIndex, baseVertex, firstInstance = 0]
+  get meshCount(): number {
+    return this.meshRegistry.length;
+  }
+
+  initGPU(device: GPUDevice): void {
+    if (this.gpuEntityBuffer) this.gpuEntityBuffer.destroy();
+    if (this.gpuMaterialBuffer) this.gpuMaterialBuffer.destroy();
+    if (this.gpuVisibleIndicesBuffer) this.gpuVisibleIndicesBuffer.destroy();
+    if (this.gpuIndirectArgsBuffer) this.gpuIndirectArgsBuffer.destroy();
+    if (this.gpuJointMatricesBuffer) this.gpuJointMatricesBuffer.destroy();
+
+    this.gpuEntityBuffer = device.createBuffer({
+      size: Math.max(this.entityBufferRaw.byteLength, 1024),
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+
+    this.gpuMaterialBuffer = device.createBuffer({
+      size: Math.max(this.materialBufferRaw.byteLength, 1024),
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+
+    this.gpuVisibleIndicesBuffer = device.createBuffer({
+      size: Math.max(128 * 10000 * 4, this.maxEntities * 4, 1024),
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+
+    this.gpuIndirectArgsBuffer = device.createBuffer({
+      size: Math.max(this.indirectCommandsData.byteLength, 1024),
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+    });
+
+    this.gpuJointMatricesBuffer = device.createBuffer({
+      size: Math.max(this.jointMatrices.byteLength, 1024),
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+  }
+
+  uploadToGPU(device: GPUDevice): void {
+    if (!this.gpuEntityBuffer || !this.gpuMaterialBuffer || !this.gpuIndirectArgsBuffer || !this.gpuJointMatricesBuffer) {
+      return;
+    }
+
+    const activeBytes = this.activeEntityCount * FlatEntityManager.ENTITY_STRIDE_FLOATS * 4;
+    if (activeBytes > 0) {
+      device.queue.writeBuffer(this.gpuEntityBuffer, 0, this.entityBufferRaw, 0, activeBytes);
+    }
+
+    const matBytes = this.materialCount * FlatEntityManager.MATERIAL_STRIDE_FLOATS * 4;
+    if (matBytes > 0) {
+      device.queue.writeBuffer(this.gpuMaterialBuffer, 0, this.materialBufferRaw, 0, matBytes);
+    }
+
+    const cmdBytes = this.meshRegistry.length * DRAW_INDEXED_INDIRECT_STRIDE_BYTES;
+    if (cmdBytes > 0) {
+      device.queue.writeBuffer(this.gpuIndirectArgsBuffer, 0, this.indirectCommandsData.buffer, 0, cmdBytes);
+    }
+
+    if (this.totalJointsCount > 0) {
+      device.queue.writeBuffer(this.gpuJointMatricesBuffer, 0, this.jointMatrices.buffer, 0, this.totalJointsCount * 16 * 4);
+    }
+  }
+
+  populateDirectVisibleIndices(device: GPUDevice): void {
+    if (!this.gpuVisibleIndicesBuffer || !this.gpuIndirectArgsBuffer || this.meshRegistry.length === 0) return;
+
+    const numMeshes = this.meshRegistry.length;
+    if (this.meshCountsCache.length < numMeshes) {
+      this.meshCountsCache = new Uint32Array(Math.max(numMeshes, 128));
+    }
+    this.meshCountsCache.fill(0);
+
+    const maxSlotsPerMesh = 10000;
+    const totalSlots = numMeshes * maxSlotsPerMesh;
+    if (this.indicesCache.length < totalSlots) {
+      this.indicesCache = new Uint32Array(totalSlots);
+    }
+
+    for (let i = 0; i < this.activeEntityCount; i++) {
+      const eOffset = i * FlatEntityManager.ENTITY_STRIDE_FLOATS;
+      const flags = this.entityUintView[eOffset + 22];
+      if ((flags & 1) !== 0) {
+        const meshId = this.entityUintView[eOffset + 20];
+        if (meshId < numMeshes) {
+          const slot = this.meshCountsCache[meshId];
+          if (slot < maxSlotsPerMesh) {
+            this.meshCountsCache[meshId] = slot + 1;
+            this.indicesCache[meshId * maxSlotsPerMesh + slot] = i;
+          }
+        }
+      }
+    }
+
+    for (let i = 0; i < numMeshes; i++) {
+      const cmdOffset = i * DRAW_INDEXED_INDIRECT_STRIDE_U32;
+      this.indirectCommandsData[cmdOffset + 1] = this.meshCountsCache[i];
+    }
+
+    const cmdBytes = numMeshes * DRAW_INDEXED_INDIRECT_STRIDE_BYTES;
+    device.queue.writeBuffer(this.gpuIndirectArgsBuffer, 0, this.indirectCommandsData.buffer, 0, cmdBytes);
+    device.queue.writeBuffer(
+      this.gpuVisibleIndicesBuffer,
+      0,
+      this.indicesCache.buffer,
+      0,
+      Math.min(totalSlots * 4, this.gpuVisibleIndicesBuffer.size)
+    );
+  }
+
+  getMeshEntityCount(meshId: number): number {
+    if (meshId < 0 || meshId >= this.meshCountsCache.length) return 0;
+    return this.meshCountsCache[meshId];
+  }
+
+  getEntityBuffer(): GPUBuffer {
+    return this.gpuEntityBuffer!;
+  }
+
+  getMaterialBuffer(): GPUBuffer {
+    return this.gpuMaterialBuffer!;
+  }
+
+  getVisibleIndicesBuffer(): GPUBuffer {
+    return this.gpuVisibleIndicesBuffer!;
+  }
+
+  getIndirectArgsBuffer(): GPUBuffer {
+    return this.gpuIndirectArgsBuffer!;
+  }
+
+  getJointMatricesBuffer(): GPUBuffer {
+    return this.gpuJointMatricesBuffer!;
+  }
+
+  getTotalVertices(): number {
+    return this.meshRegistry.reduce((acc, m) => acc + m.vertexCount, 0);
+  }
+
+  getTotalTriangles(): number {
+    return this.meshRegistry.reduce((acc, m) => acc + Math.floor(m.indexCount / 3), 0);
+  }
+
+  getMesh(id: number): MeshMetadata | undefined {
+    return this.meshRegistry[id];
+  }
+
+  registerMesh(metadata: Omit<MeshMetadata, 'id'> & { id?: number }): number {
+    const id = metadata.id !== undefined && metadata.id >= 0 ? metadata.id : this.meshRegistry.length;
+    const mesh: MeshMetadata = {
+      id,
+      name: metadata.name,
+      firstIndex: metadata.firstIndex,
+      indexCount: metadata.indexCount,
+      baseVertex: metadata.baseVertex,
+      vertexCount: metadata.vertexCount,
+      boundingRadius: metadata.boundingRadius,
+      hasSkinning: metadata.hasSkinning,
+      hasMorphTargets: metadata.hasMorphTargets,
+      morphTargetCount: metadata.morphTargetCount,
+    };
+
+    if (id < this.meshRegistry.length) {
+      this.meshRegistry[id] = mesh;
+    } else {
+      this.meshRegistry.push(mesh);
+    }
+
     const cmdOffset = id * DRAW_INDEXED_INDIRECT_STRIDE_U32;
     if (cmdOffset + DRAW_INDEXED_INDIRECT_STRIDE_U32 > this.indirectCommandsData.length) {
       const newCmds = new Uint32Array(this.indirectCommandsData.length * 2);
@@ -113,10 +294,10 @@ export class FlatEntityManager {
     }
 
     this.indirectCommandsData[cmdOffset + 0] = mesh.indexCount;
-    this.indirectCommandsData[cmdOffset + 1] = 0; // will be populated by compute culling
+    this.indirectCommandsData[cmdOffset + 1] = 0; // instance count (populated by compute culling)
     this.indirectCommandsData[cmdOffset + 2] = mesh.firstIndex;
     this.indirectCommandsData[cmdOffset + 3] = mesh.baseVertex;
-    this.indirectCommandsData[cmdOffset + 4] = 0;
+    this.indirectCommandsData[cmdOffset + 4] = id * 10000;
 
     return id;
   }
@@ -146,125 +327,143 @@ export class FlatEntityManager {
     return id;
   }
 
-  createEntity(
-    meshId: number,
-    materialId = 0,
-    position: [number, number, number] = [0, 0, 0],
-    rotation: [number, number, number, number] = [0, 0, 0, 1], // quaternion
-    scale: [number, number, number] = [1, 1, 1],
-    boundingRadius = 1.0,
-    animOffset = 0
-  ): number {
+  getMaterial(id: number): FlatMaterial | null {
+    if (id < 0 || id >= this.materialCount) return null;
+    const offset = id * FlatEntityManager.MATERIAL_STRIDE_FLOATS;
+    return {
+      baseColor: [
+        this.materialFloatView[offset + 0],
+        this.materialFloatView[offset + 1],
+        this.materialFloatView[offset + 2],
+        this.materialFloatView[offset + 3],
+      ],
+      emissiveColor: [
+        this.materialFloatView[offset + 4],
+        this.materialFloatView[offset + 5],
+        this.materialFloatView[offset + 6],
+        this.materialFloatView[offset + 7],
+      ],
+      roughness: this.materialFloatView[offset + 8],
+      metallic: this.materialFloatView[offset + 9],
+      ao: this.materialFloatView[offset + 10],
+      alphaCutoff: this.materialFloatView[offset + 11],
+    };
+  }
+
+  updateMaterial(id: number, mat: Partial<FlatMaterial>): void {
+    if (id < 0 || id >= this.materialCount) return;
+    const offset = id * FlatEntityManager.MATERIAL_STRIDE_FLOATS;
+
+    if (mat.baseColor) {
+      this.materialFloatView[offset + 0] = mat.baseColor[0];
+      this.materialFloatView[offset + 1] = mat.baseColor[1];
+      this.materialFloatView[offset + 2] = mat.baseColor[2];
+      this.materialFloatView[offset + 3] = mat.baseColor[3];
+    }
+    if (mat.emissiveColor) {
+      this.materialFloatView[offset + 4] = mat.emissiveColor[0];
+      this.materialFloatView[offset + 5] = mat.emissiveColor[1];
+      this.materialFloatView[offset + 6] = mat.emissiveColor[2];
+      this.materialFloatView[offset + 7] = mat.emissiveColor[3];
+    }
+    if (mat.roughness !== undefined) {
+      this.materialFloatView[offset + 8] = mat.roughness;
+    }
+    if (mat.metallic !== undefined) {
+      this.materialFloatView[offset + 9] = mat.metallic;
+    }
+    if (mat.ao !== undefined) {
+      this.materialFloatView[offset + 10] = mat.ao;
+    }
+    if (mat.alphaCutoff !== undefined) {
+      this.materialFloatView[offset + 11] = mat.alphaCutoff;
+    }
+  }
+
+  addEntity(params: AddEntityParams): number {
     if (this.activeEntityCount >= this.maxEntities) {
-      throw new Error(`Exceeded max entities limit of ${this.maxEntities}`);
+      return -1;
     }
 
     const id = this.nextEntityId++;
     this.activeEntityCount++;
 
-    // Store transform in flat arrays
-    const pIdx = id * 3;
-    this.positions[pIdx] = position[0];
-    this.positions[pIdx + 1] = position[1];
-    this.positions[pIdx + 2] = position[2];
-
-    const rIdx = id * 4;
-    this.rotations[rIdx] = rotation[0];
-    this.rotations[rIdx + 1] = rotation[1];
-    this.rotations[rIdx + 2] = rotation[2];
-    this.rotations[rIdx + 3] = rotation[3];
-
-    const sIdx = id * 3;
-    this.scales[sIdx] = scale[0];
-    this.scales[sIdx + 1] = scale[1];
-    this.scales[sIdx + 2] = scale[2];
-
-    // Compute initial world matrix
     const eOffset = id * FlatEntityManager.ENTITY_STRIDE_FLOATS;
-    Mat4.fromTranslationRotationScale(position, rotation, scale, this.entityFloatView, eOffset);
+    for (let i = 0; i < 16; i++) {
+      this.entityFloatView[eOffset + i] = params.worldMatrix[i];
+    }
 
-    // Bounding sphere (center xyz = 0,0,0 relative to entity, w = radius)
-    this.entityFloatView[eOffset + 16] = 0.0;
-    this.entityFloatView[eOffset + 17] = 0.0;
-    this.entityFloatView[eOffset + 18] = 0.0;
-    this.entityFloatView[eOffset + 19] = boundingRadius;
+    this.entityFloatView[eOffset + 16] = params.sphereCenter[0];
+    this.entityFloatView[eOffset + 17] = params.sphereCenter[1];
+    this.entityFloatView[eOffset + 18] = params.sphereCenter[2];
+    this.entityFloatView[eOffset + 19] = params.sphereCenter[3];
 
-    // Metadata in Uint32 view
-    this.entityUintView[eOffset + 20] = meshId;
-    this.entityUintView[eOffset + 21] = materialId;
-    this.entityUintView[eOffset + 22] = 1; // active flag = 1
-    this.entityUintView[eOffset + 23] = animOffset;
+    this.entityUintView[eOffset + 20] = params.meshId;
+    this.entityUintView[eOffset + 21] = params.materialId ?? 0;
+    this.entityUintView[eOffset + 22] = params.flags ?? 1;
+    this.entityUintView[eOffset + 23] = params.animOffset ?? 0;
 
     this.entityRecords.push({
       id,
-      meshId,
-      materialId,
+      meshId: params.meshId,
+      materialId: params.materialId ?? 0,
       isActive: true,
       castShadows: true,
+      name: params.name || `Entity_${id}`,
     });
 
     return id;
   }
 
-  updateTransform(
-    id: number,
-    position?: [number, number, number],
-    rotation?: [number, number, number, number],
-    scale?: [number, number, number]
-  ): void {
-    if (id >= this.activeEntityCount) return;
-
-    const pIdx = id * 3;
-    const rIdx = id * 4;
-    const sIdx = id * 3;
-
-    if (position) {
-      this.positions[pIdx] = position[0];
-      this.positions[pIdx + 1] = position[1];
-      this.positions[pIdx + 2] = position[2];
-    }
-    if (rotation) {
-      this.rotations[rIdx] = rotation[0];
-      this.rotations[rIdx + 1] = rotation[1];
-      this.rotations[rIdx + 2] = rotation[2];
-      this.rotations[rIdx + 3] = rotation[3];
-    }
-    if (scale) {
-      this.scales[sIdx] = scale[0];
-      this.scales[sIdx + 1] = scale[1];
-      this.scales[sIdx + 2] = scale[2];
-    }
-
-    const pos: [number, number, number] = [this.positions[pIdx], this.positions[pIdx + 1], this.positions[pIdx + 2]];
-    const rot: [number, number, number, number] = [
-      this.rotations[rIdx],
-      this.rotations[rIdx + 1],
-      this.rotations[rIdx + 2],
-      this.rotations[rIdx + 3]
-    ];
-    const sca: [number, number, number] = [this.scales[sIdx], this.scales[sIdx + 1], this.scales[sIdx + 2]];
-
-    const eOffset = id * FlatEntityManager.ENTITY_STRIDE_FLOATS;
-    Mat4.fromTranslationRotationScale(pos, rot, sca, this.entityFloatView, eOffset);
-  }
-
-  setEntityActive(id: number, active: boolean): void {
+  deleteSingleEntity(id: number): void {
     if (id < this.activeEntityCount) {
       const eOffset = id * FlatEntityManager.ENTITY_STRIDE_FLOATS;
-      this.entityUintView[eOffset + 22] = active ? 1 : 0;
-      if (this.entityRecords[id]) {
-        this.entityRecords[id].isActive = active;
-      }
+      this.entityUintView[eOffset + 22] = 0;
+      this.entityRecords = this.entityRecords.filter((r) => r.id !== id);
+      this.lightRecords = this.lightRecords.filter((l) => l.entityId !== id);
     }
+  }
+
+  duplicateEntity(id: number): number {
+    const record = this.entityRecords.find((r) => r.id === id);
+    if (!record || this.activeEntityCount >= this.maxEntities) return -1;
+
+    const srcOffset = id * FlatEntityManager.ENTITY_STRIDE_FLOATS;
+    const newId = this.nextEntityId++;
+    this.activeEntityCount++;
+    const dstOffset = newId * FlatEntityManager.ENTITY_STRIDE_FLOATS;
+
+    for (let i = 0; i < FlatEntityManager.ENTITY_STRIDE_FLOATS; i++) {
+      this.entityFloatView[dstOffset + i] = this.entityFloatView[srcOffset + i];
+    }
+
+    // Offset position by +2.0 in X and Z
+    this.entityFloatView[dstOffset + 12] += 2.0;
+    this.entityFloatView[dstOffset + 14] += 2.0;
+    this.entityFloatView[dstOffset + 16] += 2.0;
+    this.entityFloatView[dstOffset + 18] += 2.0;
+
+    this.entityRecords.push({
+      id: newId,
+      meshId: record.meshId,
+      materialId: record.materialId,
+      isActive: true,
+      castShadows: true,
+      name: `${record.name || 'Entity'}_copy`,
+    });
+
+    return newId;
   }
 
   clear(): void {
     this.activeEntityCount = 0;
     this.nextEntityId = 0;
+    this.nextLightId = 0;
     this.meshRegistry = [];
     this.materialCount = 0;
     this.totalJointsCount = 0;
     this.entityRecords = [];
+    this.lightRecords = [];
     this.entityUintView.fill(0);
     this.indirectCommandsData.fill(0);
   }

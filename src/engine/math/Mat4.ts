@@ -21,6 +21,14 @@ export class Mat4 {
     return out;
   }
 
+  static fromTranslation(v: [number, number, number], out: Float32Array): Float32Array {
+    Mat4.identity(out);
+    out[12] = v[0];
+    out[13] = v[1];
+    out[14] = v[2];
+    return out;
+  }
+
   static perspective(fovRad: number, aspect: number, near: number, far: number, out: Float32Array): Float32Array {
     const f = 1.0 / Math.tan(fovRad / 2);
     const nf = 1 / (near - far);
@@ -65,23 +73,16 @@ export class Mat4 {
     let y1 = z2 * x0 - z0 * x2;
     let y2 = z0 * x1 - z1 * x0;
     len = Math.hypot(y0, y1, y2);
-    if (len) {
+    if (!len) {
+      y0 = 0; y1 = 0; y2 = 0;
+    } else {
       len = 1 / len;
       y0 *= len; y1 *= len; y2 *= len;
     }
 
-    out[0] = x0;
-    out[1] = y0;
-    out[2] = z0;
-    out[3] = 0;
-    out[4] = x1;
-    out[5] = y1;
-    out[6] = z1;
-    out[7] = 0;
-    out[8] = x2;
-    out[9] = y2;
-    out[10] = z2;
-    out[11] = 0;
+    out[0] = x0; out[1] = y0; out[2] = z0; out[3] = 0;
+    out[4] = x1; out[5] = y1; out[6] = z1; out[7] = 0;
+    out[8] = x2; out[9] = y2; out[10] = z2; out[11] = 0;
     out[12] = -(x0 * eye[0] + x1 * eye[1] + x2 * eye[2]);
     out[13] = -(y0 * eye[0] + y1 * eye[1] + y2 * eye[2]);
     out[14] = -(z0 * eye[0] + z1 * eye[1] + z2 * eye[2]);
@@ -118,34 +119,23 @@ export class Mat4 {
     out[13] = b0 * a01 + b1 * a11 + b2 * a21 + b3 * a31;
     out[14] = b0 * a02 + b1 * a12 + b2 * a22 + b3 * a32;
     out[15] = b0 * a03 + b1 * a13 + b2 * a23 + b3 * a33;
+
     return out;
   }
 
-  static fromTranslationRotationScale(
-    t: [number, number, number],
-    q: [number, number, number, number], // x, y, z, w
+  static fromRotationTranslationScale(
+    q: [number, number, number, number],
+    v: [number, number, number],
     s: [number, number, number],
     out: Float32Array,
     offset = 0
-  ): void {
+  ): Float32Array {
     const x = q[0], y = q[1], z = q[2], w = q[3];
-    const x2 = x + x;
-    const y2 = y + y;
-    const z2 = z + z;
-
-    const xx = x * x2;
-    const xy = x * y2;
-    const xz = x * z2;
-    const yy = y * y2;
-    const yz = y * z2;
-    const zz = z * z2;
-    const wx = w * x2;
-    const wy = w * y2;
-    const wz = w * z2;
-
-    const sx = s[0];
-    const sy = s[1];
-    const sz = s[2];
+    const x2 = x + x, y2 = y + y, z2 = z + z;
+    const xx = x * x2, xy = x * y2, xz = x * z2;
+    const yy = y * y2, yz = y * z2, zz = z * z2;
+    const wx = w * x2, wy = w * y2, wz = w * z2;
+    const sx = s[0], sy = s[1], sz = s[2];
 
     out[offset + 0] = (1 - (yy + zz)) * sx;
     out[offset + 1] = (xy + wz) * sx;
@@ -162,64 +152,52 @@ export class Mat4 {
     out[offset + 10] = (1 - (xx + yy)) * sz;
     out[offset + 11] = 0;
 
-    out[offset + 12] = t[0];
-    out[offset + 13] = t[1];
-    out[offset + 14] = t[2];
+    out[offset + 12] = v[0];
+    out[offset + 13] = v[1];
+    out[offset + 14] = v[2];
     out[offset + 15] = 1;
+
+    return out;
   }
 
-  /**
-   * Extract 6 frustum planes (Ax + By + Cz + D = 0) from View-Projection matrix
-   * Format: 6 planes * 4 floats (x, y, z, w/distance) normalized
-   */
-  static extractFrustumPlanes(vp: Float32Array, outPlanes: Float32Array): void {
-    // Left: row3 + row0
-    outPlanes[0] = vp[3] + vp[0];
-    outPlanes[1] = vp[7] + vp[4];
-    outPlanes[2] = vp[11] + vp[8];
-    outPlanes[3] = vp[15] + vp[12];
+  static fromTranslationRotationScale(
+    v: [number, number, number],
+    q: [number, number, number, number],
+    s: [number, number, number],
+    out: Float32Array,
+    offset = 0
+  ): Float32Array {
+    return Mat4.fromRotationTranslationScale(q, v, s, out, offset);
+  }
 
-    // Right: row3 - row0
-    outPlanes[4] = vp[3] - vp[0];
-    outPlanes[5] = vp[7] - vp[4];
-    outPlanes[6] = vp[11] - vp[8];
-    outPlanes[7] = vp[15] - vp[12];
-
-    // Bottom: row3 + row1
-    outPlanes[8] = vp[3] + vp[1];
-    outPlanes[9] = vp[7] + vp[5];
-    outPlanes[10] = vp[11] + vp[9];
-    outPlanes[11] = vp[15] + vp[13];
-
-    // Top: row3 - row1
-    outPlanes[12] = vp[3] - vp[1];
-    outPlanes[13] = vp[7] - vp[5];
-    outPlanes[14] = vp[11] - vp[9];
-    outPlanes[15] = vp[15] - vp[13];
-
-    // Near: row2 (WebGPU near plane is 0 <= z <= w)
-    outPlanes[16] = vp[2];
-    outPlanes[17] = vp[6];
-    outPlanes[18] = vp[10];
-    outPlanes[19] = vp[14];
-
-    // Far: row3 - row2
-    outPlanes[20] = vp[3] - vp[2];
-    outPlanes[21] = vp[7] - vp[6];
-    outPlanes[22] = vp[11] - vp[10];
-    outPlanes[23] = vp[15] - vp[14];
-
-    // Normalize planes
-    for (let i = 0; i < 6; i++) {
-      const idx = i * 4;
-      const len = Math.hypot(outPlanes[idx], outPlanes[idx + 1], outPlanes[idx + 2]);
-      if (len > 0.00001) {
-        const inv = 1.0 / len;
-        outPlanes[idx] *= inv;
-        outPlanes[idx + 1] *= inv;
-        outPlanes[idx + 2] *= inv;
-        outPlanes[idx + 3] *= inv;
-      }
-    }
+  static ortho(
+    left: number,
+    right: number,
+    bottom: number,
+    top: number,
+    near: number,
+    far: number,
+    out: Float32Array
+  ): Float32Array {
+    const lr = 1 / (left - right);
+    const bt = 1 / (bottom - top);
+    const nf = 1 / (near - far);
+    out[0] = -2 * lr;
+    out[1] = 0;
+    out[2] = 0;
+    out[3] = 0;
+    out[4] = 0;
+    out[5] = -2 * bt;
+    out[6] = 0;
+    out[7] = 0;
+    out[8] = 0;
+    out[9] = 0;
+    out[10] = nf;
+    out[11] = 0;
+    out[12] = (left + right) * lr;
+    out[13] = (top + bottom) * bt;
+    out[14] = near * nf;
+    out[15] = 1;
+    return out;
   }
 }

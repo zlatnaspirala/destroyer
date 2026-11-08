@@ -1,278 +1,140 @@
 /**
- * Destroyer Engine - Viewport HUD & Interactive Controls
+ * Destroyer Engine - Clean Viewport HUD & Telemetry
+ * Removed on-screen Animation and Load GLB buttons.
+ * GPU Culling, Post Processing, and Shaders are moved to the System tab.
  */
 
-import React, { useRef } from 'react';
+import React, { useState } from 'react';
 import {
-  Eye,
-  Camera as CameraIcon,
-  Play,
-  RotateCw,
-  Box,
-  Layers,
-  Upload,
   Activity,
-  Sliders,
-  Sparkles
+  Box,
+  Camera as CameraIcon,
+  ChevronDown,
+  ChevronUp,
+  Cpu,
+  Layers,
+  Minimize2,
+  Maximize2,
+  Sparkles,
+  Zap,
 } from 'lucide-react';
 import { EngineStats } from '../engine/core/Types';
 
 interface ViewportHUDProps {
   stats: EngineStats;
-  currentPreset: string;
-  onSelectPreset: (preset: 'massive_indirect' | 'skinned_mech' | 'morph_core' | 'wave_terrain') => void;
-  debugMode: number;
-  onSelectDebugMode: (mode: number) => void;
-  cullingEnabled: boolean;
-  onToggleCulling: () => void;
-  subgroupsEnabled: boolean;
-  onToggleSubgroups: () => void;
-  autoOrbit: boolean;
-  onToggleAutoOrbit: () => void;
-  frustumFrozen: boolean;
-  onToggleFrustumFreeze: () => void;
-  onLoadCustomGLB: (buffer: ArrayBuffer) => void;
-  onOpenAnimationStudio: () => void;
+  cameraMode: 'ORBIT' | 'FPS' | 'FLY';
+  onCameraModeChange: (mode: 'ORBIT' | 'FPS' | 'FLY') => void;
+  onResetCamera: () => void;
 }
 
 export const ViewportHUD: React.FC<ViewportHUDProps> = ({
   stats,
-  currentPreset,
-  onSelectPreset,
-  debugMode,
-  onSelectDebugMode,
-  cullingEnabled,
-  onToggleCulling,
-  subgroupsEnabled,
-  onToggleSubgroups,
-  autoOrbit,
-  onToggleAutoOrbit,
-  frustumFrozen,
-  onToggleFrustumFreeze,
-  onLoadCustomGLB,
-  onOpenAnimationStudio,
+  cameraMode,
+  onCameraModeChange,
+  onResetCamera,
 }) => {
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onload = () => {
-        if (reader.result instanceof ArrayBuffer) {
-          onLoadCustomGLB(reader.result);
-        }
-      };
-      reader.readAsArrayBuffer(file);
-    }
-  };
+  const [isMinimized, setIsMinimized] = useState(false);
 
   return (
-    <div className="absolute inset-0 pointer-events-none p-4 flex flex-col justify-between select-none">
-      {/* Top Floating Controls Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-3 pointer-events-auto">
-        {/* Preset Selector */}
-        <div className="flex items-center gap-1 p-1 bg-zinc-950/80 backdrop-blur-md border border-zinc-800 rounded-lg shadow-xl">
+    <div className="absolute top-2 left-2 z-20 pointer-events-none flex flex-col gap-2 font-mono select-none">
+      {/* Telemetry Card */}
+      <div className="bg-zinc-950/85 backdrop-blur-md border border-zinc-800/80 rounded-lg p-2 sm:p-2.5 shadow-2xl pointer-events-auto transition-all text-xs text-zinc-300 w-52 sm:w-60">
+        <div className="flex items-center justify-between border-b border-zinc-800/70 pb-1.5 mb-1.5">
+          <div className="flex items-center gap-1.5 text-cyan-400 font-semibold text-[11px] sm:text-xs">
+            <Activity className="w-3.5 h-3.5 text-cyan-400 animate-pulse" />
+            <span>GPU TELEMETRY</span>
+          </div>
           <button
-            onClick={() => onSelectPreset('massive_indirect')}
-            className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
-              currentPreset === 'massive_indirect'
-                ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
-                : 'text-zinc-400 hover:text-zinc-200'
-            }`}
+            onClick={() => setIsMinimized(!isMinimized)}
+            className="p-0.5 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 rounded transition-colors"
+            title={isMinimized ? 'Expand HUD' : 'Minimize HUD'}
           >
-            10k Indirect Draws
-          </button>
-          <button
-            onClick={() => onSelectPreset('skinned_mech')}
-            className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
-              currentPreset === 'skinned_mech'
-                ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
-                : 'text-zinc-400 hover:text-zinc-200'
-            }`}
-          >
-            Skeletal Mech
-          </button>
-          <button
-            onClick={() => onSelectPreset('morph_core')}
-            className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
-              currentPreset === 'morph_core'
-                ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
-                : 'text-zinc-400 hover:text-zinc-200'
-            }`}
-          >
-            Morphing Core
-          </button>
-          <button
-            onClick={() => onSelectPreset('wave_terrain')}
-            className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
-              currentPreset === 'wave_terrain'
-                ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
-                : 'text-zinc-400 hover:text-zinc-200'
-            }`}
-          >
-            Harmonic Grid
+            {isMinimized ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronUp className="w-3.5 h-3.5" />}
           </button>
         </div>
 
-        {/* Action Buttons: Animation Studio & Custom GLB */}
-        <div className="flex items-center gap-2">
-          <button
-            onClick={onOpenAnimationStudio}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-950/80 backdrop-blur-md border border-zinc-700/70 hover:border-cyan-500/60 text-zinc-200 hover:text-cyan-300 text-xs font-medium rounded-lg transition-all shadow-lg"
-          >
-            <Sliders className="w-3.5 h-3.5 text-cyan-400" />
-            <span>Vertex Animation</span>
-          </button>
-
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-950/80 backdrop-blur-md border border-zinc-700/70 hover:border-emerald-500/60 text-zinc-200 hover:text-emerald-300 text-xs font-medium rounded-lg transition-all shadow-lg"
-          >
-            <Upload className="w-3.5 h-3.5 text-emerald-400" />
-            <span>Load .GLB</span>
-          </button>
-          <input
-            type="file"
-            ref={fileInputRef}
-            onChange={handleFileChange}
-            accept=".glb"
-            className="hidden"
-          />
-        </div>
-      </div>
-
-      {/* Center Left: Real-time Telemetry Dashboard */}
-      <div className="self-start mt-2 bg-zinc-950/85 backdrop-blur-md border border-zinc-800/80 rounded-xl p-3.5 text-xs font-mono shadow-2xl pointer-events-auto max-w-xs">
-        <div className="flex items-center justify-between pb-2 border-b border-zinc-800 mb-2.5">
-          <div className="flex items-center gap-2 font-['Chakra_Petch'] font-semibold text-zinc-200 tracking-wide">
-            <Activity className="w-3.5 h-3.5 text-cyan-400" />
-            GPU CORE TELEMETRY
-          </div>
-          <span className="text-emerald-400 font-bold tabular-nums">
-            {stats.fps > 0 ? `${stats.fps} FPS` : '60 FPS'}
-          </span>
-        </div>
-
-        <div className="space-y-1.5 text-zinc-400">
-          <div className="flex justify-between">
-            <span>Frame Time:</span>
-            <span className="text-zinc-200 tabular-nums">{stats.frameTimeMs} ms</span>
-          </div>
-          <div className="flex justify-between">
-            <span>Total Entities:</span>
-            <span className="text-zinc-200 tabular-nums">{stats.totalInstances.toLocaleString()}</span>
-          </div>
-          <div className="flex justify-between">
-            <span>Visible (Rendered):</span>
-            <span className="text-cyan-400 font-semibold tabular-nums">
-              {(stats.visibleInstances || stats.totalInstances).toLocaleString()}
-            </span>
-          </div>
-          <div className="flex justify-between">
-            <span>Culled (GPU Compaction):</span>
-            <span className="text-amber-400 tabular-nums">
-              {cullingEnabled ? stats.culledInstances.toLocaleString() : '0 (Disabled)'}
-            </span>
-          </div>
-          <div className="flex justify-between">
-            <span>Indirect Draw Calls:</span>
-            <span className="text-zinc-200 tabular-nums">{stats.indirectDrawCommands}</span>
-          </div>
-          <div className="flex justify-between">
-            <span>Total Triangles:</span>
-            <span className="text-zinc-200 tabular-nums">{stats.totalTriangles.toLocaleString()}</span>
-          </div>
-          <div className="flex justify-between">
-            <span>GPU Subgroups:</span>
-            <span className={stats.subgroupsActive ? 'text-emerald-400 font-semibold' : 'text-zinc-500'}>
-              {stats.subgroupsActive ? 'Active (SIMD Warp)' : (stats.subgroupsSupported ? 'Supported' : 'Standard Fallback')}
-            </span>
-          </div>
-        </div>
-      </div>
-
-      {/* Bottom Bar: Engine Toggles & Debug Shader Modes */}
-      <div className="flex flex-wrap items-center justify-between gap-3 pointer-events-auto">
-        {/* Debug Shading Mode Selector */}
-        <div className="flex items-center gap-1 p-1 bg-zinc-950/85 backdrop-blur-md border border-zinc-800 rounded-lg shadow-xl">
-          <span className="text-zinc-500 text-[10px] uppercase font-mono px-2">Shader:</span>
-          {[
-            { id: 0, label: 'Lit PBR' },
-            { id: 1, label: 'Normals' },
-            { id: 2, label: 'UVs' },
-            { id: 3, label: 'Skinning' },
-            { id: 4, label: 'Entity ID' },
-          ].map((mode) => (
-            <button
-              key={mode.id}
-              onClick={() => onSelectDebugMode(mode.id)}
-              className={`px-2.5 py-1 text-xs rounded transition-colors ${
-                debugMode === mode.id
-                  ? 'bg-zinc-800 text-cyan-300 font-medium'
-                  : 'text-zinc-400 hover:text-zinc-200'
+        {/* FPS & Performance Banner */}
+        <div className="flex items-center justify-between bg-zinc-900/90 rounded px-2 py-1 mb-1.5 border border-zinc-800/60">
+          <div className="flex items-baseline gap-1">
+            <span
+              className={`text-base sm:text-lg font-bold ${
+                stats.fps >= 55 ? 'text-emerald-400' : stats.fps >= 30 ? 'text-amber-400' : 'text-rose-400'
               }`}
             >
-              {mode.label}
-            </button>
-          ))}
+              {stats.fps}
+            </span>
+            <span className="text-[10px] text-zinc-400">FPS</span>
+          </div>
+          <div className="text-[10px] text-zinc-400 font-mono">
+            {stats.frameTimeMs} <span className="text-zinc-500">ms</span>
+          </div>
         </div>
 
-        {/* Engine Pipeline Toggles */}
-        <div className="flex items-center gap-2">
-          {/* Culling Toggle */}
-          <button
-            onClick={onToggleCulling}
-            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border transition-all ${
-              cullingEnabled
-                ? 'bg-cyan-500/15 border-cyan-500/50 text-cyan-300'
-                : 'bg-zinc-950/80 border-zinc-800 text-zinc-400'
-            }`}
-          >
-            <Eye className="w-3.5 h-3.5" />
-            <span>GPU Culling: {cullingEnabled ? 'ON' : 'OFF'}</span>
-          </button>
+        {!isMinimized && (
+          <div className="space-y-1 text-[11px]">
+            <div className="flex justify-between items-center text-zinc-400">
+              <span className="flex items-center gap-1">
+                <Box className="w-3 h-3 text-cyan-400" /> Total Instances
+              </span>
+              <span className="font-semibold text-zinc-200">{stats.totalInstances.toLocaleString()}</span>
+            </div>
 
-          {/* Subgroups Toggle */}
-          <button
-            onClick={onToggleSubgroups}
-            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border transition-all ${
-              subgroupsEnabled
-                ? 'bg-emerald-500/15 border-emerald-500/50 text-emerald-300'
-                : 'bg-zinc-950/80 border-zinc-800 text-zinc-400'
-            }`}
-          >
-            <Sparkles className="w-3.5 h-3.5" />
-            <span>Subgroups: {subgroupsEnabled ? 'ON' : 'OFF'}</span>
-          </button>
+            <div className="flex justify-between items-center text-zinc-400">
+              <span className="flex items-center gap-1">
+                <Layers className="w-3 h-3 text-emerald-400" /> Visible / Culled
+              </span>
+              <span className="font-semibold text-zinc-200">
+                <span className="text-emerald-400">{stats.visibleInstances.toLocaleString()}</span>
+                <span className="text-zinc-600"> / </span>
+                <span className="text-rose-400">{stats.culledInstances.toLocaleString()}</span>
+              </span>
+            </div>
 
-          {/* Freeze Frustum Culling Visualizer */}
-          <button
-            onClick={onToggleFrustumFreeze}
-            title="Lock camera culling planes to inspect culled geometry"
-            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border transition-all ${
-              frustumFrozen
-                ? 'bg-amber-500/20 border-amber-500/60 text-amber-300'
-                : 'bg-zinc-950/80 border-zinc-800 text-zinc-400'
-            }`}
-          >
-            <CameraIcon className="w-3.5 h-3.5" />
-            <span>{frustumFrozen ? 'Frustum Locked' : 'Freeze Frustum'}</span>
-          </button>
+            <div className="flex justify-between items-center text-zinc-400">
+              <span className="flex items-center gap-1">
+                <Cpu className="w-3 h-3 text-indigo-400" /> Triangles
+              </span>
+              <span className="font-semibold text-zinc-200">{stats.totalTriangles.toLocaleString()}</span>
+            </div>
 
-          {/* Auto Orbit */}
-          <button
-            onClick={onToggleAutoOrbit}
-            className={`p-1.5 text-xs rounded-lg border transition-all ${
-              autoOrbit
-                ? 'bg-cyan-500/15 border-cyan-500/50 text-cyan-300'
-                : 'bg-zinc-950/80 border-zinc-800 text-zinc-400'
-            }`}
-            title="Toggle Auto Orbit"
-          >
-            <RotateCw className={`w-4 h-4 ${autoOrbit ? 'animate-spin' : ''}`} />
-          </button>
-        </div>
+            <div className="flex justify-between items-center text-zinc-400 pt-0.5 border-t border-zinc-800/60">
+              <span className="flex items-center gap-1">
+                <Zap className="w-3 h-3 text-amber-400" /> Subgroups
+              </span>
+              <span
+                className={`px-1 rounded text-[9px] font-bold ${
+                  stats.subgroupsActive
+                    ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+                    : 'bg-zinc-800 text-zinc-400'
+                }`}
+              >
+                {stats.subgroupsActive ? 'ENABLED' : 'OFF'}
+              </span>
+            </div>
+
+            {/* Quick Camera Mode Switcher */}
+            <div className="pt-1.5 border-t border-zinc-800/60 flex items-center justify-between">
+              <span className="text-[10px] text-zinc-400 flex items-center gap-1">
+                <CameraIcon className="w-3 h-3 text-cyan-400" /> Cam Mode
+              </span>
+              <div className="flex items-center gap-1">
+                {(['ORBIT', 'FLY'] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    onClick={() => onCameraModeChange(mode)}
+                    className={`px-1.5 py-0.5 text-[9px] rounded font-mono uppercase transition-colors ${
+                      cameraMode === mode
+                        ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 font-bold'
+                        : 'bg-zinc-900 text-zinc-400 hover:text-zinc-200'
+                    }`}
+                  >
+                    {mode}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
