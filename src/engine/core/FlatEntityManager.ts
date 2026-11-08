@@ -415,6 +415,21 @@ export class FlatEntityManager {
     return id;
   }
 
+  updateEntityMatrix(id: number, worldMatrix: Float32Array, centerPos?: [number, number, number], boundingRadius = 2.5): void {
+    if (id < 0 || id >= this.nextEntityId) return;
+    const eOffset = id * FlatEntityManager.ENTITY_STRIDE_FLOATS;
+    for (let i = 0; i < 16; i++) {
+      this.entityFloatView[eOffset + i] = worldMatrix[i];
+    }
+    const posX = centerPos ? centerPos[0] : worldMatrix[12];
+    const posY = centerPos ? centerPos[1] : worldMatrix[13];
+    const posZ = centerPos ? centerPos[2] : worldMatrix[14];
+    this.entityFloatView[eOffset + 16] = posX;
+    this.entityFloatView[eOffset + 17] = posY;
+    this.entityFloatView[eOffset + 18] = posZ;
+    this.entityFloatView[eOffset + 19] = boundingRadius;
+  }
+
   deleteSingleEntity(id: number): void {
     if (id < this.activeEntityCount) {
       const eOffset = id * FlatEntityManager.ENTITY_STRIDE_FLOATS;

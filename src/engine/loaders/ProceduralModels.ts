@@ -627,4 +627,473 @@ export class ProceduralModels {
       }
     };
   }
+
+  /**
+   * Generates clean 4800x4800 Anarchy GTA City navigation ground plane (Asphalt Street Gray)
+   */
+  static createAnarchyCityGround(size = 4800): ParsedGLBPrimitive {
+    const halfSize = size * 0.5;
+
+    const positions = new Float32Array([
+      -halfSize, 0, -halfSize,
+       halfSize, 0, -halfSize,
+       halfSize, 0,  halfSize,
+      -halfSize, 0,  halfSize,
+    ]);
+
+    const normals = new Float32Array([
+      0, 1, 0,
+      0, 1, 0,
+      0, 1, 0,
+      0, 1, 0,
+    ]);
+
+    const uvs = new Float32Array([
+      0, 0,
+      80, 0,
+      80, 80,
+      0, 80,
+    ]);
+
+    const indices = new Uint32Array([
+      0, 1, 2,
+      0, 2, 3,
+    ]);
+
+    return {
+      name: 'Anarchy_City_NavMesh',
+      positions,
+      normals,
+      uvs,
+      indices,
+      boundingRadius: halfSize * 1.414,
+      material: {
+        baseColor: [0.18, 0.19, 0.22, 1.0], // Noise street gray
+        emissiveColor: [0, 0, 0, 0],
+        roughness: 0.82,
+        metallic: 0.18,
+        ao: 1.0,
+        alphaCutoff: 0.5,
+      },
+    };
+  }
+
+  /**
+   * Generates a High-Rise Skyscraper / Building Block
+   */
+  static createSkyscraperBlock(width = 22, height = 60, depth = 22): ParsedGLBPrimitive {
+    const hw = width * 0.5;
+    const hh = height * 0.5;
+    const hd = depth * 0.5;
+
+    const positions = new Float32Array([
+      // Front
+      -hw, 0,  hd,   hw, 0,  hd,   hw, height,  hd,  -hw, height,  hd,
+      // Back
+      -hw, 0, -hd,  -hw, height, -hd,   hw, height, -hd,   hw, 0, -hd,
+      // Top
+      -hw, height, -hd,  -hw, height,  hd,   hw, height,  hd,   hw, height, -hd,
+      // Right
+       hw, 0, -hd,   hw, height, -hd,   hw, height,  hd,   hw, 0,  hd,
+      // Left
+      -hw, 0, -hd,  -hw, 0,  hd,  -hw, height,  hd,  -hw, height, -hd,
+    ]);
+
+    const normals = new Float32Array([
+      0, 0, 1,  0, 0, 1,  0, 0, 1,  0, 0, 1,
+      0, 0, -1, 0, 0, -1, 0, 0, -1, 0, 0, -1,
+      0, 1, 0,  0, 1, 0,  0, 1, 0,  0, 1, 0,
+      1, 0, 0,  1, 0, 0,  1, 0, 0,  1, 0, 0,
+      -1, 0, 0, -1, 0, 0, -1, 0, 0, -1, 0, 0,
+    ]);
+
+    const uvs = new Float32Array([
+      0, 0, 4, 0, 4, 12, 0, 12,
+      0, 0, 4, 0, 4, 12, 0, 12,
+      0, 0, 2, 0, 2, 2, 0, 2,
+      0, 0, 4, 0, 4, 12, 0, 12,
+      0, 0, 4, 0, 4, 12, 0, 12,
+    ]);
+
+    const indices = new Uint32Array([
+      0, 1, 2,  0, 2, 3,
+      4, 5, 6,  4, 6, 7,
+      8, 9, 10, 8, 10, 11,
+      12, 13, 14, 12, 14, 15,
+      16, 17, 18, 16, 18, 19,
+    ]);
+
+    return {
+      name: 'City_Skyscraper_Block',
+      positions,
+      normals,
+      uvs,
+      indices,
+      boundingRadius: Math.hypot(hw, hh, hd),
+      material: {
+        baseColor: [0.14, 0.16, 0.22, 1.0],
+        emissiveColor: [0.02, 0.04, 0.08, 0.5],
+        roughness: 0.25,
+        metallic: 0.8,
+        ao: 1.0,
+        alphaCutoff: 0.5,
+      },
+    };
+  }
+
+  /**
+   * Generates GTA Classic Muscle Car chassis geometry
+   */
+  static createMuscleCar(): ParsedGLBPrimitive {
+    const positions: number[] = [];
+    const normals: number[] = [];
+    const uvs: number[] = [];
+    const indices: number[] = [];
+
+    const addBox = (
+      center: [number, number, number],
+      size: [number, number, number],
+      normOverride?: [number, number, number]
+    ) => {
+      const baseIdx = positions.length / 3;
+      const hx = size[0] * 0.5, hy = size[1] * 0.5, hz = size[2] * 0.5;
+
+      const boxVerts = [
+        -hx, -hy,  hz,   hx, -hy,  hz,   hx,  hy,  hz,  -hx,  hy,  hz,
+        -hx, -hy, -hz,  -hx,  hy, -hz,   hx,  hy, -hz,   hx, -hy, -hz,
+        -hx,  hy, -hz,  -hx,  hy,  hz,   hx,  hy,  hz,   hx,  hy, -hz,
+        -hx, -hy, -hz,   hx, -hy, -hz,   hx, -hy,  hz,  -hx, -hy,  hz,
+         hx, -hy, -hz,   hx,  hy, -hz,   hx,  hy,  hz,   hx, -hy,  hz,
+        -hx, -hy, -hz,  -hx, -hy,  hz,  -hx,  hy,  hz,  -hx,  hy, -hz,
+      ];
+
+      for (let i = 0; i < boxVerts.length; i += 3) {
+        positions.push(boxVerts[i] + center[0], boxVerts[i + 1] + center[1], boxVerts[i + 2] + center[2]);
+        normals.push(normOverride ? normOverride[0] : 0, normOverride ? normOverride[1] : 1, normOverride ? normOverride[2] : 0);
+        uvs.push(0, 0);
+      }
+
+      for (let face = 0; face < 6; face++) {
+        const offset = baseIdx + face * 4;
+        indices.push(offset, offset + 1, offset + 2, offset, offset + 2, offset + 3);
+      }
+    };
+
+    // Main Body Chassis
+    addBox([0, 0.45, 0], [1.9, 0.5, 4.2]);
+    // Cabin Hood / Roof
+    addBox([0, 0.9, -0.2], [1.6, 0.45, 2.1]);
+    // Wheels (4 corner wheels)
+    addBox([-0.95, 0.3, 1.3], [0.3, 0.6, 0.6]);
+    addBox([ 0.95, 0.3, 1.3], [0.3, 0.6, 0.6]);
+    addBox([-0.95, 0.3, -1.3], [0.3, 0.6, 0.6]);
+    addBox([ 0.95, 0.3, -1.3], [0.3, 0.6, 0.6]);
+
+    return {
+      name: 'GTA_Muscle_Car',
+      positions: new Float32Array(positions),
+      normals: new Float32Array(normals),
+      uvs: new Float32Array(uvs),
+      indices: new Uint32Array(indices),
+      boundingRadius: 2.5,
+      material: {
+        baseColor: [0.85, 0.18, 0.12, 1.0], // Crimson sport finish
+        emissiveColor: [0, 0, 0, 0],
+        roughness: 0.18,
+        metallic: 0.88,
+        ao: 1.0,
+        alphaCutoff: 0.5,
+      },
+    };
+  }
+
+  /**
+   * Generates a 4-Joint Skeletal Pedestrian Character with Walk Cycle Clip
+   */
+  static createPedestrianHumanoid(): { primitive: ParsedGLBPrimitive; joints: SkeletonJoint[]; clip: AnimationClip } {
+    const vertices: number[] = [];
+    const normals: number[] = [];
+    const uvs: number[] = [];
+    const indices: number[] = [];
+    const jointsData: number[] = [];
+    const weightsData: number[] = [];
+
+    const addBox = (
+      center: [number, number, number],
+      size: [number, number, number],
+      jointIdx: number
+    ) => {
+      const baseIdx = vertices.length / 3;
+      const hx = size[0] * 0.5, hy = size[1] * 0.5, hz = size[2] * 0.5;
+
+      const boxVerts = [
+        -hx, -hy,  hz,   hx, -hy,  hz,   hx,  hy,  hz,  -hx,  hy,  hz,
+        -hx, -hy, -hz,  -hx,  hy, -hz,   hx,  hy, -hz,   hx, -hy, -hz,
+        -hx,  hy, -hz,  -hx,  hy,  hz,   hx,  hy,  hz,   hx,  hy, -hz,
+        -hx, -hy, -hz,   hx, -hy, -hz,   hx, -hy,  hz,  -hx, -hy,  hz,
+         hx, -hy, -hz,   hx,  hy, -hz,   hx,  hy,  hz,   hx, -hy,  hz,
+        -hx, -hy, -hz,  -hx, -hy,  hz,  -hx,  hy,  hz,  -hx,  hy, -hz,
+      ];
+
+      for (let i = 0; i < boxVerts.length; i += 3) {
+        vertices.push(boxVerts[i] + center[0], boxVerts[i + 1] + center[1], boxVerts[i + 2] + center[2]);
+        normals.push(0, 1, 0);
+        uvs.push(0, 0);
+        jointsData.push(jointIdx, 0, 0, 0);
+        weightsData.push(1.0, 0.0, 0.0, 0.0);
+      }
+
+      for (let face = 0; face < 6; face++) {
+        const offset = baseIdx + face * 4;
+        indices.push(offset, offset + 1, offset + 2, offset, offset + 2, offset + 3);
+      }
+    };
+
+    // Joint 0: Legs
+    addBox([-0.2, 0.45, 0], [0.22, 0.9, 0.25], 0); // Left Leg
+    addBox([ 0.2, 0.45, 0], [0.22, 0.9, 0.25], 0); // Right Leg
+
+    // Joint 1: Torso & Head
+    addBox([0, 1.25, 0], [0.55, 0.7, 0.35], 1); // Torso
+    addBox([0, 1.75, 0], [0.35, 0.35, 0.35], 1); // Head
+
+    // Joint 2: Left Arm
+    addBox([-0.42, 1.25, 0], [0.18, 0.65, 0.2], 2);
+
+    // Joint 3: Right Arm
+    addBox([0.42, 1.25, 0], [0.18, 0.65, 0.2], 3);
+
+    const idMat = () => new Float32Array([1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  0, 0, 0, 1]);
+
+    const joints: SkeletonJoint[] = [
+      { name: 'Pedestrian_Legs', parentIndex: -1, inverseBindMatrix: idMat(), localMatrix: idMat(), worldMatrix: idMat() },
+      { name: 'Pedestrian_Torso', parentIndex: 0, inverseBindMatrix: new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,-1.2,0,1]), localMatrix: idMat(), worldMatrix: idMat() },
+      { name: 'Pedestrian_LeftArm', parentIndex: 1, inverseBindMatrix: new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0.4,-1.25,0,1]), localMatrix: idMat(), worldMatrix: idMat() },
+      { name: 'Pedestrian_RightArm', parentIndex: 1, inverseBindMatrix: new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, -0.4,-1.25,0,1]), localMatrix: idMat(), worldMatrix: idMat() },
+    ];
+
+    const clip: AnimationClip = {
+      name: 'Pedestrian_Walk_Cycle',
+      duration: 1.0,
+      channels: [
+        {
+          targetNode: 0, // Legs stride
+          path: 'rotation',
+          interpolation: 'LINEAR',
+          times: new Float32Array([0, 0.25, 0.5, 0.75, 1.0]),
+          values: new Float32Array([
+            0, 0, 0, 1,
+            0.15, 0, 0, 0.98,
+            0, 0, 0, 1,
+            -0.15, 0, 0, 0.98,
+            0, 0, 0, 1,
+          ]),
+        },
+        {
+          targetNode: 2, // Left Arm swing
+          path: 'rotation',
+          interpolation: 'LINEAR',
+          times: new Float32Array([0, 0.5, 1.0]),
+          values: new Float32Array([
+            -0.2, 0, 0, 0.98,
+            0.2, 0, 0, 0.98,
+            -0.2, 0, 0, 0.98,
+          ]),
+        },
+        {
+          targetNode: 3, // Right Arm swing
+          path: 'rotation',
+          interpolation: 'LINEAR',
+          times: new Float32Array([0, 0.5, 1.0]),
+          values: new Float32Array([
+            0.2, 0, 0, 0.98,
+            -0.2, 0, 0, 0.98,
+            0.2, 0, 0, 0.98,
+          ]),
+        },
+      ],
+    };
+
+    return {
+      primitive: {
+        name: 'Pedestrian_Humanoid',
+        positions: new Float32Array(vertices),
+        normals: new Float32Array(normals),
+        uvs: new Float32Array(uvs),
+        indices: new Uint32Array(indices),
+        joints: new Uint32Array(jointsData),
+        weights: new Float32Array(weightsData),
+        boundingRadius: 1.8,
+      },
+      joints,
+      clip,
+    };
+  }
+
+  /**
+   * Generates a clean single-mesh 3D Player Character with cyan facing visor
+   */
+  static createSimpleHumanoidPlayer(): { primitive: ParsedGLBPrimitive; joints: SkeletonJoint[]; clip: AnimationClip } {
+    const vertices: number[] = [];
+    const normals: number[] = [];
+    const uvs: number[] = [];
+    const indices: number[] = [];
+    const jointsData: number[] = [];
+    const weightsData: number[] = [];
+
+    const addBox = (
+      center: [number, number, number],
+      size: [number, number, number],
+      jointIdx: number
+    ) => {
+      const hx = size[0] * 0.5, hy = size[1] * 0.5, hz = size[2] * 0.5;
+      const faces = [
+        // Front
+        { v: [-hx,-hy, hz,  hx,-hy, hz,  hx, hy, hz, -hx, hy, hz], n: [0,0,1] },
+        // Back
+        { v: [ hx,-hy,-hz, -hx,-hy,-hz, -hx, hy,-hz,  hx, hy,-hz], n: [0,0,-1] },
+        // Top
+        { v: [-hx, hy, hz,  hx, hy, hz,  hx, hy,-hz, -hx, hy,-hz], n: [0,1,0] },
+        // Bottom
+        { v: [-hx,-hy,-hz,  hx,-hy,-hz,  hx,-hy, hz, -hx,-hy, hz], n: [0,-1,0] },
+        // Right
+        { v: [ hx,-hy, hz,  hx,-hy,-hz,  hx, hy,-hz,  hx, hy, hz], n: [1,0,0] },
+        // Left
+        { v: [-hx,-hy,-hz, -hx,-hy, hz, -hx, hy, hz, -hx, hy,-hz], n: [-1,0,0] },
+      ];
+
+      for (const face of faces) {
+        const faceBase = vertices.length / 3;
+        for (let i = 0; i < 12; i += 3) {
+          vertices.push(face.v[i] + center[0], face.v[i+1] + center[1], face.v[i+2] + center[2]);
+          normals.push(face.n[0], face.n[1], face.n[2]);
+          uvs.push(i === 0 || i === 9 ? 0 : 1, i < 6 ? 0 : 1);
+          jointsData.push(jointIdx, 0, 0, 0);
+          weightsData.push(1.0, 0.0, 0.0, 0.0);
+        }
+        indices.push(faceBase, faceBase + 1, faceBase + 2, faceBase, faceBase + 2, faceBase + 3);
+      }
+    };
+
+    const addSphere = (
+      center: [number, number, number],
+      radius: number,
+      rings: number,
+      sectors: number,
+      jointIdx: number
+    ) => {
+      const startIdx = vertices.length / 3;
+      const R = 1 / (rings - 1);
+      const S = 1 / (sectors - 1);
+
+      for (let r = 0; r < rings; r++) {
+        for (let s = 0; s < sectors; s++) {
+          const phi = r * R * Math.PI;
+          const theta = s * S * 2 * Math.PI;
+          const y = Math.cos(phi);
+          const x = Math.sin(phi) * Math.sin(theta);
+          const z = Math.sin(phi) * Math.cos(theta);
+
+          vertices.push(x * radius + center[0], y * radius + center[1], z * radius + center[2]);
+          normals.push(x, y, z);
+          uvs.push(s * S, r * R);
+          jointsData.push(jointIdx, 0, 0, 0);
+          weightsData.push(1.0, 0.0, 0.0, 0.0);
+        }
+      }
+
+      for (let r = 0; r < rings - 1; r++) {
+        for (let s = 0; s < sectors - 1; s++) {
+          const a = startIdx + (r * sectors + s);
+          const b = startIdx + (r * sectors + (s + 1));
+          const c = startIdx + ((r + 1) * sectors + (s + 1));
+          const d = startIdx + ((r + 1) * sectors + s);
+
+          indices.push(a, b, c, a, c, d);
+        }
+      }
+    };
+
+    // Joint 0: Legs
+    addBox([-0.14, 0.38, 0], [0.18, 0.76, 0.18], 0); // Left Leg
+    addBox([ 0.14, 0.38, 0], [0.18, 0.76, 0.18], 0); // Right Leg
+
+    // Joint 1: Torso, Head & Cyan Visor
+    addBox([0, 1.08, 0], [0.46, 0.62, 0.28], 1); // Torso Chest
+    addSphere([0, 1.62, 0], 0.18, 12, 16, 1); // Head Sphere
+    addBox([0, 1.65, 0.14], [0.22, 0.08, 0.06], 1); // Cyan Facing Visor
+
+    // Joint 2: Left Arm
+    addBox([-0.32, 1.08, 0], [0.14, 0.58, 0.16], 2);
+
+    // Joint 3: Right Arm
+    addBox([0.32, 1.08, 0], [0.14, 0.58, 0.16], 3);
+
+    const idMat = () => new Float32Array([1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  0, 0, 0, 1]);
+
+    const joints: SkeletonJoint[] = [
+      { name: 'Player_Legs', parentIndex: -1, inverseBindMatrix: idMat(), localMatrix: idMat(), worldMatrix: idMat() },
+      { name: 'Player_TorsoHead', parentIndex: 0, inverseBindMatrix: new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,-0.76,0,1]), localMatrix: idMat(), worldMatrix: idMat() },
+      { name: 'Player_LeftArm', parentIndex: 1, inverseBindMatrix: new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0.32,-1.08,0,1]), localMatrix: idMat(), worldMatrix: idMat() },
+      { name: 'Player_RightArm', parentIndex: 1, inverseBindMatrix: new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, -0.32,-1.08,0,1]), localMatrix: idMat(), worldMatrix: idMat() },
+    ];
+
+    const clip: AnimationClip = {
+      name: 'Player_Walk_Cycle',
+      duration: 0.8,
+      channels: [
+        {
+          targetNode: 0,
+          path: 'rotation',
+          interpolation: 'LINEAR',
+          times: new Float32Array([0, 0.2, 0.4, 0.6, 0.8]),
+          values: new Float32Array([
+            0, 0, 0, 1,
+            0.22, 0, 0, 0.975,
+            0, 0, 0, 1,
+            -0.22, 0, 0, 0.975,
+            0, 0, 0, 1,
+          ]),
+        },
+        {
+          targetNode: 2,
+          path: 'rotation',
+          interpolation: 'LINEAR',
+          times: new Float32Array([0, 0.4, 0.8]),
+          values: new Float32Array([
+            -0.28, 0, 0, 0.96,
+            0.28, 0, 0, 0.96,
+            -0.28, 0, 0, 0.96,
+          ]),
+        },
+        {
+          targetNode: 3,
+          path: 'rotation',
+          interpolation: 'LINEAR',
+          times: new Float32Array([0, 0.4, 0.8]),
+          values: new Float32Array([
+            0.28, 0, 0, 0.96,
+            -0.28, 0, 0, 0.96,
+            0.28, 0, 0, 0.96,
+          ]),
+        },
+      ],
+    };
+
+    return {
+      primitive: {
+        name: 'Simple_Humanoid_Player',
+        positions: new Float32Array(vertices),
+        normals: new Float32Array(normals),
+        uvs: new Float32Array(uvs),
+        indices: new Uint32Array(indices),
+        joints: new Uint32Array(jointsData),
+        weights: new Float32Array(weightsData),
+        boundingRadius: 2.2,
+      },
+      joints,
+      clip,
+    };
+  }
 }
+

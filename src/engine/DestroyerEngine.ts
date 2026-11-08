@@ -8,6 +8,7 @@
 
 import { VertexAnimationController } from './animation/VertexAnimation';
 import { Camera } from './camera/Camera';
+import { PlayerController } from './controls/PlayerController';
 import { DeviceManager } from './core/Device';
 import { FlatEntityManager } from './core/FlatEntityManager';
 import { DestroyerConfig, EngineStats, FlatMaterial } from './core/Types';
@@ -30,6 +31,7 @@ export class DestroyerEngine {
   public camera: Camera;
   public renderer: IndirectRenderer;
   public animController: VertexAnimationController;
+  public playerController: PlayerController;
 
   private isRunning = false;
   private animationFrameId: number | null = null;
@@ -73,6 +75,7 @@ export class DestroyerEngine {
     this.camera = new Camera();
     this.renderer = new IndirectRenderer(this.deviceManager, this.entityManager, this.camera);
     this.animController = new VertexAnimationController(this.entityManager);
+    this.playerController = new PlayerController(this);
 
     // Listen to device loss
     this.deviceManager.onDeviceLost((info) => {
@@ -234,6 +237,9 @@ export class DestroyerEngine {
       // Camera update
       this.camera.update(deltaSec);
 
+      // Player controller update (3rd Person controls & camera follow)
+      this.playerController.update(deltaSec);
+
       // Vertex animation update
       this.animController.update(deltaSec);
 
@@ -306,7 +312,104 @@ export class DestroyerEngine {
     const device = this.deviceManager.getDevice();
     const mobile = isMobileBrowser();
 
-    if (preset === 'massive_indirect') {
+    if (preset === 'anarchy') {
+      // Preset 0: GTA Style Anarchy Open World (20x Expanded Asphalt Ground + Simple Player Character + WASD & Jump)
+      const navMesh = ProceduralModels.createAnarchyCityGround(4800);
+      const playerData = ProceduralModels.createSimpleHumanoidPlayer();
+
+      const asphaltMatId = this.entityManager.registerMaterial({
+        baseColor: [0.18, 0.19, 0.22, 1.0], // Dark noise asphalt gray
+        emissiveColor: [0, 0, 0, 0],
+        roughness: 0.82,
+        metallic: 0.18,
+        ao: 1.0,
+        alphaCutoff: 0.5,
+      });
+
+      const playerMatId = this.entityManager.registerMaterial({
+        baseColor: [0.15, 0.45, 0.75, 1.0], // Stylish Metallic Blue
+        emissiveColor: [0, 0, 0, 0],
+        roughness: 0.40,
+        metallic: 0.20,
+        ao: 1.0,
+        alphaCutoff: 0.5,
+      });
+
+      // Register Skeleton & Walk Clip
+      const jointOffset = this.animController.registerSkeleton(playerData.joints, playerData.clip);
+      this.animController.playClip(0);
+
+      // Upload Geometries to GPU
+      this.uploadGeometries([navMesh, playerData.primitive]);
+
+      const navVertCount = Math.floor(navMesh.positions.length / 3);
+      const playerVertCount = Math.floor(playerData.primitive.positions.length / 3);
+
+      const navMeshId = this.entityManager.registerMesh({
+        name: 'Anarchy_City_NavMesh',
+        firstIndex: 0,
+        indexCount: navMesh.indices.length,
+        baseVertex: 0,
+        vertexCount: navVertCount,
+        boundingRadius: navMesh.boundingRadius,
+        hasSkinning: false,
+        hasMorphTargets: false,
+        morphTargetCount: 0,
+      });
+
+      const playerMeshId = this.entityManager.registerMesh({
+        name: 'Simple_Humanoid_Player',
+        firstIndex: 0,
+        indexCount: playerData.primitive.indices.length,
+        baseVertex: 0,
+        vertexCount: playerVertCount,
+        boundingRadius: playerData.primitive.boundingRadius,
+        hasSkinning: true,
+        hasMorphTargets: false,
+        morphTargetCount: 0,
+      });
+
+      // Add Ground Entity
+      const groundMat = Mat4.create();
+      Mat4.fromTranslation([0, 0, 0], groundMat);
+      this.entityManager.addEntity({
+        meshId: navMeshId,
+        materialId: asphaltMatId,
+        worldMatrix: groundMat,
+        sphereCenter: [0, 0, 0, 3200.0],
+        flags: 1,
+        animOffset: 0,
+        name: 'Anarchy_City_NavMesh_Plane',
+      });
+
+      // Add Player Entity
+      const playerMat = Mat4.create();
+      Mat4.fromTranslation([0, 0, 0], playerMat);
+
+      const playerEntId = this.entityManager.addEntity({
+        meshId: playerMeshId,
+        materialId: playerMatId,
+        worldMatrix: playerMat,
+        sphereCenter: [0, 1.0, 0, 2.5],
+        flags: 1,
+        animOffset: jointOffset,
+        name: 'Player_Character',
+      });
+
+      // Configure Player Controller
+      this.playerController.position = [0, 0, 0];
+      this.playerController.cameraTheta = 0.0;
+      this.playerController.cameraPhi = 1.25;
+      this.playerController.rotationY = Math.PI;
+      this.playerController.entityId = playerEntId;
+
+      // Position 3rd Person Camera cleanly behind player
+      this.camera.target = [0, 1.4, 0];
+      this.camera.radius = 7.5;
+      this.camera.theta = 0.0;
+      this.camera.phi = 1.25;
+      this.camera.updatePositionFromSpherical();
+    } else if (preset === 'massive_indirect') {
       // Preset 1: Indirect Instances (Sci-Fi Mech Battlefield on Reflective Arena)
       const countSide = mobile ? 8 : 60;
       const spacing = 4.2;

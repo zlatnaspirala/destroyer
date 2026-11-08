@@ -43,6 +43,7 @@ export const Navigation: React.FC<NavigationProps> = ({
   subgroupsActive = false,
 }) => {
   const presets = [
+    { id: 'anarchy', label: 'Anarchy (GTA City Grid)' },
     { id: 'massive_indirect', label: '10,000 Mechs (Indirect)' },
     { id: 'skinned_mech', label: 'Skinned Mechs (Rig)' },
     { id: 'morph_core', label: 'Quantum Core (Morph)' },

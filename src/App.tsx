@@ -28,7 +28,7 @@ export default function App() {
   const [showRightPanel, setShowRightPanel] = useState<boolean>(() => !isMobileBrowser());
   const [rightPanelTab, setRightPanelTab] = useState<'system' | 'inspector'>('system');
 
-  const [currentPreset, setCurrentPreset] = useState('massive_indirect');
+  const [currentPreset, setCurrentPreset] = useState('anarchy');
   const [selectedEntityId, setSelectedEntityId] = useState<number | null>(null);
   const [isEngineReady, setIsEngineReady] = useState(false);
   const [initError, setInitError] = useState<string | null>(null);
@@ -165,6 +165,7 @@ export default function App() {
         }
 
         engineRef.current = engine;
+        await engine.loadScenePreset('anarchy');
         engine.start();
         triggerResize();
         setIsEngineReady(true);
@@ -295,6 +296,9 @@ export default function App() {
       button: e.button,
     };
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    if (engineRef.current && currentPreset === 'anarchy') {
+      engineRef.current.playerController.handlePointerDown(e.clientX, e.clientY, e.button);
+    }
   };
 
   const handlePointerMove = (e: React.PointerEvent) => {
@@ -305,22 +309,27 @@ export default function App() {
     pointerState.current.lastX = e.clientX;
     pointerState.current.lastY = e.clientY;
 
-    const camera = engineRef.current.camera;
-    if (pointerState.current.button === 0) {
-      // Orbit
-      camera.orbit(-dx * 0.006, -dy * 0.006);
-    } else if (pointerState.current.button === 2 || pointerState.current.button === 1) {
-      // Pan
-      const speed = camera.radius * 0.002;
-      camera.target[0] -= dx * speed;
-      camera.target[1] += dy * speed;
-      camera.updatePositionFromSpherical();
-      camera.updateMatrices();
+    if (currentPreset === 'anarchy') {
+      engineRef.current.playerController.handlePointerMove(e.clientX, e.clientY);
+    } else {
+      const camera = engineRef.current.camera;
+      if (pointerState.current.button === 0) {
+        camera.orbit(-dx * 0.006, -dy * 0.006);
+      } else if (pointerState.current.button === 2 || pointerState.current.button === 1) {
+        const speed = camera.radius * 0.002;
+        camera.target[0] -= dx * speed;
+        camera.target[1] += dy * speed;
+        camera.updatePositionFromSpherical();
+        camera.updateMatrices();
+      }
     }
   };
 
   const handlePointerUp = (e: React.PointerEvent) => {
     pointerState.current.isDown = false;
+    if (engineRef.current && currentPreset === 'anarchy') {
+      engineRef.current.playerController.handlePointerUp();
+    }
     try {
       (e.target as HTMLElement).releasePointerCapture(e.pointerId);
     } catch {
@@ -330,8 +339,12 @@ export default function App() {
 
   const handleWheel = (e: React.WheelEvent) => {
     if (!engineRef.current || engineRef.current.isDeviceLost) return;
-    const delta = e.deltaY * 0.04;
-    engineRef.current.camera.zoom(delta);
+    const delta = e.deltaY * 0.02;
+    if (currentPreset === 'anarchy') {
+      engineRef.current.playerController.handleZoom(delta);
+    } else {
+      engineRef.current.camera.zoom(delta * 2);
+    }
   };
 
   const handleCameraModeChange = (mode: 'ORBIT' | 'FPS' | 'FLY') => {
@@ -491,6 +504,16 @@ export default function App() {
               cameraMode={cameraMode}
               onCameraModeChange={handleCameraModeChange}
               onResetCamera={handleResetCamera}
+              onJoystickMove={(x, y) => {
+                if (engineRef.current) {
+                  engineRef.current.playerController.joystickVec = [x, y];
+                }
+              }}
+              onJumpRequested={() => {
+                if (engineRef.current) {
+                  engineRef.current.playerController.jumpRequested = true;
+                }
+              }}
             />
           )}
         </main>
