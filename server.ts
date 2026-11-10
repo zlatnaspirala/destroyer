@@ -135,7 +135,14 @@ app.post('/api/assets/upload', (req, res) => {
     return res.status(400).json({ error: 'Missing name or base64Data' });
   }
   const cleanName = name.replace(/[^a-zA-Z0-9._-]/g, '_');
-  const filePath = path.join(UPLOADS_DIR, cleanName);
+  if (!cleanName) {
+    return res.status(400).json({ error: 'Invalid file name' });
+  }
+  const filePath = path.resolve(UPLOADS_DIR, cleanName);
+  const uploadsRoot = path.resolve(UPLOADS_DIR) + path.sep;
+  if (!filePath.startsWith(uploadsRoot)) {
+    return res.status(400).json({ error: 'Invalid file path' });
+  }
   const buffer = Buffer.from(base64Data, 'base64');
   fs.writeFileSync(filePath, buffer);
   res.json({ success: true, name: cleanName, url: `/uploads/${cleanName}`, sizeBytes: buffer.length });
