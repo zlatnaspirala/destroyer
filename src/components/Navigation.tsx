@@ -59,7 +59,7 @@ export const Navigation: React.FC<NavigationProps> = ({
             D
           </div>
           <span className="font-bold text-xs sm:text-sm text-white tracking-wider hidden sm:inline">
-            DESTROYER <span className="text-cyan-400 font-normal text-xs">// WebGPU</span>
+            DESTROYER
           </span>
         </div>
 

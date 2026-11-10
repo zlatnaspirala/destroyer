@@ -5,6 +5,9 @@
 
 import { AnimationClip, MorphTargetData, SkeletonJoint } from '../core/Types';
 import { ParsedGLBPrimitive } from './GLBLoader';
+import { OBJParser } from './OBJParser';
+import { HUMAN_BODY_OBJ_DATA } from './HumanBodyOBJ';
+import { BVHLoader } from './BVHLoader';
 
 export class ProceduralModels {
   /**
@@ -629,6 +632,364 @@ export class ProceduralModels {
   }
 
   /**
+   * Helper to construct a single box primitive centered at center with halfExtents
+   */
+  static createBoxPrimitive(
+    center: [number, number, number],
+    halfExtents: [number, number, number],
+    name = 'Box_Primitive'
+  ): ParsedGLBPrimitive {
+    const [cx, cy, cz] = center;
+    const [hx, hy, hz] = halfExtents;
+
+    const positions = new Float32Array([
+      // Front
+      cx - hx, cy - hy, cz + hz,   cx + hx, cy - hy, cz + hz,   cx + hx, cy + hy, cz + hz,   cx - hx, cy + hy, cz + hz,
+      // Back
+      cx - hx, cy - hy, cz - hz,   cx - hx, cy + hy, cz - hz,   cx + hx, cy + hy, cz - hz,   cx + hx, cy - hy, cz - hz,
+      // Top
+      cx - hx, cy + hy, cz - hz,   cx - hx, cy + hy, cz + hz,   cx + hx, cy + hy, cz + hz,   cx + hx, cy + hy, cz - hz,
+      // Bottom
+      cx - hx, cy - hy, cz - hz,   cx + hx, cy - hy, cz - hz,   cx + hx, cy - hy, cz + hz,   cx - hx, cy - hy, cz + hz,
+      // Right
+      cx + hx, cy - hy, cz - hz,   cx + hx, cy + hy, cz - hz,   cx + hx, cy + hy, cz + hz,   cx + hx, cy - hy, cz + hz,
+      // Left
+      cx - hx, cy - hy, cz - hz,   cx - hx, cy - hy, cz + hz,   cx - hx, cy + hy, cz + hz,   cx - hx, cy + hy, cz - hz,
+    ]);
+
+    const normals = new Float32Array([
+      0, 0, 1,  0, 0, 1,  0, 0, 1,  0, 0, 1,
+      0, 0, -1, 0, 0, -1, 0, 0, -1, 0, 0, -1,
+      0, 1, 0,  0, 1, 0,  0, 1, 0,  0, 1, 0,
+      0, -1, 0, 0, -1, 0, 0, -1, 0, 0, -1, 0,
+      1, 0, 0,  1, 0, 0,  1, 0, 0,  1, 0, 0,
+      -1, 0, 0, -1, 0, 0, -1, 0, 0, -1, 0, 0,
+    ]);
+
+    const uvs = new Float32Array([
+      0, 0, 1, 0, 1, 1, 0, 1,
+      0, 0, 1, 0, 1, 1, 0, 1,
+      0, 0, 1, 0, 1, 1, 0, 1,
+      0, 0, 1, 0, 1, 1, 0, 1,
+      0, 0, 1, 0, 1, 1, 0, 1,
+      0, 0, 1, 0, 1, 1, 0, 1,
+    ]);
+
+    const indices = new Uint32Array([
+      0, 1, 2,  0, 2, 3,
+      4, 5, 6,  4, 6, 7,
+      8, 9, 10, 8, 10, 11,
+      12, 13, 14, 12, 14, 15,
+      16, 17, 18, 16, 18, 19,
+      20, 21, 22, 20, 22, 23,
+    ]);
+
+    return {
+      name,
+      positions,
+      normals,
+      uvs,
+      indices,
+      boundingRadius: Math.hypot(hx, hy, hz),
+    };
+  }
+
+  /**
+   * Helper to merge multiple box primitives into a single combined static mesh
+   */
+  static combineBoxes(
+    boxes: { center: [number, number, number]; size: [number, number, number] }[],
+    name = 'Combined_Building_Mesh'
+  ): ParsedGLBPrimitive {
+    const allPositions: number[] = [];
+    const allNormals: number[] = [];
+    const allUVs: number[] = [];
+    const allIndices: number[] = [];
+
+    let vertexOffset = 0;
+
+    for (const b of boxes) {
+      const prim = ProceduralModels.createBoxPrimitive(b.center, b.size);
+      for (let i = 0; i < prim.positions.length; i++) {
+        allPositions.push(prim.positions[i]);
+      }
+      for (let i = 0; i < prim.normals.length; i++) {
+        allNormals.push(prim.normals[i]);
+      }
+      for (let i = 0; i < prim.uvs.length; i++) {
+        allUVs.push(prim.uvs[i]);
+      }
+      for (let i = 0; i < prim.indices.length; i++) {
+        allIndices.push(prim.indices[i] + vertexOffset);
+      }
+      vertexOffset += prim.positions.length / 3;
+    }
+
+    return {
+      name,
+      positions: new Float32Array(allPositions),
+      normals: new Float32Array(allNormals),
+      uvs: new Float32Array(allUVs),
+      indices: new Uint32Array(allIndices),
+      boundingRadius: 35.0,
+    };
+  }
+
+  /**
+   * Generates a 3D extruded vector mesh for ASCII text labels in WebGPU world space
+   */
+  static create3DTextMesh(
+    text: string,
+    charHeight = 0.4,
+    extrudeDepth = 0.06,
+    name = '3D_Text_Mesh'
+  ): ParsedGLBPrimitive {
+    const boxes: { center: [number, number, number]; size: [number, number, number] }[] = [];
+
+    const charWidth = charHeight * 0.6;
+    const thickness = charHeight * 0.12;
+    const spacing = charHeight * 0.75;
+    const hx = thickness * 0.5;
+    const hy = thickness * 0.5;
+    const hz = extrudeDepth * 0.5;
+
+    const uppercase = text.toUpperCase();
+
+    for (let charIdx = 0; charIdx < uppercase.length; charIdx++) {
+      const ch = uppercase[charIdx];
+      const offsetX = charIdx * spacing - (uppercase.length * spacing) * 0.5;
+
+      const addStroke = (x1: number, y1: number, x2: number, y2: number) => {
+        const cx = offsetX + (x1 + x2) * 0.5 * charWidth;
+        const cy = (y1 + y2) * 0.5 * charHeight;
+        const sx = Math.max(hx, Math.abs(x2 - x1) * 0.5 * charWidth + hx);
+        const sy = Math.max(hy, Math.abs(y2 - y1) * 0.5 * charHeight + hy);
+        boxes.push({ center: [cx, cy, 0], size: [sx, sy, hz] });
+      };
+
+      switch (ch) {
+        case '0':
+        case 'O':
+          addStroke(0, 1, 1, 1);
+          addStroke(0, 0, 1, 0);
+          addStroke(0, 0, 0, 1);
+          addStroke(1, 0, 1, 1);
+          break;
+        case '1':
+        case 'I':
+          addStroke(0.5, 0, 0.5, 1);
+          break;
+        case '2':
+          addStroke(0, 1, 1, 1);
+          addStroke(1, 0.5, 1, 1);
+          addStroke(0, 0.5, 1, 0.5);
+          addStroke(0, 0, 0, 0.5);
+          addStroke(0, 0, 1, 0);
+          break;
+        case '3':
+          addStroke(0, 1, 1, 1);
+          addStroke(1, 0, 1, 1);
+          addStroke(0, 0.5, 1, 0.5);
+          addStroke(0, 0, 1, 0);
+          break;
+        case '4':
+          addStroke(0, 0.5, 0, 1);
+          addStroke(0, 0.5, 1, 0.5);
+          addStroke(1, 0, 1, 1);
+          break;
+        case '5':
+        case 'S':
+          addStroke(0, 1, 1, 1);
+          addStroke(0, 0.5, 0, 1);
+          addStroke(0, 0.5, 1, 0.5);
+          addStroke(1, 0, 1, 0.5);
+          addStroke(0, 0, 1, 0);
+          break;
+        case '6':
+          addStroke(0, 1, 1, 1);
+          addStroke(0, 0, 0, 1);
+          addStroke(0, 0.5, 1, 0.5);
+          addStroke(1, 0, 1, 0.5);
+          addStroke(0, 0, 1, 0);
+          break;
+        case '7':
+          addStroke(0, 1, 1, 1);
+          addStroke(1, 0, 1, 1);
+          break;
+        case '8':
+          addStroke(0, 1, 1, 1);
+          addStroke(0, 0, 1, 0);
+          addStroke(0, 0.5, 1, 0.5);
+          addStroke(0, 0, 0, 1);
+          addStroke(1, 0, 1, 1);
+          break;
+        case '9':
+          addStroke(0, 1, 1, 1);
+          addStroke(0, 0.5, 0, 1);
+          addStroke(0, 0.5, 1, 0.5);
+          addStroke(1, 0, 1, 1);
+          addStroke(0, 0, 1, 0);
+          break;
+        case 'F':
+          addStroke(0, 1, 1, 1);
+          addStroke(0, 0, 0, 1);
+          addStroke(0, 0.5, 0.8, 0.5);
+          break;
+        case 'L':
+          addStroke(0, 0, 0, 1);
+          addStroke(0, 0, 1, 0);
+          break;
+        case 'R':
+          addStroke(0, 1, 1, 1);
+          addStroke(0, 0, 0, 1);
+          addStroke(0, 0.5, 1, 0.5);
+          addStroke(1, 0.5, 1, 1);
+          addStroke(0.5, 0, 1, 0.5);
+          break;
+        case 'E':
+          addStroke(0, 1, 1, 1);
+          addStroke(0, 0, 0, 1);
+          addStroke(0, 0.5, 0.8, 0.5);
+          addStroke(0, 0, 1, 0);
+          break;
+        case 'A':
+          addStroke(0, 1, 1, 1);
+          addStroke(0, 0, 0, 1);
+          addStroke(1, 0, 1, 1);
+          addStroke(0, 0.5, 1, 0.5);
+          break;
+        case 'T':
+          addStroke(0, 1, 1, 1);
+          addStroke(0.5, 0, 0.5, 1);
+          break;
+        case '-':
+          addStroke(0.2, 0.5, 0.8, 0.5);
+          break;
+        default:
+          break;
+      }
+    }
+
+    if (boxes.length === 0) {
+      return ProceduralModels.createBoxPrimitive([0, 0, 0], [0.1, 0.1, 0.1], name);
+    }
+
+    return ProceduralModels.combineBoxes(boxes, name);
+  }
+
+  /**
+   * Generates a 10-story skyscraper building with open stairwell floor holes, 3D text labels, and 3D elevator buttons
+   */
+  static createSingleBuildingWithStairsAndElevator(): {
+    buildingMesh: ParsedGLBPrimitive;
+    doorLeftMesh: ParsedGLBPrimitive;
+    doorRightMesh: ParsedGLBPrimitive;
+    elevatorMesh: ParsedGLBPrimitive;
+  } {
+    const staticBoxes: { center: [number, number, number]; size: [number, number, number] }[] = [];
+
+    // 1. Expanded Ground Slab (40m x 40m footprint)
+    staticBoxes.push({ center: [0, -0.2, 0], size: [20, 0.2, 20] });
+
+    const totalFloors = 10;
+    const floorHeight = 4.0;
+
+    // 2. Build 10 Floors (Exterior Walls, Staircases & 3D Elevator Call Button Plates)
+    for (let k = 0; k < totalFloors; k++) {
+      const wallY = k * floorHeight + 2.0;
+
+      // Exterior Walls for Floor k (40m building)
+      staticBoxes.push({ center: [0, wallY, -20], size: [20, 2.0, 0.4] });       // Rear Wall
+      staticBoxes.push({ center: [-20, wallY, 0], size: [0.4, 2.0, 20] });       // Left Wall
+      staticBoxes.push({ center: [20, wallY, 0], size: [0.4, 2.0, 20] });        // Right Wall
+      staticBoxes.push({ center: [-12, wallY, 20], size: [8, 2.0, 0.4] });       // Front Left Wing
+      staticBoxes.push({ center: [12, wallY, 20], size: [8, 2.0, 0.4] });        // Front Right Wing
+      staticBoxes.push({ center: [0, k * floorHeight + 3.2, 20], size: [4, 0.8, 0.4] }); // Entrance Header
+
+      // Architectural Elevator Control Station Pillar & Control Console Table on Floor k
+      staticBoxes.push({ center: [11.5, k * floorHeight + 0.6, 8.0], size: [0.35, 0.6, 0.35] }); // Control Table Pedestal
+      staticBoxes.push({ center: [11.5, k * floorHeight + 1.2, 8.0], size: [0.45, 0.05, 0.45] }); // Table Surface Countertop
+      staticBoxes.push({ center: [11.5, k * floorHeight + 1.3, 8.0], size: [0.18, 0.1, 0.18] });  // Glowing Ruby Red 3D Call Button on Table
+
+      // Staircase Steps for Floor k -> Floor k+1 (10 Steps)
+      const numSteps = 10;
+      const stepRise = floorHeight / numSteps; // 0.4m per step
+      const stepDepth = 0.75;
+      const stepWidth = 2.2;
+      const startZ = 7.0;
+
+      for (let i = 0; i < numSteps; i++) {
+        const stepY = k * floorHeight + (i + 1) * stepRise;
+        const stepZ = startZ - i * stepDepth;
+        staticBoxes.push({
+          center: [-12.0, stepY - stepRise * 0.5, stepZ],
+          size: [stepWidth, stepRise * 0.5, stepDepth * 0.5],
+        });
+      }
+    }
+
+    // 3. Upper Floor Slabs (Floors 1 through 10) with STAIRWELL HOLE (X in [-20, -8], Z in [-4, 8]) AND ELEVATOR HOLE (X in [11.5, 16.5], Z in [7.5, 12.5])
+    for (let k = 1; k <= totalFloors; k++) {
+      const slabY = k * floorHeight - 0.1;
+
+      // Piece 1: Central/Rear Main Floor Slab
+      staticBoxes.push({ center: [6.0, slabY, -6.25], size: [14.0, 0.1, 13.75] });
+
+      // Piece 2: Left Rear Floor Slab (behind stair hole)
+      staticBoxes.push({ center: [-14.0, slabY, -12.0], size: [6.0, 0.1, 8.0] });
+
+      // Piece 3: Left Front Floor Slab (in front of stair hole)
+      staticBoxes.push({ center: [-14.0, slabY, 14.0], size: [6.0, 0.1, 6.0] });
+
+      // Piece 4: Center Front Floor Slab (between stair hole and elevator hole)
+      staticBoxes.push({ center: [1.75, slabY, 13.75], size: [9.75, 0.1, 6.25] });
+
+      // Piece 5: Right Front Wing (in front of elevator hole)
+      staticBoxes.push({ center: [15.75, slabY, 16.25], size: [4.25, 0.1, 3.75] });
+
+      // Piece 6: Far Right Flange (beside elevator hole)
+      staticBoxes.push({ center: [18.25, slabY, 10.0], size: [1.75, 0.1, 2.5] });
+    }
+
+    // 4. Elevator Shaft Guide Beams (40m height)
+    staticBoxes.push({ center: [11.5, 20.0, 7.5], size: [0.2, 20.0, 0.2] });
+    staticBoxes.push({ center: [16.5, 20.0, 7.5], size: [0.2, 20.0, 0.2] });
+
+    const buildingMesh = ProceduralModels.combineBoxes(staticBoxes, 'Physics_Skyscraper_10Floors');
+
+    // Dynamic Left Door Panel
+    const doorLeftMesh = ProceduralModels.createBoxPrimitive([0, 0, 0], [2.0, 2.0, 0.15], 'Sliding_Door_Left');
+    // Dynamic Right Door Panel
+    const doorRightMesh = ProceduralModels.createBoxPrimitive([0, 0, 0], [2.0, 2.0, 0.15], 'Sliding_Door_Right');
+
+    // Dynamic Enclosed Real Elevator Cab Mesh with 3D Control Console Table & Contrast Floor Buttons
+    const elevatorBoxes: { center: [number, number, number]; size: [number, number, number] }[] = [
+      // Main Cab Floor Slab
+      { center: [0, 0, 0], size: [2.2, 0.15, 2.2] },
+      // Enclosed Rear Cab Wall
+      { center: [0, 1.4, -2.15], size: [2.2, 1.25, 0.08] },
+      // Enclosed Side Cab Walls
+      { center: [-2.15, 1.4, 0], size: [0.08, 1.25, 2.2] },
+      { center: [2.15, 1.4, 0], size: [0.08, 1.25, 2.2] },
+      { center: [0, 2.7, 0], size: [2.2, 0.1, 2.2] }, // Roof Ceiling
+      // 3D Interior Floor Control Console Table (Contrasting Metallic Desk)
+      { center: [-1.5, 0.6, 0.8], size: [0.35, 0.55, 0.5] },  // Table Stand
+      { center: [-1.5, 1.18, 0.8], size: [0.45, 0.05, 0.6] }, // Contrasting Table Top Surface
+      { center: [-1.5, 1.26, 0.65], size: [0.12, 0.08, 0.12] }, // Glowing Emerald 3D Button UP
+      { center: [-1.5, 1.26, 0.95], size: [0.12, 0.08, 0.12] }, // Glowing Amber 3D Button DOWN
+    ];
+
+    const elevatorMesh = ProceduralModels.combineBoxes(elevatorBoxes, 'Elevator_Cab_With_3D_Buttons');
+
+    return {
+      buildingMesh,
+      doorLeftMesh,
+      doorRightMesh,
+      elevatorMesh,
+    };
+  }
+
+  /**
    * Generates clean 4800x4800 Anarchy GTA City navigation ground plane (Asphalt Street Gray)
    */
   static createAnarchyCityGround(size = 4800): ParsedGLBPrimitive {
@@ -931,169 +1292,163 @@ export class ProceduralModels {
   }
 
   /**
-   * Generates a clean single-mesh 3D Player Character with cyan facing visor
+   * Generates a realistic skinned human body character mesh from Wavefront OBJ data.
+   * Features anatomical human proportions: contoured head, neck, shoulders, deltoids,
+   * arms, pectorals, ribcage, abdomen, pelvis, thighs, knees, calves, and feet.
+   * Rigged with a 5-bone skeletal hierarchy and smooth joint weight blending.
    */
-  static createSimpleHumanoidPlayer(): { primitive: ParsedGLBPrimitive; joints: SkeletonJoint[]; clip: AnimationClip } {
-    const vertices: number[] = [];
-    const normals: number[] = [];
-    const uvs: number[] = [];
-    const indices: number[] = [];
-    const jointsData: number[] = [];
-    const weightsData: number[] = [];
-
-    const addBox = (
-      center: [number, number, number],
-      size: [number, number, number],
-      jointIdx: number
-    ) => {
-      const hx = size[0] * 0.5, hy = size[1] * 0.5, hz = size[2] * 0.5;
-      const faces = [
-        // Front
-        { v: [-hx,-hy, hz,  hx,-hy, hz,  hx, hy, hz, -hx, hy, hz], n: [0,0,1] },
-        // Back
-        { v: [ hx,-hy,-hz, -hx,-hy,-hz, -hx, hy,-hz,  hx, hy,-hz], n: [0,0,-1] },
-        // Top
-        { v: [-hx, hy, hz,  hx, hy, hz,  hx, hy,-hz, -hx, hy,-hz], n: [0,1,0] },
-        // Bottom
-        { v: [-hx,-hy,-hz,  hx,-hy,-hz,  hx,-hy, hz, -hx,-hy, hz], n: [0,-1,0] },
-        // Right
-        { v: [ hx,-hy, hz,  hx,-hy,-hz,  hx, hy,-hz,  hx, hy, hz], n: [1,0,0] },
-        // Left
-        { v: [-hx,-hy,-hz, -hx,-hy, hz, -hx, hy, hz, -hx, hy,-hz], n: [-1,0,0] },
-      ];
-
-      for (const face of faces) {
-        const faceBase = vertices.length / 3;
-        for (let i = 0; i < 12; i += 3) {
-          vertices.push(face.v[i] + center[0], face.v[i+1] + center[1], face.v[i+2] + center[2]);
-          normals.push(face.n[0], face.n[1], face.n[2]);
-          uvs.push(i === 0 || i === 9 ? 0 : 1, i < 6 ? 0 : 1);
-          jointsData.push(jointIdx, 0, 0, 0);
-          weightsData.push(1.0, 0.0, 0.0, 0.0);
-        }
-        indices.push(faceBase, faceBase + 1, faceBase + 2, faceBase, faceBase + 2, faceBase + 3);
-      }
-    };
-
-    const addSphere = (
-      center: [number, number, number],
-      radius: number,
-      rings: number,
-      sectors: number,
-      jointIdx: number
-    ) => {
-      const startIdx = vertices.length / 3;
-      const R = 1 / (rings - 1);
-      const S = 1 / (sectors - 1);
-
-      for (let r = 0; r < rings; r++) {
-        for (let s = 0; s < sectors; s++) {
-          const phi = r * R * Math.PI;
-          const theta = s * S * 2 * Math.PI;
-          const y = Math.cos(phi);
-          const x = Math.sin(phi) * Math.sin(theta);
-          const z = Math.sin(phi) * Math.cos(theta);
-
-          vertices.push(x * radius + center[0], y * radius + center[1], z * radius + center[2]);
-          normals.push(x, y, z);
-          uvs.push(s * S, r * R);
-          jointsData.push(jointIdx, 0, 0, 0);
-          weightsData.push(1.0, 0.0, 0.0, 0.0);
-        }
-      }
-
-      for (let r = 0; r < rings - 1; r++) {
-        for (let s = 0; s < sectors - 1; s++) {
-          const a = startIdx + (r * sectors + s);
-          const b = startIdx + (r * sectors + (s + 1));
-          const c = startIdx + ((r + 1) * sectors + (s + 1));
-          const d = startIdx + ((r + 1) * sectors + s);
-
-          indices.push(a, b, c, a, c, d);
-        }
-      }
-    };
-
-    // Joint 0: Legs
-    addBox([-0.14, 0.38, 0], [0.18, 0.76, 0.18], 0); // Left Leg
-    addBox([ 0.14, 0.38, 0], [0.18, 0.76, 0.18], 0); // Right Leg
-
-    // Joint 1: Torso, Head & Cyan Visor
-    addBox([0, 1.08, 0], [0.46, 0.62, 0.28], 1); // Torso Chest
-    addSphere([0, 1.62, 0], 0.18, 12, 16, 1); // Head Sphere
-    addBox([0, 1.65, 0.14], [0.22, 0.08, 0.06], 1); // Cyan Facing Visor
-
-    // Joint 2: Left Arm
-    addBox([-0.32, 1.08, 0], [0.14, 0.58, 0.16], 2);
-
-    // Joint 3: Right Arm
-    addBox([0.32, 1.08, 0], [0.14, 0.58, 0.16], 3);
+  static createHumanBodyFromOBJ(): {
+    primitive: ParsedGLBPrimitive;
+    joints: SkeletonJoint[];
+    clip: AnimationClip;
+    jumpClip: AnimationClip;
+    idleClip: AnimationClip;
+    allClips: AnimationClip[];
+  } {
+    const primitive = OBJParser.parse(HUMAN_BODY_OBJ_DATA, {
+      name: 'Human_Body_Player',
+      scale: 1.0,
+      smoothNormals: true,
+      humanRig: true,
+    });
 
     const idMat = () => new Float32Array([1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  0, 0, 0, 1]);
 
     const joints: SkeletonJoint[] = [
-      { name: 'Player_Legs', parentIndex: -1, inverseBindMatrix: idMat(), localMatrix: idMat(), worldMatrix: idMat() },
-      { name: 'Player_TorsoHead', parentIndex: 0, inverseBindMatrix: new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,-0.76,0,1]), localMatrix: idMat(), worldMatrix: idMat() },
-      { name: 'Player_LeftArm', parentIndex: 1, inverseBindMatrix: new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0.32,-1.08,0,1]), localMatrix: idMat(), worldMatrix: idMat() },
-      { name: 'Player_RightArm', parentIndex: 1, inverseBindMatrix: new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, -0.32,-1.08,0,1]), localMatrix: idMat(), worldMatrix: idMat() },
+      // Joint 0: Torso, Pelvis, Spine, Neck, Head (Root)
+      {
+        name: 'Human_TorsoPelvis',
+        parentIndex: -1,
+        inverseBindMatrix: idMat(),
+        localMatrix: idMat(),
+        worldMatrix: idMat(),
+      },
+      // Joint 1: Left Leg (Hip pivot at [-0.11, 0.86, 0])
+      {
+        name: 'Human_LeftLeg',
+        parentIndex: 0,
+        initialTranslation: [-0.11, 0.86, 0],
+        inverseBindMatrix: new Float32Array([1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  0.11, -0.86, 0, 1]),
+        localMatrix: new Float32Array([1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  -0.11, 0.86, 0, 1]),
+        worldMatrix: new Float32Array([1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  -0.11, 0.86, 0, 1]),
+      },
+      // Joint 2: Right Leg (Hip pivot at [0.11, 0.86, 0])
+      {
+        name: 'Human_RightLeg',
+        parentIndex: 0,
+        initialTranslation: [0.11, 0.86, 0],
+        inverseBindMatrix: new Float32Array([1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  -0.11, -0.86, 0, 1]),
+        localMatrix: new Float32Array([1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  0.11, 0.86, 0, 1]),
+        worldMatrix: new Float32Array([1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  0.11, 0.86, 0, 1]),
+      },
+      // Joint 3: Left Arm (Shoulder pivot at [-0.32, 1.34, 0])
+      {
+        name: 'Human_LeftArm',
+        parentIndex: 0,
+        initialTranslation: [-0.32, 1.34, 0],
+        inverseBindMatrix: new Float32Array([1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  0.32, -1.34, 0, 1]),
+        localMatrix: new Float32Array([1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  -0.32, 1.34, 0, 1]),
+        worldMatrix: new Float32Array([1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  -0.32, 1.34, 0, 1]),
+      },
+      // Joint 4: Right Arm (Shoulder pivot at [0.32, 1.34, 0])
+      {
+        name: 'Human_RightArm',
+        parentIndex: 0,
+        initialTranslation: [0.32, 1.34, 0],
+        inverseBindMatrix: new Float32Array([1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  -0.32, -1.34, 0, 1]),
+        localMatrix: new Float32Array([1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  0.32, 1.34, 0, 1]),
+        worldMatrix: new Float32Array([1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  0.32, 1.34, 0, 1]),
+      },
     ];
 
     const clip: AnimationClip = {
-      name: 'Player_Walk_Cycle',
+      name: 'Human_Walk_Cycle',
       duration: 0.8,
       channels: [
+        // Joint 1: Left Leg swings forward and backward
         {
-          targetNode: 0,
+          targetNode: 1,
           path: 'rotation',
           interpolation: 'LINEAR',
           times: new Float32Array([0, 0.2, 0.4, 0.6, 0.8]),
           values: new Float32Array([
             0, 0, 0, 1,
-            0.22, 0, 0, 0.975,
+            0.26, 0, 0, 0.965,
             0, 0, 0, 1,
-            -0.22, 0, 0, 0.975,
+            -0.26, 0, 0, 0.965,
             0, 0, 0, 1,
           ]),
         },
+        // Joint 2: Right Leg swings backward and forward
         {
           targetNode: 2,
           path: 'rotation',
           interpolation: 'LINEAR',
-          times: new Float32Array([0, 0.4, 0.8]),
+          times: new Float32Array([0, 0.2, 0.4, 0.6, 0.8]),
           values: new Float32Array([
-            -0.28, 0, 0, 0.96,
-            0.28, 0, 0, 0.96,
-            -0.28, 0, 0, 0.96,
+            0, 0, 0, 1,
+            -0.26, 0, 0, 0.965,
+            0, 0, 0, 1,
+            0.26, 0, 0, 0.965,
+            0, 0, 0, 1,
           ]),
         },
+        // Joint 3: Left Arm counter-swings
         {
           targetNode: 3,
           path: 'rotation',
           interpolation: 'LINEAR',
-          times: new Float32Array([0, 0.4, 0.8]),
+          times: new Float32Array([0, 0.2, 0.4, 0.6, 0.8]),
           values: new Float32Array([
-            0.28, 0, 0, 0.96,
+            0, 0, 0, 1,
             -0.28, 0, 0, 0.96,
+            0, 0, 0, 1,
             0.28, 0, 0, 0.96,
+            0, 0, 0, 1,
+          ]),
+        },
+        // Joint 4: Right Arm counter-swings
+        {
+          targetNode: 4,
+          path: 'rotation',
+          interpolation: 'LINEAR',
+          times: new Float32Array([0, 0.2, 0.4, 0.6, 0.8]),
+          values: new Float32Array([
+            0, 0, 0, 1,
+            0.28, 0, 0, 0.96,
+            0, 0, 0, 1,
+            -0.28, 0, 0, 0.96,
+            0, 0, 0, 1,
           ]),
         },
       ],
     };
 
+    const jumpClip = BVHLoader.createJumpClip();
+    const idleClip = BVHLoader.createIdleClip();
+
     return {
-      primitive: {
-        name: 'Simple_Humanoid_Player',
-        positions: new Float32Array(vertices),
-        normals: new Float32Array(normals),
-        uvs: new Float32Array(uvs),
-        indices: new Uint32Array(indices),
-        joints: new Uint32Array(jointsData),
-        weights: new Float32Array(weightsData),
-        boundingRadius: 2.2,
-      },
+      primitive,
       joints,
       clip,
+      jumpClip,
+      idleClip,
+      allClips: [clip, jumpClip, idleClip],
     };
+  }
+
+  /**
+   * Generates player character model using specialized human body OBJ data
+   */
+  static createSimpleHumanoidPlayer(): {
+    primitive: ParsedGLBPrimitive;
+    joints: SkeletonJoint[];
+    clip: AnimationClip;
+    jumpClip: AnimationClip;
+    idleClip: AnimationClip;
+    allClips: AnimationClip[];
+  } {
+    return ProceduralModels.createHumanBodyFromOBJ();
   }
 }
 

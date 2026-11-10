@@ -35,8 +35,16 @@ export default function App() {
   const [isDeviceLost, setIsDeviceLost] = useState(false);
   const [isRestoring, setIsRestoring] = useState(false);
   const [cameraMode, setCameraMode] = useState<'ORBIT' | 'FPS' | 'FLY'>('ORBIT');
+  const [isRunning, setIsRunning] = useState(false);
   const [sceneVersion, setSceneVersion] = useState(0);
   const [initRetryKey, setInitRetryKey] = useState(0);
+  const [elevatorTargetFloor, setElevatorTargetFloor] = useState(0);
+  const [activeAnimationName, setActiveAnimationName] = useState('Human_Walk_Cycle');
+  const [availableAnimations, setAvailableAnimations] = useState<string[]>([
+    'Human_Walk_Cycle',
+    'BVH_Jump_Mocap',
+    'BVH_Idle_Mocap',
+  ]);
 
   // Stats state
   const [stats, setStats] = useState<EngineStats>({
@@ -60,6 +68,8 @@ export default function App() {
   // Touch & Pointer state for orbit controls
   const pointerState = useRef({
     isDown: false,
+    startX: 0,
+    startY: 0,
     lastX: 0,
     lastY: 0,
     button: 0,
@@ -171,6 +181,8 @@ export default function App() {
         setIsEngineReady(true);
         setIsDeviceLost(false);
         setSelectedEntityId(0);
+        setAvailableAnimations(engine.getAvailableAnimations());
+        setActiveAnimationName(engine.animController.getCurrentClipName());
         isInitializingRef.current = false;
 
         // Periodic stats update
@@ -254,6 +266,8 @@ export default function App() {
     if (engineRef.current && !engineRef.current.isDeviceLost) {
       await engineRef.current.loadScenePreset(preset);
       setSelectedEntityId(0);
+      setAvailableAnimations(engineRef.current.getAvailableAnimations());
+      setActiveAnimationName(engineRef.current.animController.getCurrentClipName());
       setSceneVersion((v) => v + 1);
     }
   };
@@ -291,6 +305,8 @@ export default function App() {
   const handlePointerDown = (e: React.PointerEvent) => {
     pointerState.current = {
       isDown: true,
+      startX: e.clientX,
+      startY: e.clientY,
       lastX: e.clientX,
       lastY: e.clientY,
       button: e.button,
@@ -326,6 +342,15 @@ export default function App() {
   };
 
   const handlePointerUp = (e: React.PointerEvent) => {
+    if (pointerState.current.isDown && engineRef.current && currentPreset === 'anarchy' && canvasRef.current) {
+      const distMoved = Math.hypot(e.clientX - pointerState.current.startX, e.clientY - pointerState.current.startY);
+      if (distMoved < 8) {
+        const rect = canvasRef.current.getBoundingClientRect();
+        const clientX = e.clientX - rect.left;
+        const clientY = e.clientY - rect.top;
+        engineRef.current.playerController.handleCanvasClick(clientX, clientY, rect.width, rect.height);
+      }
+    }
     pointerState.current.isDown = false;
     if (engineRef.current && currentPreset === 'anarchy') {
       engineRef.current.playerController.handlePointerUp();
@@ -504,6 +529,13 @@ export default function App() {
               cameraMode={cameraMode}
               onCameraModeChange={handleCameraModeChange}
               onResetCamera={handleResetCamera}
+              isRunning={isRunning}
+              onToggleRunning={() => {
+                if (engineRef.current) {
+                  const nextState = engineRef.current.playerController.toggleRunning();
+                  setIsRunning(nextState);
+                }
+              }}
               onJoystickMove={(x, y) => {
                 if (engineRef.current) {
                   engineRef.current.playerController.joystickVec = [x, y];
@@ -512,6 +544,30 @@ export default function App() {
               onJumpRequested={() => {
                 if (engineRef.current) {
                   engineRef.current.playerController.jumpRequested = true;
+                }
+              }}
+              onLoadBVH={(bvhText, name) => {
+                if (engineRef.current) {
+                  const res = engineRef.current.loadBVHAnimation(bvhText, name);
+                  if (res.success) {
+                    setAvailableAnimations(engineRef.current.getAvailableAnimations());
+                    setActiveAnimationName(res.clipName);
+                  }
+                }
+              }}
+              onSelectAnimation={(clipName) => {
+                if (engineRef.current) {
+                  engineRef.current.switchAnimation(clipName);
+                  setActiveAnimationName(clipName);
+                }
+              }}
+              availableAnimations={availableAnimations}
+              activeAnimationName={activeAnimationName}
+              elevatorTargetFloor={elevatorTargetFloor}
+              onSelectElevatorFloor={(floor) => {
+                setElevatorTargetFloor(floor);
+                if (engineRef.current?.physics) {
+                  engineRef.current.physics.setElevatorTargetFloor(floor);
                 }
               }}
             />

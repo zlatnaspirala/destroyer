@@ -3,12 +3,14 @@
  * Handles:
  * 1. GPU Morph Targets (Blend Shapes) with interpolation & weight control
  * 2. Skeletal Joint Skinning with animation clip evaluation
- * 3. Procedural Harmonic Vertex Wave simulation
+ * 3. Loading and playing Biovision Hierarchy (BVH) motion capture data
+ * 4. Procedural Harmonic Vertex Wave simulation
  */
 
 import { Mat4 } from '../math/Mat4';
 import { AnimationClip, MorphTargetData, SkeletonJoint } from '../core/Types';
 import { FlatEntityManager } from '../core/FlatEntityManager';
+import { BVHLoader, BVHParseOptions } from '../loaders/BVHLoader';
 
 export class VertexAnimationController {
   private entityManager?: FlatEntityManager;
@@ -21,6 +23,7 @@ export class VertexAnimationController {
   public currentClipIndex = 0;
   public currentTime = 0;
   public isPlaying = true;
+  public isLooping = true;
   public playbackSpeed = 1.0;
 
   public waveFactor = 0.0;
@@ -72,16 +75,55 @@ export class VertexAnimationController {
   }
 
   addClip(clip: AnimationClip): number {
+    // Check if clip already exists by name
+    const existingIdx = this.clips.findIndex((c) => c.name === clip.name);
+    if (existingIdx >= 0) {
+      this.clips[existingIdx] = clip;
+      return existingIdx;
+    }
     this.clips.push(clip);
     return this.clips.length - 1;
   }
 
-  playClip(index: number): void {
+  /**
+   * Load and parse a BVH motion capture string and register it as an animation clip
+   */
+  loadBVH(bvhText: string, options?: BVHParseOptions): number {
+    const clip = BVHLoader.parse(bvhText, options);
+    const clipIdx = this.addClip(clip);
+    this.playClip(clipIdx, true);
+    return clipIdx;
+  }
+
+  playClip(index: number, loop = true): void {
     if (index >= 0 && index < this.clips.length) {
-      this.currentClipIndex = index;
-      this.currentTime = 0;
+      if (this.currentClipIndex !== index) {
+        this.currentClipIndex = index;
+        this.currentTime = 0;
+      }
+      this.isLooping = loop;
       this.isPlaying = true;
     }
+  }
+
+  playClipByName(name: string, loop = true): boolean {
+    const lowerName = name.toLowerCase();
+    const idx = this.clips.findIndex(
+      (c) => c.name.toLowerCase() === lowerName || c.name.toLowerCase().includes(lowerName)
+    );
+    if (idx >= 0) {
+      this.playClip(idx, loop);
+      return true;
+    }
+    return false;
+  }
+
+  getCurrentClipName(): string {
+    return this.clips[this.currentClipIndex]?.name || 'None';
+  }
+
+  getClipNames(): string[] {
+    return this.clips.map((c) => c.name);
   }
 
   clear(): void {
@@ -92,12 +134,42 @@ export class VertexAnimationController {
     this.morphTargets = [];
   }
 
+  /**
+   * Directly evaluate a specific clip at a given timestamp (useful for physics-driven jumps)
+   */
+  evaluateClipAtTime(
+    clipNameOrIndex: string | number,
+    timeSec: number,
+    outJointMatrices?: Float32Array,
+    jointMatrixOffset = 0
+  ): void {
+    const targetBuffer = outJointMatrices || this.entityManager?.jointMatrices;
+    if (!targetBuffer) return;
+
+    let clip: AnimationClip | undefined;
+    if (typeof clipNameOrIndex === 'number') {
+      clip = this.clips[clipNameOrIndex];
+    } else {
+      const lower = clipNameOrIndex.toLowerCase();
+      clip = this.clips.find((c) => c.name.toLowerCase().includes(lower));
+    }
+
+    if (clip && clip.duration > 0) {
+      const clampedTime = Math.max(0, Math.min(clip.duration, timeSec));
+      this.evaluateClip(clip, clampedTime, targetBuffer, jointMatrixOffset);
+    }
+  }
+
   update(deltaTimeSeconds: number, outJointMatrices?: Float32Array, jointMatrixOffset = 0): void {
     const targetBuffer = outJointMatrices || this.entityManager?.jointMatrices;
     if (this.isPlaying && this.clips.length > 0 && targetBuffer) {
       const clip = this.clips[this.currentClipIndex];
       if (clip && clip.duration > 0) {
-        this.currentTime = (this.currentTime + deltaTimeSeconds * this.playbackSpeed) % clip.duration;
+        if (this.isLooping) {
+          this.currentTime = (this.currentTime + deltaTimeSeconds * this.playbackSpeed) % clip.duration;
+        } else {
+          this.currentTime = Math.min(clip.duration, this.currentTime + deltaTimeSeconds * this.playbackSpeed);
+        }
         this.evaluateClip(clip, this.currentTime, targetBuffer, jointMatrixOffset);
       }
     }
@@ -117,6 +189,13 @@ export class VertexAnimationController {
 
       const times = channel.times;
       const values = channel.values;
+
+      if (times.length === 1) {
+        const q: [number, number, number, number] = [values[0], values[1], values[2], values[3]];
+        const pos = joint.initialTranslation || [joint.localMatrix[12], joint.localMatrix[13], joint.localMatrix[14]];
+        Mat4.fromTranslationRotationScale(pos, q, [1, 1, 1], joint.localMatrix);
+        continue;
+      }
 
       for (let i = 0; i < times.length - 1; i++) {
         if (time >= times[i] && time <= times[i + 1]) {

@@ -25,6 +25,8 @@ export const isMobileBrowser = (): boolean => {
   );
 };
 
+import { JoltPhysics } from './physics/JoltPhysics';
+
 export class DestroyerEngine {
   public deviceManager: DeviceManager;
   public entityManager: FlatEntityManager;
@@ -32,6 +34,11 @@ export class DestroyerEngine {
   public renderer: IndirectRenderer;
   public animController: VertexAnimationController;
   public playerController: PlayerController;
+  public physics: JoltPhysics;
+
+  private doorLeftEntityId = -1;
+  private doorRightEntityId = -1;
+  private elevatorEntityId = -1;
 
   private isRunning = false;
   private animationFrameId: number | null = null;
@@ -75,6 +82,7 @@ export class DestroyerEngine {
     this.camera = new Camera();
     this.renderer = new IndirectRenderer(this.deviceManager, this.entityManager, this.camera);
     this.animController = new VertexAnimationController(this.entityManager);
+    this.physics = new JoltPhysics();
     this.playerController = new PlayerController(this);
 
     // Listen to device loss
@@ -234,14 +242,72 @@ export class DestroyerEngine {
         this.lastFpsUpdate = currentTime;
       }
 
+      // Update dynamic physics objects (automatic sliding door & elevator platform)
+      if (this.currentPreset === 'anarchy' && this.physics) {
+        const { elevatorDeltaY } = this.physics.updateDynamicPhysics(deltaSec, this.playerController.position);
+
+        // Update Left Sliding Door Matrix
+        if (this.doorLeftEntityId >= 0) {
+          const leftDoorMat = Mat4.create();
+          const doorX = -2.0 - this.physics.doorOpenFactor * 3.5;
+          Mat4.fromTranslation([doorX, 2.0, 20.0], leftDoorMat);
+          this.entityManager.updateEntityMatrix(this.doorLeftEntityId, leftDoorMat, [doorX, 2.0, 20.0], 4.0);
+        }
+
+        // Update Right Sliding Door Matrix
+        if (this.doorRightEntityId >= 0) {
+          const rightDoorMat = Mat4.create();
+          const doorX = 2.0 + this.physics.doorOpenFactor * 3.5;
+          Mat4.fromTranslation([doorX, 2.0, 20.0], rightDoorMat);
+          this.entityManager.updateEntityMatrix(this.doorRightEntityId, rightDoorMat, [doorX, 2.0, 20.0], 4.0);
+        }
+
+        // Update Moving Elevator Platform Matrix
+        if (this.elevatorEntityId >= 0) {
+          const eleMat = Mat4.create();
+          Mat4.fromTranslation([14.0, this.physics.elevatorY, 10.0], eleMat);
+          this.entityManager.updateEntityMatrix(this.elevatorEntityId, eleMat, [14.0, this.physics.elevatorY, 10.0], 5.0);
+        }
+
+        // If player is standing on elevator platform, ride elevator
+        const playerOnElevator =
+          Math.hypot(this.playerController.position[0] - 14.0, this.playerController.position[2] - 10.0) < 2.1 &&
+          Math.abs(this.playerController.position[1] - (this.physics.elevatorY + 0.15)) < 0.35;
+        if (playerOnElevator && elevatorDeltaY !== 0) {
+          this.playerController.position[1] += elevatorDeltaY;
+        }
+      }
+
       // Camera update
       this.camera.update(deltaSec);
 
       // Player controller update (3rd Person controls & camera follow)
       this.playerController.update(deltaSec);
 
-      // Vertex animation update
-      this.animController.update(deltaSec);
+      // Vertex animation update (jump animation in air, walk when moving, idle when stopped)
+      if (this.currentPreset === 'anarchy') {
+        if (!this.playerController.isGrounded) {
+          const jumpTime = Math.min(0.82, this.playerController.jumpTime);
+          this.animController.evaluateClipAtTime('BVH_Jump_Mocap', jumpTime);
+        } else if (this.playerController.landingImpactTimer > 0) {
+          this.animController.evaluateClipAtTime('BVH_Jump_Mocap', 0.80);
+        } else if (this.playerController.isMoving) {
+          const currentClip = this.animController.getCurrentClipName();
+          if (currentClip !== 'Human_Walk_Cycle') {
+            this.animController.playClipByName('Human_Walk_Cycle', true);
+          }
+          const speedFactor = this.playerController.isRunning ? 1.6 : 1.0;
+          this.animController.update(deltaSec * speedFactor);
+        } else {
+          const currentClip = this.animController.getCurrentClipName();
+          if (currentClip !== 'BVH_Idle_Mocap') {
+            this.animController.playClipByName('BVH_Idle_Mocap', true);
+          }
+          this.animController.update(deltaSec);
+        }
+      } else {
+        this.animController.update(deltaSec);
+      }
 
       // Upload dynamic entities & joint matrices to GPU
       if (!this.deviceManager.isDeviceLost) {
@@ -313,98 +379,279 @@ export class DestroyerEngine {
     const mobile = isMobileBrowser();
 
     if (preset === 'anarchy') {
-      // Preset 0: GTA Style Anarchy Open World (20x Expanded Asphalt Ground + Simple Player Character + WASD & Jump)
-      const navMesh = ProceduralModels.createAnarchyCityGround(4800);
+      // Single 2-story building with opening door, interior stairs, and elevator
+      this.physics.setupDefaultBuildingPhysics();
+
+      const buildingData = ProceduralModels.createSingleBuildingWithStairsAndElevator();
       const playerData = ProceduralModels.createSimpleHumanoidPlayer();
 
-      const asphaltMatId = this.entityManager.registerMaterial({
-        baseColor: [0.18, 0.19, 0.22, 1.0], // Dark noise asphalt gray
+      const concreteMatId = this.entityManager.registerMaterial({
+        baseColor: [0.24, 0.28, 0.35, 1.0], // Dark Slate Concrete
         emissiveColor: [0, 0, 0, 0],
-        roughness: 0.82,
-        metallic: 0.18,
-        ao: 1.0,
-        alphaCutoff: 0.5,
-      });
-
-      const playerMatId = this.entityManager.registerMaterial({
-        baseColor: [0.15, 0.45, 0.75, 1.0], // Stylish Metallic Blue
-        emissiveColor: [0, 0, 0, 0],
-        roughness: 0.40,
+        roughness: 0.70,
         metallic: 0.20,
         ao: 1.0,
         alphaCutoff: 0.5,
       });
 
-      // Register Skeleton & Walk Clip
+      const doorMatId = this.entityManager.registerMaterial({
+        baseColor: [0.15, 0.70, 0.90, 0.9], // Tinted Glass Cyan
+        emissiveColor: [0.05, 0.20, 0.30, 0.5],
+        roughness: 0.25,
+        metallic: 0.85,
+        ao: 1.0,
+        alphaCutoff: 0.5,
+      });
+
+      const elevatorMatId = this.entityManager.registerMaterial({
+        baseColor: [0.90, 0.55, 0.15, 1.0], // Glowing Amber Platform
+        emissiveColor: [0.35, 0.18, 0.05, 0.6],
+        roughness: 0.35,
+        metallic: 0.60,
+        ao: 1.0,
+        alphaCutoff: 0.5,
+      });
+
+      const playerMatId = this.entityManager.registerMaterial({
+        baseColor: [0.20, 0.38, 0.60, 1.0], // Stylish Navy Human Attire
+        emissiveColor: [0, 0, 0, 0],
+        roughness: 0.52,
+        metallic: 0.12,
+        ao: 1.0,
+        alphaCutoff: 0.5,
+      });
+
+      const textMatId = this.entityManager.registerMaterial({
+        baseColor: [0.95, 0.75, 0.15, 1.0], // Glowing Gold 3D Text
+        emissiveColor: [0.45, 0.30, 0.05, 0.8],
+        roughness: 0.25,
+        metallic: 0.85,
+        ao: 1.0,
+        alphaCutoff: 0.5,
+      });
+
+      // Generate 3D Text Primitive for Floor Labels
+      const floorLabelMeshes: ParsedGLBPrimitive[] = [];
+      for (let k = 0; k <= 10; k++) {
+        floorLabelMeshes.push(
+          ProceduralModels.create3DTextMesh(`FLOOR ${k}`, 0.45, 0.08, `3D_Text_Floor_${k}`)
+        );
+      }
+
+      // Register Skeleton & Walk Clip + Jump & Idle BVH Clips
       const jointOffset = this.animController.registerSkeleton(playerData.joints, playerData.clip);
+      if (playerData.jumpClip) this.animController.addClip(playerData.jumpClip);
+      if (playerData.idleClip) this.animController.addClip(playerData.idleClip);
       this.animController.playClip(0);
 
       // Upload Geometries to GPU
-      this.uploadGeometries([navMesh, playerData.primitive]);
+      const geometries = [
+        buildingData.buildingMesh,
+        buildingData.doorLeftMesh,
+        buildingData.doorRightMesh,
+        buildingData.elevatorMesh,
+        playerData.primitive,
+        ...floorLabelMeshes,
+      ];
+      this.uploadGeometries(geometries);
 
-      const navVertCount = Math.floor(navMesh.positions.length / 3);
-      const playerVertCount = Math.floor(playerData.primitive.positions.length / 3);
+      let vOffset = 0;
+      let iOffset = 0;
 
-      const navMeshId = this.entityManager.registerMesh({
-        name: 'Anarchy_City_NavMesh',
-        firstIndex: 0,
-        indexCount: navMesh.indices.length,
-        baseVertex: 0,
-        vertexCount: navVertCount,
-        boundingRadius: navMesh.boundingRadius,
+      // 1. Building Mesh
+      const buildVerts = Math.floor(buildingData.buildingMesh.positions.length / 3);
+      const buildingMeshId = this.entityManager.registerMesh({
+        name: 'Single_Building_Mesh',
+        firstIndex: iOffset,
+        indexCount: buildingData.buildingMesh.indices.length,
+        baseVertex: vOffset,
+        vertexCount: buildVerts,
+        boundingRadius: buildingData.buildingMesh.boundingRadius,
         hasSkinning: false,
         hasMorphTargets: false,
         morphTargetCount: 0,
       });
+      vOffset += buildVerts;
+      iOffset += buildingData.buildingMesh.indices.length;
 
+      // 2. Left Door Mesh
+      const doorLeftVerts = Math.floor(buildingData.doorLeftMesh.positions.length / 3);
+      const doorLeftMeshId = this.entityManager.registerMesh({
+        name: 'Door_Left_Mesh',
+        firstIndex: iOffset,
+        indexCount: buildingData.doorLeftMesh.indices.length,
+        baseVertex: vOffset,
+        vertexCount: doorLeftVerts,
+        boundingRadius: buildingData.doorLeftMesh.boundingRadius,
+        hasSkinning: false,
+        hasMorphTargets: false,
+        morphTargetCount: 0,
+      });
+      vOffset += doorLeftVerts;
+      iOffset += buildingData.doorLeftMesh.indices.length;
+
+      // 3. Right Door Mesh
+      const doorRightVerts = Math.floor(buildingData.doorRightMesh.positions.length / 3);
+      const doorRightMeshId = this.entityManager.registerMesh({
+        name: 'Door_Right_Mesh',
+        firstIndex: iOffset,
+        indexCount: buildingData.doorRightMesh.indices.length,
+        baseVertex: vOffset,
+        vertexCount: doorRightVerts,
+        boundingRadius: buildingData.doorRightMesh.boundingRadius,
+        hasSkinning: false,
+        hasMorphTargets: false,
+        morphTargetCount: 0,
+      });
+      vOffset += doorRightVerts;
+      iOffset += buildingData.doorRightMesh.indices.length;
+
+      // 4. Elevator Mesh
+      const eleVerts = Math.floor(buildingData.elevatorMesh.positions.length / 3);
+      const elevatorMeshId = this.entityManager.registerMesh({
+        name: 'Elevator_Platform_Mesh',
+        firstIndex: iOffset,
+        indexCount: buildingData.elevatorMesh.indices.length,
+        baseVertex: vOffset,
+        vertexCount: eleVerts,
+        boundingRadius: buildingData.elevatorMesh.boundingRadius,
+        hasSkinning: false,
+        hasMorphTargets: false,
+        morphTargetCount: 0,
+      });
+      vOffset += eleVerts;
+      iOffset += buildingData.elevatorMesh.indices.length;
+
+      // 5. Player Mesh
+      const playerVerts = Math.floor(playerData.primitive.positions.length / 3);
       const playerMeshId = this.entityManager.registerMesh({
-        name: 'Simple_Humanoid_Player',
-        firstIndex: 0,
+        name: 'Human_Body_Player',
+        firstIndex: iOffset,
         indexCount: playerData.primitive.indices.length,
-        baseVertex: 0,
-        vertexCount: playerVertCount,
+        baseVertex: vOffset,
+        vertexCount: playerVerts,
         boundingRadius: playerData.primitive.boundingRadius,
         hasSkinning: true,
         hasMorphTargets: false,
         morphTargetCount: 0,
       });
+      vOffset += playerVerts;
+      iOffset += playerData.primitive.indices.length;
 
-      // Add Ground Entity
-      const groundMat = Mat4.create();
-      Mat4.fromTranslation([0, 0, 0], groundMat);
+      // 6. 3D Text Floor Label Meshes (Floors 0 through 10)
+      const floorLabelMeshIds: number[] = [];
+      for (let k = 0; k <= 10; k++) {
+        const prim = floorLabelMeshes[k];
+        const vCount = Math.floor(prim.positions.length / 3);
+        const mId = this.entityManager.registerMesh({
+          name: `3D_Text_Floor_${k}`,
+          firstIndex: iOffset,
+          indexCount: prim.indices.length,
+          baseVertex: vOffset,
+          vertexCount: vCount,
+          boundingRadius: 2.0,
+          hasSkinning: false,
+          hasMorphTargets: false,
+          morphTargetCount: 0,
+        });
+        floorLabelMeshIds.push(mId);
+        vOffset += vCount;
+        iOffset += prim.indices.length;
+      }
+
+      // Add Entities
+      // Building Entity
+      const buildMat = Mat4.create();
+      Mat4.fromTranslation([0, 0, 0], buildMat);
       this.entityManager.addEntity({
-        meshId: navMeshId,
-        materialId: asphaltMatId,
-        worldMatrix: groundMat,
-        sphereCenter: [0, 0, 0, 3200.0],
+        meshId: buildingMeshId,
+        materialId: concreteMatId,
+        worldMatrix: buildMat,
+        sphereCenter: [0, 20.0, 0, 45.0],
         flags: 1,
         animOffset: 0,
-        name: 'Anarchy_City_NavMesh_Plane',
+        name: 'Building_Structure',
       });
 
-      // Add Player Entity
+      // 3D Text Floor Label Entities on Interior Rear Wall for Floors 0 to 10
+      for (let k = 0; k <= 10; k++) {
+        const labelMat = Mat4.create();
+        const labelPos: [number, number, number] = [0, k * 4.0 + 2.6, -19.6];
+        Mat4.fromTranslation(labelPos, labelMat);
+        this.entityManager.addEntity({
+          meshId: floorLabelMeshIds[k],
+          materialId: textMatId,
+          worldMatrix: labelMat,
+          sphereCenter: [labelPos[0], labelPos[1], labelPos[2], 3.0],
+          flags: 1,
+          animOffset: 0,
+          name: `3D_Label_Floor_${k}`,
+        });
+      }
+
+      // Left Door Entity
+      const doorLeftMat = Mat4.create();
+      Mat4.fromTranslation([-2.0, 2.0, 20.0], doorLeftMat);
+      this.doorLeftEntityId = this.entityManager.addEntity({
+        meshId: doorLeftMeshId,
+        materialId: doorMatId,
+        worldMatrix: doorLeftMat,
+        sphereCenter: [-2.0, 2.0, 20.0, 4.0],
+        flags: 1,
+        animOffset: 0,
+        name: 'Sliding_Door_Left',
+      });
+
+      // Right Door Entity
+      const doorRightMat = Mat4.create();
+      Mat4.fromTranslation([2.0, 2.0, 20.0], doorRightMat);
+      this.doorRightEntityId = this.entityManager.addEntity({
+        meshId: doorRightMeshId,
+        materialId: doorMatId,
+        worldMatrix: doorRightMat,
+        sphereCenter: [2.0, 2.0, 20.0, 4.0],
+        flags: 1,
+        animOffset: 0,
+        name: 'Sliding_Door_Right',
+      });
+
+      // Elevator Entity
+      const eleMat = Mat4.create();
+      Mat4.fromTranslation([14.0, 0.15, 10.0], eleMat);
+      this.elevatorEntityId = this.entityManager.addEntity({
+        meshId: elevatorMeshId,
+        materialId: elevatorMatId,
+        worldMatrix: eleMat,
+        sphereCenter: [14.0, 0.15, 10.0, 5.0],
+        flags: 1,
+        animOffset: 0,
+        name: 'Elevator_Platform',
+      });
+
+      // Player Entity
+      const startPos: [number, number, number] = [0, 0, 25.0];
       const playerMat = Mat4.create();
-      Mat4.fromTranslation([0, 0, 0], playerMat);
+      Mat4.fromTranslation(startPos, playerMat);
 
       const playerEntId = this.entityManager.addEntity({
         meshId: playerMeshId,
         materialId: playerMatId,
         worldMatrix: playerMat,
-        sphereCenter: [0, 1.0, 0, 2.5],
+        sphereCenter: [0, 1.0, 25.0, 2.5],
         flags: 1,
         animOffset: jointOffset,
         name: 'Player_Character',
       });
 
       // Configure Player Controller
-      this.playerController.position = [0, 0, 0];
+      this.playerController.position = [0, 0, 25.0];
       this.playerController.cameraTheta = 0.0;
       this.playerController.cameraPhi = 1.25;
       this.playerController.rotationY = Math.PI;
       this.playerController.entityId = playerEntId;
 
-      // Position 3rd Person Camera cleanly behind player
-      this.camera.target = [0, 1.4, 0];
+      // Position 3rd Person Camera cleanly behind player looking toward building
+      this.camera.target = [0, 1.4, 25.0];
       this.camera.radius = 7.5;
       this.camera.theta = 0.0;
       this.camera.phi = 1.25;
@@ -841,5 +1088,36 @@ export class DestroyerEngine {
     const device = this.deviceManager.getDevice();
     this.entityManager.uploadToGPU(device);
     return entityId;
+  }
+
+  /**
+   * Load and play an external or custom BVH motion capture animation on the character
+   */
+  public loadBVHAnimation(
+    bvhText: string,
+    name?: string
+  ): { success: boolean; clipName: string; duration: number } {
+    try {
+      const clipIdx = this.animController.loadBVH(bvhText, { name: name || 'Custom_BVH_Mocap' });
+      const clip = this.animController.clips[clipIdx];
+      return { success: true, clipName: clip.name, duration: clip.duration };
+    } catch (err: any) {
+      console.error('Failed to parse BVH:', err);
+      return { success: false, clipName: '', duration: 0 };
+    }
+  }
+
+  /**
+   * Switch active character animation clip by name
+   */
+  public switchAnimation(clipName: string): boolean {
+    return this.animController.playClipByName(clipName, true);
+  }
+
+  /**
+   * Get list of all currently loaded animation clips
+   */
+  public getAvailableAnimations(): string[] {
+    return this.animController.getClipNames();
   }
 }
