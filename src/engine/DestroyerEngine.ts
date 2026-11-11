@@ -16,6 +16,7 @@ import { GLBLoader, ParsedGLBPrimitive } from './loaders/GLBLoader';
 import { ProceduralModels } from './loaders/ProceduralModels';
 import { Mat4 } from './math/Mat4';
 import { IndirectRenderer } from './render/IndirectRenderer';
+import { FBXLoader } from './loaders/FBXLoader';
 
 export const isMobileBrowser = (): boolean => {
   if (typeof navigator === 'undefined') return false;
@@ -39,6 +40,8 @@ export class DestroyerEngine {
   private doorLeftEntityId = -1;
   private doorRightEntityId = -1;
   private elevatorEntityId = -1;
+  private elevatorBtnUpEntityId = -1;
+  private elevatorBtnDownEntityId = -1;
 
   private isRunning = false;
   private animationFrameId: number | null = null;
@@ -269,6 +272,21 @@ export class DestroyerEngine {
           this.entityManager.updateEntityMatrix(this.elevatorEntityId, eleMat, [14.0, this.physics.elevatorY, 10.0], 5.0);
         }
 
+        // Update Elevator Cab Buttons
+        if (this.elevatorBtnUpEntityId >= 0) {
+          const btnUpMat = Mat4.create();
+          const btnUpPos: [number, number, number] = [14.0 - 1.98, this.physics.elevatorY + 1.7, 10.0 + 0.8];
+          Mat4.fromTranslation(btnUpPos, btnUpMat);
+          this.entityManager.updateEntityMatrix(this.elevatorBtnUpEntityId, btnUpMat, btnUpPos, 1.0);
+        }
+
+        if (this.elevatorBtnDownEntityId >= 0) {
+          const btnDownMat = Mat4.create();
+          const btnDownPos: [number, number, number] = [14.0 - 1.98, this.physics.elevatorY + 1.3, 10.0 + 0.8];
+          Mat4.fromTranslation(btnDownPos, btnDownMat);
+          this.entityManager.updateEntityMatrix(this.elevatorBtnDownEntityId, btnDownMat, btnDownPos, 1.0);
+        }
+
         // If player is standing on elevator platform, ride elevator
         const playerOnElevator =
           Math.hypot(this.playerController.position[0] - 14.0, this.playerController.position[2] - 10.0) < 2.1 &&
@@ -383,13 +401,49 @@ export class DestroyerEngine {
       this.physics.setupDefaultBuildingPhysics();
 
       const buildingData = ProceduralModels.createSingleBuildingWithStairsAndElevator();
-      const playerData = ProceduralModels.createSimpleHumanoidPlayer();
+      
+      let playerData: any;
+      try {
+        // Attempt to load user-provided FBX
+        const fbxResult = await FBXLoader.load('/src/assets/animations/character-remy/standard-walk.fbx');
+        if (fbxResult.primitives.length > 0) {
+          playerData = {
+            primitive: fbxResult.primitives[0],
+            joints: [], // FBX Skeletons are complex, for now we just use the mesh
+            clip: fbxResult.clips[0] || ProceduralModels.createSimpleHumanoidPlayer().clip,
+            allClips: fbxResult.clips,
+          };
+        } else {
+          playerData = ProceduralModels.createSimpleHumanoidPlayer();
+        }
+      } catch (err) {
+        console.warn('Failed to load FBX player, falling back to procedural:', err);
+        playerData = ProceduralModels.createSimpleHumanoidPlayer();
+      }
 
       const concreteMatId = this.entityManager.registerMaterial({
         baseColor: [0.24, 0.28, 0.35, 1.0], // Dark Slate Concrete
         emissiveColor: [0, 0, 0, 0],
         roughness: 0.70,
         metallic: 0.20,
+        ao: 1.0,
+        alphaCutoff: 0.5,
+      });
+
+      const glassMatId = this.entityManager.registerMaterial({
+        baseColor: [0.35, 0.75, 0.95, 0.6], // Glass Blue
+        emissiveColor: [0.05, 0.15, 0.25, 0.3],
+        roughness: 0.05,
+        metallic: 0.95,
+        ao: 1.0,
+        alphaCutoff: 0.1,
+      });
+
+      const furnitureMatId = this.entityManager.registerMaterial({
+        baseColor: [0.45, 0.35, 0.25, 1.0], // Office Wood
+        emissiveColor: [0, 0, 0, 0],
+        roughness: 0.55,
+        metallic: 0.05,
         ao: 1.0,
         alphaCutoff: 0.5,
       });
@@ -430,6 +484,24 @@ export class DestroyerEngine {
         alphaCutoff: 0.5,
       });
 
+      const btnUpMatId = this.entityManager.registerMaterial({
+        baseColor: [0.1, 0.9, 0.4, 1.0], // Emerald Green Up
+        emissiveColor: [0.05, 0.4, 0.15, 0.8],
+        roughness: 0.2,
+        metallic: 0.8,
+        ao: 1.0,
+        alphaCutoff: 0.5,
+      });
+
+      const btnDownMatId = this.entityManager.registerMaterial({
+        baseColor: [0.9, 0.1, 0.2, 1.0], // Ruby Red Down / Call
+        emissiveColor: [0.4, 0.05, 0.1, 0.8],
+        roughness: 0.2,
+        metallic: 0.8,
+        ao: 1.0,
+        alphaCutoff: 0.5,
+      });
+
       // Generate 3D Text Primitive for Floor Labels
       const floorLabelMeshes: ParsedGLBPrimitive[] = [];
       for (let k = 0; k <= 10; k++) {
@@ -444,12 +516,19 @@ export class DestroyerEngine {
       if (playerData.idleClip) this.animController.addClip(playerData.idleClip);
       this.animController.playClip(0);
 
-      // Upload Geometries to GPU
+      // Upload ALL Geometries to GPU
       const geometries = [
         buildingData.buildingMesh,
+        buildingData.groundSlabMesh,
+        buildingData.floorButtonsMesh,
         buildingData.doorLeftMesh,
         buildingData.doorRightMesh,
         buildingData.elevatorMesh,
+        buildingData.btnUpMesh,
+        buildingData.btnDownMesh,
+        buildingData.bannerMesh,
+        buildingData.officeMesh,
+        buildingData.windowMesh,
         playerData.primitive,
         ...floorLabelMeshes,
       ];
@@ -461,18 +540,50 @@ export class DestroyerEngine {
       // 1. Building Mesh
       const buildVerts = Math.floor(buildingData.buildingMesh.positions.length / 3);
       const buildingMeshId = this.entityManager.registerMesh({
-        name: 'Single_Building_Mesh',
+        name: 'Skyscraper_Rooms_Mesh',
         firstIndex: iOffset,
         indexCount: buildingData.buildingMesh.indices.length,
         baseVertex: vOffset,
         vertexCount: buildVerts,
-        boundingRadius: buildingData.buildingMesh.boundingRadius,
+        boundingRadius: 100.0,
         hasSkinning: false,
         hasMorphTargets: false,
         morphTargetCount: 0,
       });
       vOffset += buildVerts;
       iOffset += buildingData.buildingMesh.indices.length;
+
+      // 1a. Ground Slab Mesh
+      const groundVerts = Math.floor(buildingData.groundSlabMesh.positions.length / 3);
+      const groundMeshId = this.entityManager.registerMesh({
+        name: 'Massive_Ground_Mesh',
+        firstIndex: iOffset,
+        indexCount: buildingData.groundSlabMesh.indices.length,
+        baseVertex: vOffset,
+        vertexCount: groundVerts,
+        boundingRadius: 5000.0,
+        hasSkinning: false,
+        hasMorphTargets: false,
+        morphTargetCount: 0,
+      });
+      vOffset += groundVerts;
+      iOffset += buildingData.groundSlabMesh.indices.length;
+
+      // 1b. Floor Buttons Mesh
+      const floorBtnVerts = Math.floor(buildingData.floorButtonsMesh.positions.length / 3);
+      const floorButtonsMeshId = this.entityManager.registerMesh({
+        name: 'Floor_Buttons_Mesh',
+        firstIndex: iOffset,
+        indexCount: buildingData.floorButtonsMesh.indices.length,
+        baseVertex: vOffset,
+        vertexCount: floorBtnVerts,
+        boundingRadius: 100.0,
+        hasSkinning: false,
+        hasMorphTargets: false,
+        morphTargetCount: 0,
+      });
+      vOffset += floorBtnVerts;
+      iOffset += buildingData.floorButtonsMesh.indices.length;
 
       // 2. Left Door Mesh
       const doorLeftVerts = Math.floor(buildingData.doorLeftMesh.positions.length / 3);
@@ -482,7 +593,7 @@ export class DestroyerEngine {
         indexCount: buildingData.doorLeftMesh.indices.length,
         baseVertex: vOffset,
         vertexCount: doorLeftVerts,
-        boundingRadius: buildingData.doorLeftMesh.boundingRadius,
+        boundingRadius: 5.0,
         hasSkinning: false,
         hasMorphTargets: false,
         morphTargetCount: 0,
@@ -498,7 +609,7 @@ export class DestroyerEngine {
         indexCount: buildingData.doorRightMesh.indices.length,
         baseVertex: vOffset,
         vertexCount: doorRightVerts,
-        boundingRadius: buildingData.doorRightMesh.boundingRadius,
+        boundingRadius: 5.0,
         hasSkinning: false,
         hasMorphTargets: false,
         morphTargetCount: 0,
@@ -509,18 +620,97 @@ export class DestroyerEngine {
       // 4. Elevator Mesh
       const eleVerts = Math.floor(buildingData.elevatorMesh.positions.length / 3);
       const elevatorMeshId = this.entityManager.registerMesh({
-        name: 'Elevator_Platform_Mesh',
+        name: 'Elevator_Cab_Mesh',
         firstIndex: iOffset,
         indexCount: buildingData.elevatorMesh.indices.length,
         baseVertex: vOffset,
         vertexCount: eleVerts,
-        boundingRadius: buildingData.elevatorMesh.boundingRadius,
+        boundingRadius: 5.0,
         hasSkinning: false,
         hasMorphTargets: false,
         morphTargetCount: 0,
       });
       vOffset += eleVerts;
       iOffset += buildingData.elevatorMesh.indices.length;
+
+      // 4b. Cab Buttons
+      const btnUpVerts = Math.floor(buildingData.btnUpMesh.positions.length / 3);
+      const btnUpMeshId = this.entityManager.registerMesh({
+        name: 'Elevator_Btn_UP_Mesh',
+        firstIndex: iOffset,
+        indexCount: buildingData.btnUpMesh.indices.length,
+        baseVertex: vOffset,
+        vertexCount: btnUpVerts,
+        boundingRadius: 1.0,
+        hasSkinning: false,
+        hasMorphTargets: false,
+        morphTargetCount: 0,
+      });
+      vOffset += btnUpVerts;
+      iOffset += buildingData.btnUpMesh.indices.length;
+
+      const btnDownVerts = Math.floor(buildingData.btnDownMesh.positions.length / 3);
+      const btnDownMeshId = this.entityManager.registerMesh({
+        name: 'Elevator_Btn_DOWN_Mesh',
+        firstIndex: iOffset,
+        indexCount: buildingData.btnDownMesh.indices.length,
+        baseVertex: vOffset,
+        vertexCount: btnDownVerts,
+        boundingRadius: 1.0,
+        hasSkinning: false,
+        hasMorphTargets: false,
+        morphTargetCount: 0,
+      });
+      vOffset += btnDownVerts;
+      iOffset += buildingData.btnDownMesh.indices.length;
+
+      // 4c. Banner Mesh
+      const bannerVerts = Math.floor(buildingData.bannerMesh.positions.length / 3);
+      const bannerMeshId = this.entityManager.registerMesh({
+        name: 'Banner_Text_Mesh',
+        firstIndex: iOffset,
+        indexCount: buildingData.bannerMesh.indices.length,
+        baseVertex: vOffset,
+        vertexCount: bannerVerts,
+        boundingRadius: 10.0,
+        hasSkinning: false,
+        hasMorphTargets: false,
+        morphTargetCount: 0,
+      });
+      vOffset += bannerVerts;
+      iOffset += buildingData.bannerMesh.indices.length;
+
+      // 4d. Office Mesh
+      const officeVerts = Math.floor(buildingData.officeMesh.positions.length / 3);
+      const officeMeshId = this.entityManager.registerMesh({
+        name: 'Office_Furniture_Mesh',
+        firstIndex: iOffset,
+        indexCount: buildingData.officeMesh.indices.length,
+        baseVertex: vOffset,
+        vertexCount: officeVerts,
+        boundingRadius: 100.0,
+        hasSkinning: false,
+        hasMorphTargets: false,
+        morphTargetCount: 0,
+      });
+      vOffset += officeVerts;
+      iOffset += buildingData.officeMesh.indices.length;
+
+      // 4e. Window Mesh
+      const windowVerts = Math.floor(buildingData.windowMesh.positions.length / 3);
+      const windowMeshId = this.entityManager.registerMesh({
+        name: 'Window_Glass_Mesh',
+        firstIndex: iOffset,
+        indexCount: buildingData.windowMesh.indices.length,
+        baseVertex: vOffset,
+        vertexCount: windowVerts,
+        boundingRadius: 100.0,
+        hasSkinning: false,
+        hasMorphTargets: false,
+        morphTargetCount: 0,
+      });
+      vOffset += windowVerts;
+      iOffset += buildingData.windowMesh.indices.length;
 
       // 5. Player Mesh
       const playerVerts = Math.floor(playerData.primitive.positions.length / 3);
@@ -549,7 +739,7 @@ export class DestroyerEngine {
           indexCount: prim.indices.length,
           baseVertex: vOffset,
           vertexCount: vCount,
-          boundingRadius: 2.0,
+          boundingRadius: 5.0,
           hasSkinning: false,
           hasMorphTargets: false,
           morphTargetCount: 0,
@@ -560,20 +750,79 @@ export class DestroyerEngine {
       }
 
       // Add Entities
-      // Building Entity
-      const buildMat = Mat4.create();
-      Mat4.fromTranslation([0, 0, 0], buildMat);
+      const groundMat = Mat4.create();
+      Mat4.fromTranslation([0, 0, 0], groundMat);
       this.entityManager.addEntity({
-        meshId: buildingMeshId,
+        meshId: groundMeshId,
         materialId: concreteMatId,
-        worldMatrix: buildMat,
-        sphereCenter: [0, 20.0, 0, 45.0],
+        worldMatrix: groundMat,
+        sphereCenter: [0, 0, 0, 5000.0],
         flags: 1,
-        animOffset: 0,
-        name: 'Building_Structure',
+        name: 'Massive_Ground_Slab',
       });
 
-      // 3D Text Floor Label Entities on Interior Rear Wall for Floors 0 to 10
+      // Buildings
+      const offsets: [number, number, number][] = [[0, 0, 0], [60, 0, 0]];
+      offsets.forEach((off, idx) => {
+        const nameSuffix = idx === 0 ? 'Main' : 'Secondary';
+        const mat = Mat4.create();
+        Mat4.fromTranslation(off, mat);
+
+        // Building
+        this.entityManager.addEntity({
+          meshId: buildingMeshId,
+          materialId: concreteMatId,
+          worldMatrix: mat,
+          sphereCenter: [off[0], 20, off[2], 2000.0],
+          flags: 1,
+          name: `${nameSuffix}_Building`,
+        });
+
+        // Windows
+        this.entityManager.addEntity({
+          meshId: windowMeshId,
+          materialId: glassMatId,
+          worldMatrix: mat,
+          sphereCenter: [off[0], 20, off[2], 2000.0],
+          flags: 1,
+          name: `${nameSuffix}_Windows`,
+        });
+
+        // Office Furniture
+        this.entityManager.addEntity({
+          meshId: officeMeshId,
+          materialId: furnitureMatId,
+          worldMatrix: mat,
+          sphereCenter: [off[0], 20, off[2], 2000.0],
+          flags: 1,
+          name: `${nameSuffix}_Office`,
+        });
+
+        // Banner
+        const bannerMat = Mat4.create();
+        Mat4.fromTranslation([off[0], 4.4, off[2] + 20.25], bannerMat);
+        this.entityManager.addEntity({
+          meshId: bannerMeshId,
+          materialId: textMatId,
+          worldMatrix: bannerMat,
+          sphereCenter: [off[0], 4.4, off[2] + 20.25, 20.0],
+          flags: 1,
+          name: `${nameSuffix}_Banner`,
+        });
+      });
+
+      // Floor Buttons Entity
+      const mainBuildMat = Mat4.create();
+      this.entityManager.addEntity({
+        meshId: floorButtonsMeshId,
+        materialId: btnDownMatId,
+        worldMatrix: mainBuildMat,
+        sphereCenter: [11.5, 20.0, 9.0, 50.0],
+        flags: 1,
+        name: 'Floor_Call_Buttons',
+      });
+
+      // 3D Text Floor Label Entities for Main Building
       for (let k = 0; k <= 10; k++) {
         const labelMat = Mat4.create();
         const labelPos: [number, number, number] = [0, k * 4.0 + 2.6, -19.6];
@@ -582,10 +831,9 @@ export class DestroyerEngine {
           meshId: floorLabelMeshIds[k],
           materialId: textMatId,
           worldMatrix: labelMat,
-          sphereCenter: [labelPos[0], labelPos[1], labelPos[2], 3.0],
+          sphereCenter: [labelPos[0], labelPos[1], labelPos[2], 10.0],
           flags: 1,
-          animOffset: 0,
-          name: `3D_Label_Floor_${k}`,
+          name: `3D_Label_Main_Floor_${k}`,
         });
       }
 
@@ -625,7 +873,32 @@ export class DestroyerEngine {
         sphereCenter: [14.0, 0.15, 10.0, 5.0],
         flags: 1,
         animOffset: 0,
-        name: 'Elevator_Platform',
+        name: 'Elevator_Cab_Structure',
+      });
+
+      // Elevator Cab Buttons
+      const btnUpMat = Mat4.create();
+      Mat4.fromTranslation([14.0 - 1.98, 0.15 + 1.7, 10.0 + 0.8], btnUpMat);
+      this.elevatorBtnUpEntityId = this.entityManager.addEntity({
+        meshId: btnUpMeshId,
+        materialId: btnUpMatId,
+        worldMatrix: btnUpMat,
+        sphereCenter: [12.0, 1.85, 10.8, 1.0],
+        flags: 1,
+        animOffset: 0,
+        name: 'Elevator_Btn_UP',
+      });
+
+      const btnDownMat = Mat4.create();
+      Mat4.fromTranslation([14.0 - 1.98, 0.15 + 1.3, 10.0 + 0.8], btnDownMat);
+      this.elevatorBtnDownEntityId = this.entityManager.addEntity({
+        meshId: btnDownMeshId,
+        materialId: btnDownMatId,
+        worldMatrix: btnDownMat,
+        sphereCenter: [12.0, 1.45, 10.8, 1.0],
+        flags: 1,
+        animOffset: 0,
+        name: 'Elevator_Btn_DOWN',
       });
 
       // Player Entity
@@ -1119,5 +1392,9 @@ export class DestroyerEngine {
    */
   public getAvailableAnimations(): string[] {
     return this.animController.getClipNames();
+  }
+
+  public getPlayerEnergy(): number {
+    return this.playerController.energy;
   }
 }

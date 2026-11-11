@@ -20,6 +20,10 @@ export class PlayerController {
   public isGrounded = true;
   public gravity = -28.0;
   public jumpStrength = 11.5;
+  public energy = 1.0; // 0 to 1.0
+  public energyRegenRate = 0.15; // 15% per second
+  public jumpEnergyCost = 0.2;  // 20% per jump
+  public runEnergyCost = 0.1;   // 10% per second while running and moving
 
   public rotationY = 0;        // Player facing yaw angle in radians
   public isRunning = false;    // Run mode toggle (walk vs run)
@@ -156,29 +160,35 @@ export class PlayerController {
       return Math.hypot(pt[0] - closestX, pt[1] - closestY, pt[2] - closestZ);
     };
 
-    // 1. Check all 10 floor call station button pillars (X=11.5, Z=8.0)
+    // 1. Check all 10 floor call station buttons (X=11.28, Z=9.0)
     for (let k = 0; k <= 10; k++) {
-      const pillarPos: [number, number, number] = [11.5, k * 4.0 + 1.3, 8.35];
-      if (rayDistToPoint(pillarPos) < 2.2) {
+      const buttonPos: [number, number, number] = [11.28, k * 4.0 + 1.6, 9.0];
+      if (rayDistToPoint(buttonPos) < 0.6) {
         this.engine.physics.setElevatorTargetFloor(k);
         return true;
       }
     }
 
-    // 2. Check elevator cab interior or floor buttons (X=14.0, Z=10.0)
-    const cabPos: [number, number, number] = [14.0, this.engine.physics.elevatorY + 1.2, 10.0];
-    if (rayDistToPoint(cabPos) < 3.2) {
-      const currentFloor = Math.max(0, Math.min(10, Math.round(this.position[1] / 4.0)));
-      if (Math.abs(this.position[1] - (this.engine.physics.elevatorY + 0.15)) < 0.8) {
-        const nextFloor = (this.engine.physics.elevatorTargetFloor + 1) % 11;
-        this.engine.physics.setElevatorTargetFloor(nextFloor);
-      } else {
-        this.engine.physics.setElevatorTargetFloor(currentFloor);
-      }
+    // 2. Check interior cab buttons (attached to cab at X=14-1.98, Z=10+0.8)
+    const elevatorY = this.engine.physics.elevatorY;
+    const btnUpPos: [number, number, number] = [14.0 - 1.98, elevatorY + 1.7, 10.0 + 0.8];
+    const btnDownPos: [number, number, number] = [14.0 - 1.98, elevatorY + 1.3, 10.0 + 0.8];
+
+    // Click UP Button (+1 floor)
+    if (rayDistToPoint(btnUpPos) < 0.4) {
+      const nextFloor = Math.min(10, this.engine.physics.elevatorTargetFloor + 1);
+      this.engine.physics.setElevatorTargetFloor(nextFloor);
       return true;
     }
 
-    // 3. Proximity Fallback: If near elevator shaft (< 4.5m), call elevator
+    // Click DOWN Button (-1 floor)
+    if (rayDistToPoint(btnDownPos) < 0.4) {
+      const prevFloor = Math.max(0, this.engine.physics.elevatorTargetFloor - 1);
+      this.engine.physics.setElevatorTargetFloor(prevFloor);
+      return true;
+    }
+
+    // 3. Proximity Fallback: If near elevator shaft (< 4.5m), call elevator to current floor
     const distToShaft = Math.hypot(this.position[0] - 14.0, this.position[2] - 10.0);
     if (distToShaft < 4.5) {
       const playerFloor = Math.max(0, Math.min(10, Math.round(this.position[1] / 4.0)));
@@ -199,12 +209,13 @@ export class PlayerController {
   }
 
   public jump(): void {
-    if (this.isGrounded) {
+    if (this.isGrounded && this.energy >= this.jumpEnergyCost) {
       this.velocityY = this.jumpStrength;
       this.isGrounded = false;
       this.isJumping = true;
       this.jumpTime = 0;
       this.landingImpactTimer = 0;
+      this.energy -= this.jumpEnergyCost;
     }
   }
 
@@ -242,6 +253,10 @@ export class PlayerController {
   public update(deltaSec: number): void {
     if (this.entityId < 0 || this.engine.isDeviceLost) return;
 
+    // Energy regeneration and consumption
+    this.energy = Math.min(1.0, this.energy + this.energyRegenRate * deltaSec);
+    const canRun = this.isRunning && this.energy > 0.05;
+
     // 1. Handle A / D Rotation with smooth angular dampening (A = Turn Left, D = Turn Right)
     let targetTurn = 0;
     if (this.keys['KeyA'] || this.keys['ArrowLeft']) targetTurn += 1;
@@ -271,18 +286,27 @@ export class PlayerController {
     if (this.keys['KeyW'] || this.keys['ArrowUp']) isForward = true;
     if (this.keys['KeyS'] || this.keys['ArrowDown']) isBackward = true;
 
-    if (this.joystickVec[1] < -0.15) isForward = true;
-    if (this.joystickVec[1] > 0.15) isBackward = true;
+    // Joystick: Only walk if horizontal input is not dominant (allows turning in place)
+    const joyX = Math.abs(this.joystickVec[0]);
+    const joyY = Math.abs(this.joystickVec[1]);
+    if (joyY > 0.15 && joyY > joyX * 0.8) {
+      if (this.joystickVec[1] < -0.15) isForward = true;
+      if (this.joystickVec[1] > 0.15) isBackward = true;
+    }
 
     let targetSpeed = 0;
     if (isForward) {
-      targetSpeed = this.isRunning ? this.runSpeedForward : this.walkSpeedForward;
+      targetSpeed = canRun ? this.runSpeedForward : this.walkSpeedForward;
+      if (canRun) {
+        this.energy = Math.max(0, this.energy - this.runEnergyCost * deltaSec);
+      }
     } else if (isBackward) {
       targetSpeed = -this.moveSpeedBackward;
     }
 
     // Smooth velocity dampening (silky acceleration and friction deceleration)
-    this.currentSpeed += (targetSpeed - this.currentSpeed) * Math.min(1.0, deltaSec * 12.0);
+    const friction = targetSpeed === 0 ? (Math.abs(targetTurn) > 0.1 ? 35.0 : 12.0) : 12.0;
+    this.currentSpeed += (targetSpeed - this.currentSpeed) * Math.min(1.0, deltaSec * friction);
     this.isMoving = Math.abs(this.currentSpeed) > 0.1 || Math.abs(this.currentTurnSpeed) > 0.1;
 
     // Forward direction vector derived from facing angle
@@ -305,7 +329,7 @@ export class PlayerController {
       const physRes = this.engine.physics.updateCharacterPhysics(
         this.position,
         [dispX, dispY, dispZ],
-        0.25,
+        0.4,
         1.8
       );
 
