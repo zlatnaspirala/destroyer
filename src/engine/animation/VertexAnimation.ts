@@ -2,7 +2,7 @@
  * Destroyer Engine - Vertex Animation System
  * Handles:
  * 1. GPU Morph Targets (Blend Shapes) with interpolation & weight control
- * 2. Skeletal Joint Skinning with animation clip evaluation
+ * 2. Skeletal Joint Skinning with full TRS animation clip evaluation & topological hierarchy
  * 3. Loading and playing Biovision Hierarchy (BVH) motion capture data
  * 4. Procedural Harmonic Vertex Wave simulation
  */
@@ -29,39 +29,75 @@ export class VertexAnimationController {
   public waveFactor = 0.0;
   public waveSpeed = 1.0;
 
+  // Pre-allocated scratch buffers for zero-GC clip evaluation
+  private scratchT = new Float32Array(0);
+  private scratchR = new Float32Array(0);
+  private scratchS = new Float32Array(0);
+  private scratchVisited = new Uint8Array(0);
+  private scratchSkinMat = new Float32Array(16);
+
   constructor(entityManager?: FlatEntityManager) {
     this.entityManager = entityManager;
-    this.morphWeights[0] = 0.0;
-    this.morphWeights[1] = 0.0;
-    this.morphWeights[2] = 0.0;
-    this.morphWeights[3] = 0.0;
+    this.morphWeights.fill(0);
+  }
+
+  private ensureScratchSize(jointCount: number): void {
+    if (this.scratchVisited.length < jointCount) {
+      this.scratchT = new Float32Array(jointCount * 3);
+      this.scratchR = new Float32Array(jointCount * 4);
+      this.scratchS = new Float32Array(jointCount * 3);
+      this.scratchVisited = new Uint8Array(jointCount);
+    }
+  }
+
+  private computeJointWorld(idx: number): Float32Array {
+    const joint = this.joints[idx];
+    if (this.scratchVisited[idx]) return joint.worldMatrix;
+    this.scratchVisited[idx] = 1;
+
+    if (joint.parentIndex < 0 || joint.parentIndex >= this.joints.length) {
+      joint.worldMatrix.set(joint.localMatrix);
+    } else {
+      const parentWorld = this.computeJointWorld(joint.parentIndex);
+      Mat4.multiply(parentWorld, joint.localMatrix, joint.worldMatrix);
+    }
+    return joint.worldMatrix;
   }
 
   registerSkeleton(joints: SkeletonJoint[], clip?: AnimationClip): number {
     const offset = this.joints.length;
-    this.joints.push(...joints);
+
+    for (let i = 0; i < joints.length; i++) {
+      const j = joints[i];
+      if (!j.initialTranslation || !j.initialRotation || !j.initialScale) {
+        const dec = Mat4.decompose(j.localMatrix);
+        if (!j.initialTranslation) j.initialTranslation = dec.translation;
+        if (!j.initialRotation) j.initialRotation = dec.rotation;
+        if (!j.initialScale) j.initialScale = dec.scale;
+      }
+      if (offset > 0 && j.parentIndex >= 0) {
+        j.parentIndex += offset;
+      }
+      this.joints.push(j);
+    }
+
     if (clip) {
       this.addClip(clip);
     }
+
     if (this.entityManager) {
       this.entityManager.totalJointsCount = this.joints.length;
+      this.ensureScratchSize(this.joints.length);
+      this.scratchVisited.fill(0);
 
-      // Populate initial skinning matrices to prevent zero-matrices
-      for (let i = 0; i < joints.length; i++) {
-        const joint = joints[i];
-        if (joint.parentIndex < 0) {
-          joint.worldMatrix.set(joint.localMatrix);
-        } else {
-          const parent = this.joints[joint.parentIndex];
-          if (parent) {
-            Mat4.multiply(parent.worldMatrix, joint.localMatrix, joint.worldMatrix);
-          }
-        }
-        const skinMat = new Float32Array(16);
-        Mat4.multiply(joint.worldMatrix, joint.inverseBindMatrix, skinMat);
-        const bufOffset = (offset + i) * 16;
+      // Populate initial skinning matrices in bind pose
+      for (let i = offset; i < this.joints.length; i++) {
+        const joint = this.joints[i];
+        this.computeJointWorld(i);
+        Mat4.multiply(joint.worldMatrix, joint.inverseBindMatrix, this.scratchSkinMat);
+        const bufOffset = i * 16;
         if (bufOffset + 16 <= this.entityManager.jointMatrices.length) {
-          this.entityManager.jointMatrices.set(skinMat, bufOffset);
+          this.entityManager.jointMatrices.set(this.scratchSkinMat, bufOffset);
         }
       }
     }
@@ -75,7 +111,6 @@ export class VertexAnimationController {
   }
 
   addClip(clip: AnimationClip): number {
-    // Check if clip already exists by name
     const existingIdx = this.clips.findIndex((c) => c.name === clip.name);
     if (existingIdx >= 0) {
       this.clips[existingIdx] = clip;
@@ -85,9 +120,6 @@ export class VertexAnimationController {
     return this.clips.length - 1;
   }
 
-  /**
-   * Load and parse a BVH motion capture string and register it as an animation clip
-   */
   loadBVH(bvhText: string, options?: BVHParseOptions): number {
     const clip = BVHLoader.parse(bvhText, options);
     const clipIdx = this.addClip(clip);
@@ -134,9 +166,6 @@ export class VertexAnimationController {
     this.morphTargets = [];
   }
 
-  /**
-   * Directly evaluate a specific clip at a given timestamp (useful for physics-driven jumps)
-   */
   evaluateClipAtTime(
     clipNameOrIndex: string | number,
     timeSec: number,
@@ -181,59 +210,123 @@ export class VertexAnimationController {
     outJointMatrices: Float32Array,
     jointMatrixOffset = 0
   ): void {
-    if (this.joints.length === 0) return;
+    const jointCount = this.joints.length;
+    if (jointCount === 0) return;
 
+    this.ensureScratchSize(jointCount);
+
+    // 1. Initialize per-joint T, R, S from rest bind pose
+    for (let i = 0; i < jointCount; i++) {
+      const j = this.joints[i];
+      const t = j.initialTranslation || [0, 0, 0];
+      const r = j.initialRotation || [0, 0, 0, 1];
+      const s = j.initialScale || [1, 1, 1];
+
+      this.scratchT[i * 3 + 0] = t[0];
+      this.scratchT[i * 3 + 1] = t[1];
+      this.scratchT[i * 3 + 2] = t[2];
+
+      this.scratchR[i * 4 + 0] = r[0];
+      this.scratchR[i * 4 + 1] = r[1];
+      this.scratchR[i * 4 + 2] = r[2];
+      this.scratchR[i * 4 + 3] = r[3];
+
+      this.scratchS[i * 3 + 0] = s[0];
+      this.scratchS[i * 3 + 1] = s[1];
+      this.scratchS[i * 3 + 2] = s[2];
+    }
+
+    // 2. Sample all animation channels into T / R / S scratch arrays
     for (const channel of clip.channels) {
-      const joint = this.joints[channel.targetNode];
-      if (!joint) continue;
+      const jIdx = channel.targetNode;
+      if (jIdx < 0 || jIdx >= jointCount) continue;
 
       const times = channel.times;
       const values = channel.values;
+      if (times.length === 0) continue;
 
-      if (times.length === 1) {
-        const q: [number, number, number, number] = [values[0], values[1], values[2], values[3]];
-        const pos = joint.initialTranslation || [joint.localMatrix[12], joint.localMatrix[13], joint.localMatrix[14]];
-        Mat4.fromTranslationRotationScale(pos, q, [1, 1, 1], joint.localMatrix);
-        continue;
+      let idx0 = 0;
+      let idx1 = 0;
+      let alpha = 0;
+
+      if (times.length === 1 || time <= times[0]) {
+        idx0 = 0;
+        idx1 = 0;
+        alpha = 0;
+      } else if (time >= times[times.length - 1]) {
+        idx0 = times.length - 1;
+        idx1 = times.length - 1;
+        alpha = 0;
+      } else {
+        // Binary search for keyframe bracket
+        let lo = 0;
+        let hi = times.length - 2;
+        while (lo <= hi) {
+          const mid = (lo + hi) >> 1;
+          if (time >= times[mid] && time <= times[mid + 1]) {
+            idx0 = mid;
+            idx1 = mid + 1;
+            break;
+          } else if (time < times[mid]) {
+            hi = mid - 1;
+          } else {
+            lo = mid + 1;
+          }
+        }
+        const span = times[idx1] - times[idx0];
+        alpha = channel.interpolation === 'STEP' || span <= 1e-6 ? 0 : (time - times[idx0]) / span;
       }
 
-      for (let i = 0; i < times.length - 1; i++) {
-        if (time >= times[i] && time <= times[i + 1]) {
-          const t0 = times[i];
-          const t1 = times[i + 1];
-          const alpha = (time - t0) / Math.max(0.0001, t1 - t0);
-
-          if (channel.path === 'rotation') {
-            const idx0 = i * 4;
-            const idx1 = (i + 1) * 4;
-            const q0: [number, number, number, number] = [values[idx0], values[idx0 + 1], values[idx0 + 2], values[idx0 + 3]];
-            const q1: [number, number, number, number] = [values[idx1], values[idx1 + 1], values[idx1 + 2], values[idx1 + 3]];
-            const qInterpolated = this.slerp(q0, q1, alpha);
-            const pos = joint.initialTranslation || [joint.localMatrix[12], joint.localMatrix[13], joint.localMatrix[14]];
-            Mat4.fromTranslationRotationScale(pos, qInterpolated, [1, 1, 1], joint.localMatrix);
-          }
-          break;
-        }
+      if (channel.path === 'rotation') {
+        const b0 = idx0 * 4;
+        const b1 = idx1 * 4;
+        if (b1 + 3 >= values.length) continue;
+        const q0: [number, number, number, number] = [values[b0], values[b0 + 1], values[b0 + 2], values[b0 + 3]];
+        const q =
+          alpha === 0 || idx0 === idx1
+            ? q0
+            : this.slerp(q0, [values[b1], values[b1 + 1], values[b1 + 2], values[b1 + 3]], alpha);
+        this.scratchR[jIdx * 4 + 0] = q[0];
+        this.scratchR[jIdx * 4 + 1] = q[1];
+        this.scratchR[jIdx * 4 + 2] = q[2];
+        this.scratchR[jIdx * 4 + 3] = q[3];
+      } else if (channel.path === 'translation') {
+        const b0 = idx0 * 3;
+        const b1 = idx1 * 3;
+        if (b1 + 2 >= values.length) continue;
+        this.scratchT[jIdx * 3 + 0] = values[b0 + 0] + (values[b1 + 0] - values[b0 + 0]) * alpha;
+        this.scratchT[jIdx * 3 + 1] = values[b0 + 1] + (values[b1 + 1] - values[b0 + 1]) * alpha;
+        this.scratchT[jIdx * 3 + 2] = values[b0 + 2] + (values[b1 + 2] - values[b0 + 2]) * alpha;
+      } else if (channel.path === 'scale') {
+        const b0 = idx0 * 3;
+        const b1 = idx1 * 3;
+        if (b1 + 2 >= values.length) continue;
+        this.scratchS[jIdx * 3 + 0] = values[b0 + 0] + (values[b1 + 0] - values[b0 + 0]) * alpha;
+        this.scratchS[jIdx * 3 + 1] = values[b0 + 1] + (values[b1 + 1] - values[b0 + 1]) * alpha;
+        this.scratchS[jIdx * 3 + 2] = values[b0 + 2] + (values[b1 + 2] - values[b0 + 2]) * alpha;
       }
     }
 
-    // Compute joint hierarchy world matrices
-    for (let i = 0; i < this.joints.length; i++) {
-      const joint = this.joints[i];
-      if (joint.parentIndex < 0) {
-        joint.worldMatrix.set(joint.localMatrix);
-      } else {
-        const parent = this.joints[joint.parentIndex];
-        Mat4.multiply(parent.worldMatrix, joint.localMatrix, joint.worldMatrix);
-      }
+    // 3. Reconstruct local matrices from evaluated T, R, S
+    for (let i = 0; i < jointCount; i++) {
+      Mat4.fromTranslationRotationScale(
+        [this.scratchT[i * 3], this.scratchT[i * 3 + 1], this.scratchT[i * 3 + 2]],
+        [this.scratchR[i * 4], this.scratchR[i * 4 + 1], this.scratchR[i * 4 + 2], this.scratchR[i * 4 + 3]],
+        [this.scratchS[i * 3], this.scratchS[i * 3 + 1], this.scratchS[i * 3 + 2]],
+        this.joints[i].localMatrix
+      );
+    }
 
-      // Skinning matrix = JointWorldMatrix * InverseBindMatrix
-      const skinMat = new Float32Array(16);
-      Mat4.multiply(joint.worldMatrix, joint.inverseBindMatrix, skinMat);
+    // 4. Compute hierarchical world matrices (topological order agnostic) & skin matrices
+    this.scratchVisited.fill(0);
+    for (let i = 0; i < jointCount; i++) {
+      const joint = this.joints[i];
+      this.computeJointWorld(i);
+      Mat4.multiply(joint.worldMatrix, joint.inverseBindMatrix, this.scratchSkinMat);
 
       const offset = (jointMatrixOffset + i) * 16;
       if (offset + 16 <= outJointMatrices.length) {
-        outJointMatrices.set(skinMat, offset);
+        outJointMatrices.set(this.scratchSkinMat, offset);
       }
     }
   }
@@ -259,22 +352,22 @@ export class VertexAnimationController {
     const sinHalfTheta = Math.sqrt(1.0 - cosHalfTheta * cosHalfTheta);
 
     if (Math.abs(sinHalfTheta) < 0.001) {
-      return [
-        a[0] * 0.5 + bx * 0.5,
-        a[1] * 0.5 + by * 0.5,
-        a[2] * 0.5 + bz * 0.5,
-        a[3] * 0.5 + bw * 0.5,
-      ];
+      const rx = a[0] * 0.5 + bx * 0.5;
+      const ry = a[1] * 0.5 + by * 0.5;
+      const rz = a[2] * 0.5 + bz * 0.5;
+      const rw = a[3] * 0.5 + bw * 0.5;
+      const len = Math.hypot(rx, ry, rz, rw) || 1;
+      return [rx / len, ry / len, rz / len, rw / len];
     }
 
     const ratioA = Math.sin((1 - t) * halfTheta) / sinHalfTheta;
     const ratioB = Math.sin(t * halfTheta) / sinHalfTheta;
 
-    return [
-      a[0] * ratioA + bx * ratioB,
-      a[1] * ratioA + by * ratioB,
-      a[2] * ratioA + bz * ratioB,
-      a[3] * ratioA + bw * ratioB,
-    ];
+    const rx = a[0] * ratioA + bx * ratioB;
+    const ry = a[1] * ratioA + by * ratioB;
+    const rz = a[2] * ratioA + bz * ratioB;
+    const rw = a[3] * ratioA + bw * ratioB;
+    const len = Math.hypot(rx, ry, rz, rw) || 1;
+    return [rx / len, ry / len, rz / len, rw / len];
   }
 }

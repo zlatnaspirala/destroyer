@@ -264,14 +264,20 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
   let H = safeNormalize(V + L);
   let NdotL = max(dot(N, L), 0.0);
 
-  // Dynamic Multi-part PBR Shading with diffuse texture sampling
-  let texColor = textureSample(t_diffuse, s_diffuse, in.uv);
+  // Dynamic Multi-part PBR Shading with diffuse texture atlas sampling
+  let wrappedUV = fract(in.uv);
+  let hasTex = (mat.flags & 2u) != 0u;
+  let sampleUV = select(in.uv, vec2<f32>(mat.pad1, mat.pad2) + wrappedUV * mat.pad3, hasTex);
+  let rawTexColor = textureSample(t_diffuse, s_diffuse, sampleUV);
+  let texColor = select(vec4<f32>(1.0), rawTexColor, hasTex);
+
   var albedo = mat.baseColor.rgb * texColor.rgb;
   var roughness = clamp(mat.roughness, 0.08, 1.0);
   var metallic = clamp(mat.metallic, 0.0, 1.0);
   var emissive = mat.emissiveColor.rgb * clamp(mat.emissiveColor.a, 0.0, 4.0);
 
-  let isFloor = in.worldPos.y < 0.25 && abs(N.y) > 0.65;
+  let isSkinnedVertex = (in.skinWeightDebug.x + in.skinWeightDebug.y + in.skinWeightDebug.z) > 0.01;
+  let isFloor = !isSkinnedVertex && in.worldPos.y < 0.25 && abs(N.y) > 0.65;
 
   if (isFloor) {
     // 1. High-Tech Hexagonal & Modular Grid Arena Floor
@@ -299,7 +305,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let majorLine = min(majorF.x, majorF.y);
     let majorNeon = smoothstep(0.035, 0.008, majorLine) * fade;
     emissive += vec3<f32>(0.06, 0.28, 0.55) * majorNeon * 1.8;
-  } else if (in.skinWeightDebug.x > 0.01) {
+  } else if ((mat.flags & 1u) != 0u && in.skinWeightDebug.x > 0.01) {
     // 2. Skinned Combat Mech Custom High-Detail PBR Finish
     let j = in.primaryJoint;
     if (j == 0u) {

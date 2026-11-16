@@ -24,9 +24,11 @@ interface ViewportHUDProps {
   isRunning?: boolean;
   onToggleRunning?: () => void;
   onLoadBVH?: (bvhText: string, name: string) => void;
+  onLoadPlayerGLB?: (buffer: ArrayBuffer, name: string) => void;
   onSelectAnimation?: (clipName: string) => void;
   availableAnimations?: string[];
   activeAnimationName?: string;
+  activePlayerSource?: string;
   elevatorTargetFloor?: number;
   onSelectElevatorFloor?: (floor: number) => void;
 }
@@ -40,9 +42,11 @@ export const ViewportHUD: React.FC<ViewportHUDProps> = ({
   isRunning = false,
   onToggleRunning,
   onLoadBVH,
+  onLoadPlayerGLB,
   onSelectAnimation,
   availableAnimations = [],
   activeAnimationName = '',
+  activePlayerSource = 'Procedural Humanoid',
   elevatorTargetFloor = 0,
   onSelectElevatorFloor,
 }) => {
@@ -50,6 +54,7 @@ export const ViewportHUD: React.FC<ViewportHUDProps> = ({
   const [showBVHMenu, setShowBVHMenu] = useState(false);
   const [bvhNotification, setBvhNotification] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const glbFileInputRef = useRef<HTMLInputElement>(null);
 
   // Touch joystick tracking
   const joystickContainerRef = useRef<HTMLDivElement>(null);
@@ -108,6 +113,23 @@ export const ViewportHUD: React.FC<ViewportHUDProps> = ({
       }
     };
     reader.readAsText(file);
+    e.target.value = '';
+  };
+
+  const handleGLBUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const buf = event.target?.result;
+      if (buf instanceof ArrayBuffer && onLoadPlayerGLB) {
+        onLoadPlayerGLB(buf, file.name);
+        setBvhNotification(`Player GLB Loaded: ${file.name}`);
+        setTimeout(() => setBvhNotification(null), 4000);
+      }
+    };
+    reader.readAsArrayBuffer(file);
     e.target.value = '';
   };
 
@@ -264,8 +286,27 @@ export const ViewportHUD: React.FC<ViewportHUDProps> = ({
                 })}
               </div>
 
-              {/* Upload BVH Button */}
-              <div className="pt-2 border-t border-zinc-800">
+              {/* Upload Player GLB & BVH Buttons */}
+              <div className="pt-2 border-t border-zinc-800 space-y-2">
+                <div className="text-[10px] text-zinc-400 truncate">
+                  Active Rig: <span className="text-zinc-200 font-semibold">{activePlayerSource}</span>
+                </div>
+
+                <input
+                  ref={glbFileInputRef}
+                  type="file"
+                  accept=".glb"
+                  onChange={handleGLBUpload}
+                  className="hidden"
+                />
+                <button
+                  onClick={() => glbFileInputRef.current?.click()}
+                  className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-lg shadow-emerald-600/30 transition-all active:scale-95"
+                >
+                  <Upload className="w-3.5 h-3.5" />
+                  <span>Load Player .GLB</span>
+                </button>
+
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -275,14 +316,11 @@ export const ViewportHUD: React.FC<ViewportHUDProps> = ({
                 />
                 <button
                   onClick={() => fileInputRef.current?.click()}
-                  className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-xs shadow-lg shadow-cyan-600/30 transition-all active:scale-95"
+                  className="w-full flex items-center justify-center gap-2 py-1.5 px-3 rounded-lg bg-cyan-600/90 hover:bg-cyan-500 text-white font-bold text-xs shadow transition-all active:scale-95"
                 >
                   <Upload className="w-3.5 h-3.5" />
-                  <span>Load Any .BVH File</span>
+                  <span>Load .BVH Motion</span>
                 </button>
-                <div className="text-[10px] text-zinc-400 text-center mt-1.5">
-                  Upload custom motion capture files (.bvh)
-                </div>
               </div>
             </div>
           )}

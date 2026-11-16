@@ -67,6 +67,8 @@ export interface FlatMaterial {
   metallic: number;
   ao: number;
   alphaCutoff: number;
+  flags?: number; // bit 0 (1): Mech PBR override, bit 1 (2): Diffuse texture atlas
+  atlasRect?: [number, number, number]; // [uOffset, vOffset, uvScale]
 }
 
 // Vertex Animation Types
@@ -83,6 +85,8 @@ export interface SkeletonJoint {
   localMatrix: Float32Array;       // 16 floats
   worldMatrix: Float32Array;       // 16 floats
   initialTranslation?: [number, number, number];
+  initialRotation?: [number, number, number, number];
+  initialScale?: [number, number, number];
 }
 
 export interface AnimationChannel {

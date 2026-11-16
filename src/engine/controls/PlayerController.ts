@@ -46,8 +46,9 @@ export class PlayerController {
   public cameraTheta = 0.0;    // Camera horizontal angle around player
   public cameraPhi = 1.25;      // Camera pitch angle (~70 deg from top)
 
-  // Registered entity ID for player character
+  // Registered entity IDs for player character (supports multi-primitive GLB characters)
   public entityId = -1;
+  public extraEntityIds: number[] = [];
 
   // Input states
   private keys: Record<string, boolean> = {};
@@ -378,6 +379,14 @@ export class PlayerController {
       this.position,
       2.5
     );
+    for (const extraId of this.extraEntityIds) {
+      this.engine.entityManager.updateEntityMatrix(
+        extraId,
+        playerMat,
+        this.position,
+        2.5
+      );
+    }
 
     // 5. Check if Player has entered the building structure (Indoor detection)
     const inBuildingX = Math.abs(this.position[0]) < 19.5;

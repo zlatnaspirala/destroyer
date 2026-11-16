@@ -12,7 +12,7 @@ import { PlayerController } from './controls/PlayerController';
 import { DeviceManager } from './core/Device';
 import { FlatEntityManager } from './core/FlatEntityManager';
 import { DestroyerConfig, EngineStats, FlatMaterial } from './core/Types';
-import { GLBLoader, ParsedGLBPrimitive } from './loaders/GLBLoader';
+import { GLBLoader, GLBTextureImage, ParsedGLBPrimitive } from './loaders/GLBLoader';
 import { ProceduralModels } from './loaders/ProceduralModels';
 import { Mat4 } from './math/Mat4';
 import { IndirectRenderer } from './render/IndirectRenderer';
@@ -76,6 +76,14 @@ export class DestroyerEngine {
   private currentCanvas: HTMLCanvasElement | null = null;
   private currentSubgroupsPreference = true;
   private currentCullingPreference = true;
+
+  private customPlayerGLB: { buffer: ArrayBuffer; name: string } | null = null;
+  private isCustomPlayerRig = false;
+  private playerWalkClipName = 'Human_Walk_Cycle';
+  private playerIdleClipName: string | null = 'BVH_Idle_Mocap';
+  private playerJumpClipName: string | null = 'BVH_Jump_Mocap';
+  private userLockedClip = false;
+  public activePlayerSourceLabel = 'Procedural Humanoid';
 
   constructor() {
     this.deviceManager = new DeviceManager();
@@ -302,26 +310,50 @@ export class DestroyerEngine {
       // Player controller update (3rd Person controls & camera follow)
       this.playerController.update(deltaSec);
 
-      // Vertex animation update (jump animation in air, walk when moving, idle when stopped)
+      // Vertex animation update (supports both procedural 5-bone rig and custom GLB Mixamo rigs)
       if (this.currentPreset === 'anarchy') {
-        if (!this.playerController.isGrounded) {
-          const jumpTime = Math.min(0.82, this.playerController.jumpTime);
-          this.animController.evaluateClipAtTime('BVH_Jump_Mocap', jumpTime);
-        } else if (this.playerController.landingImpactTimer > 0) {
-          this.animController.evaluateClipAtTime('BVH_Jump_Mocap', 0.80);
-        } else if (this.playerController.isMoving) {
-          const currentClip = this.animController.getCurrentClipName();
-          if (currentClip !== 'Human_Walk_Cycle') {
-            this.animController.playClipByName('Human_Walk_Cycle', true);
-          }
-          const speedFactor = this.playerController.isRunning ? 1.6 : 1.0;
-          this.animController.update(deltaSec * speedFactor);
-        } else {
-          const currentClip = this.animController.getCurrentClipName();
-          if (currentClip !== 'BVH_Idle_Mocap') {
-            this.animController.playClipByName('BVH_Idle_Mocap', true);
-          }
+        if (this.userLockedClip) {
           this.animController.update(deltaSec);
+        } else if (!this.isCustomPlayerRig) {
+          if (!this.playerController.isGrounded) {
+            const jumpTime = Math.min(0.82, this.playerController.jumpTime);
+            this.animController.evaluateClipAtTime('BVH_Jump_Mocap', jumpTime);
+          } else if (this.playerController.landingImpactTimer > 0) {
+            this.animController.evaluateClipAtTime('BVH_Jump_Mocap', 0.80);
+          } else if (this.playerController.isMoving) {
+            const currentClip = this.animController.getCurrentClipName();
+            if (currentClip !== 'Human_Walk_Cycle') {
+              this.animController.playClipByName('Human_Walk_Cycle', true);
+            }
+            const speedFactor = this.playerController.isRunning ? 1.6 : 1.0;
+            this.animController.update(deltaSec * speedFactor);
+          } else {
+            const currentClip = this.animController.getCurrentClipName();
+            if (currentClip !== 'BVH_Idle_Mocap') {
+              this.animController.playClipByName('BVH_Idle_Mocap', true);
+            }
+            this.animController.update(deltaSec);
+          }
+        } else {
+          // Custom rigged GLB (e.g. Mixamo Remy / standard-walk.glb)
+          if (!this.playerController.isGrounded && this.playerJumpClipName) {
+            this.animController.evaluateClipAtTime(this.playerJumpClipName, this.playerController.jumpTime);
+          } else if (this.playerController.isMoving && this.playerWalkClipName) {
+            const currentClip = this.animController.getCurrentClipName();
+            if (currentClip !== this.playerWalkClipName) {
+              this.animController.playClipByName(this.playerWalkClipName, true);
+            }
+            const speedFactor = this.playerController.isRunning ? 1.5 : 1.0;
+            this.animController.update(deltaSec * speedFactor);
+          } else if (this.playerIdleClipName) {
+            const currentClip = this.animController.getCurrentClipName();
+            if (currentClip !== this.playerIdleClipName) {
+              this.animController.playClipByName(this.playerIdleClipName, true);
+            }
+            this.animController.update(deltaSec);
+          } else if (this.playerWalkClipName) {
+            this.animController.evaluateClipAtTime(this.playerWalkClipName, 0);
+          }
         }
       } else {
         this.animController.update(deltaSec);
@@ -385,40 +417,254 @@ export class DestroyerEngine {
     this.renderer.uploadGeometry(combinedVerts, combinedIndices);
   }
 
+  private async tryFetchGLB(url: string): Promise<ArrayBuffer | null> {
+    try {
+      const res = await fetch(url, { cache: 'no-store' });
+      if (!res.ok) return null;
+      const buf = await res.arrayBuffer();
+      if (buf.byteLength < 12) return null;
+      const dv = new DataView(buf);
+      // Verify binary GLB magic header ('glTF' = 0x46546c67) to ignore Vite SPA HTML fallbacks
+      if (dv.getUint32(0, true) !== 0x46546c67) return null;
+      return buf;
+    } catch {
+      return null;
+    }
+  }
+
+  private async buildTextureAtlasFromGLB(
+    textures: GLBTextureImage[]
+  ): Promise<Map<number, [number, number, number]>> {
+    const rectMap = new Map<number, [number, number, number]>();
+    if (textures.length === 0 || typeof document === 'undefined') {
+      this.renderer.clearDiffuseAtlas();
+      return rectMap;
+    }
+
+    const decoded: { index: number; bitmap: ImageBitmap }[] = [];
+    for (const tex of textures) {
+      try {
+        const copy = new Uint8Array(tex.bytes);
+        const blob = new Blob([copy], { type: tex.mimeType || 'image/png' });
+        const bitmap = await createImageBitmap(blob);
+        decoded.push({ index: tex.index, bitmap });
+      } catch (err) {
+        console.warn('[GLB Texture Decode] Skipping image', tex.index, err);
+      }
+    }
+
+    if (decoded.length === 0) {
+      this.renderer.clearDiffuseAtlas();
+      return rectMap;
+    }
+
+    const cols = Math.ceil(Math.sqrt(decoded.length));
+    const tileSize = cols <= 2 ? 512 : 256;
+    const atlasSize = cols * tileSize;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = atlasSize;
+    canvas.height = atlasSize;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      for (const d of decoded) d.bitmap.close();
+      return rectMap;
+    }
+
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, atlasSize, atlasSize);
+
+    for (let i = 0; i < decoded.length; i++) {
+      const col = i % cols;
+      const row = Math.floor(i / cols);
+      const x = col * tileSize;
+      const y = row * tileSize;
+      ctx.drawImage(decoded[i].bitmap, x, y, tileSize, tileSize);
+      decoded[i].bitmap.close();
+
+      rectMap.set(decoded[i].index, [
+        (x + 0.5) / atlasSize,
+        (y + 0.5) / atlasSize,
+        (tileSize - 1.0) / atlasSize,
+      ]);
+    }
+
+    const imgData = ctx.getImageData(0, 0, atlasSize, atlasSize);
+    this.renderer.setDiffuseAtlas(new Uint8Array(imgData.data.buffer), atlasSize, atlasSize);
+    return rectMap;
+  }
+
+  private async resolveAnarchyPlayer(): Promise<{
+    primitives: ParsedGLBPrimitive[];
+    joints: import('./core/Types').SkeletonJoint[];
+    clips: import('./core/Types').AnimationClip[];
+    atlasRects: Map<number, [number, number, number]>;
+    isCustomRig: boolean;
+    sourceLabel: string;
+  }> {
+    this.renderer.clearDiffuseAtlas();
+
+    // 1. Check in-memory uploaded GLB first
+    let glbBuffer: ArrayBuffer | null = this.customPlayerGLB?.buffer ?? null;
+    let glbName = this.customPlayerGLB?.name ?? '';
+
+    // 2. Check server-persisted GLB uploads (/api/assets)
+    if (!glbBuffer) {
+      try {
+        const res = await fetch('/api/assets', { cache: 'no-store' });
+        if (res.ok) {
+          const assets: { name: string; url: string }[] = await res.json();
+          const glbAssets = assets.filter((a) => /\.glb$/i.test(a.name));
+          if (glbAssets.length > 0) {
+            const preferred =
+              glbAssets.find((a) => /player|remy|walk|character/i.test(a.name)) ||
+              glbAssets[glbAssets.length - 1];
+            glbBuffer = await this.tryFetchGLB(preferred.url);
+            if (glbBuffer) glbName = preferred.name;
+          }
+        }
+      } catch {
+        // Server asset lookup optional
+      }
+    }
+
+    // 3. Check standard workspace paths for user-converted GLB
+    if (!glbBuffer) {
+      const candidatePaths = [
+        '/src/assets/animations/character-remy/standard-walk.glb',
+        '/src/assets/animations/character-remy/remy.glb',
+        '/assets/animations/character-remy/standard-walk.glb',
+        '/assets/standard-walk.glb',
+        '/standard-walk.glb',
+      ];
+      for (const candidate of candidatePaths) {
+        const buf = await this.tryFetchGLB(candidate);
+        if (buf) {
+          glbBuffer = buf;
+          glbName = candidate.split('/').pop() || 'player.glb';
+          break;
+        }
+      }
+    }
+
+    if (glbBuffer) {
+      try {
+        const parsed = GLBLoader.parse(glbBuffer, { normalizeToHeight: 1.75 });
+        if (parsed.primitives.length > 0) {
+          const atlasRects = await this.buildTextureAtlasFromGLB(parsed.textures);
+          return {
+            primitives: parsed.primitives,
+            joints: parsed.joints,
+            clips: parsed.clips,
+            atlasRects,
+            isCustomRig: parsed.hasSkinning && parsed.joints.length > 0,
+            sourceLabel: `GLB: ${glbName}`,
+          };
+        }
+      } catch (err) {
+        console.warn('[Player GLB Parse Error] Falling back:', err);
+      }
+    }
+
+    // 4. Optional FBX workspace check (verifies binary/non-HTML before passing to Three FBXLoader)
+    try {
+      const fbxPath = '/src/assets/animations/character-remy/standard-walk.fbx';
+      const fbxHead = await fetch(fbxPath, { cache: 'no-store' });
+      const contentType = fbxHead.headers.get('content-type') || '';
+      if (fbxHead.ok && !contentType.includes('text/html')) {
+        const fbxResult = await FBXLoader.load(fbxPath);
+        if (fbxResult.primitives.length > 0) {
+          const sanitizedPrims = fbxResult.primitives.map((p) => ({
+            ...p,
+            joints: undefined,
+            weights: undefined,
+          }));
+          return {
+            primitives: sanitizedPrims,
+            joints: [],
+            clips: [],
+            atlasRects: new Map(),
+            isCustomRig: false,
+            sourceLabel: 'FBX Mesh (Static)',
+          };
+        }
+      }
+    } catch {
+      // Fall through cleanly to procedural humanoid
+    }
+
+    // 5. Default procedural humanoid fallback
+    const proc = ProceduralModels.createSimpleHumanoidPlayer();
+    return {
+      primitives: [proc.primitive],
+      joints: proc.joints,
+      clips: proc.allClips,
+      atlasRects: new Map(),
+      isCustomRig: false,
+      sourceLabel: 'Procedural Humanoid',
+    };
+  }
+
+  async loadPlayerGLB(arrayBuffer: ArrayBuffer, fileName = 'player.glb'): Promise<void> {
+    if (this.isDeviceLost) return;
+    const wasAnarchy = this.currentPreset === 'anarchy' && this.playerController.entityId >= 0;
+    const savedPos: [number, number, number] = [...this.playerController.position];
+    const savedTheta = this.playerController.cameraTheta;
+    const savedPhi = this.playerController.cameraPhi;
+    const savedDist = this.playerController.cameraDistance;
+    const savedEnergy = this.playerController.energy;
+
+    this.customPlayerGLB = { buffer: arrayBuffer, name: fileName };
+    this.userLockedClip = false;
+    await this.loadScenePreset('anarchy');
+
+    if (wasAnarchy) {
+      this.playerController.position = savedPos;
+      this.playerController.cameraTheta = savedTheta;
+      this.playerController.cameraPhi = savedPhi;
+      this.playerController.rotationY = savedTheta + Math.PI;
+      this.playerController.cameraDistance = savedDist;
+      this.playerController.energy = savedEnergy;
+    }
+  }
+
   async loadScenePreset(preset: string): Promise<void> {
     if (this.isDeviceLost) return;
 
     this.currentPreset = preset;
     this.entityManager.clear();
     this.animController.clear();
+    this.renderer.clearDiffuseAtlas();
     this.renderer.waveFactor = 0.0;
+    this.playerController.extraEntityIds = [];
+    this.userLockedClip = false;
 
     const device = this.deviceManager.getDevice();
     const mobile = isMobileBrowser();
 
     if (preset === 'anarchy') {
-      // Single 2-story building with opening door, interior stairs, and elevator
+      // Single 10-story business building with opening door, interior stairs, and elevator
       this.physics.setupDefaultBuildingPhysics();
 
       const buildingData = ProceduralModels.createSingleBuildingWithStairsAndElevator();
-      
-      let playerData: any;
-      try {
-        // Attempt to load user-provided FBX
-        const fbxResult = await FBXLoader.load('/src/assets/animations/character-remy/standard-walk.fbx');
-        if (fbxResult.primitives.length > 0) {
-          playerData = {
-            primitive: fbxResult.primitives[0],
-            joints: [], // FBX Skeletons are complex, for now we just use the mesh
-            clip: fbxResult.clips[0] || ProceduralModels.createSimpleHumanoidPlayer().clip,
-            allClips: fbxResult.clips,
-          };
-        } else {
-          playerData = ProceduralModels.createSimpleHumanoidPlayer();
-        }
-      } catch (err) {
-        console.warn('Failed to load FBX player, falling back to procedural:', err);
-        playerData = ProceduralModels.createSimpleHumanoidPlayer();
+      const resolvedPlayer = await this.resolveAnarchyPlayer();
+      this.isCustomPlayerRig = resolvedPlayer.isCustomRig;
+      this.activePlayerSourceLabel = resolvedPlayer.sourceLabel;
+
+      if (this.isCustomPlayerRig) {
+        const clips = resolvedPlayer.clips;
+        this.playerWalkClipName =
+          clips.find((c) => /walk|mixamo|run|move|armature/i.test(c.name))?.name ||
+          clips[0]?.name ||
+          '';
+        this.playerIdleClipName =
+          clips.find((c) => /idle|stand|breath/i.test(c.name))?.name || null;
+        this.playerJumpClipName =
+          clips.find((c) => /jump|air/i.test(c.name))?.name || null;
+      } else {
+        this.playerWalkClipName = 'Human_Walk_Cycle';
+        this.playerIdleClipName = 'BVH_Idle_Mocap';
+        this.playerJumpClipName = 'BVH_Jump_Mocap';
       }
 
       const concreteMatId = this.entityManager.registerMaterial({
@@ -466,13 +712,38 @@ export class DestroyerEngine {
         alphaCutoff: 0.5,
       });
 
-      const playerMatId = this.entityManager.registerMaterial({
-        baseColor: [0.20, 0.38, 0.60, 1.0], // Stylish Navy Human Attire
+      // Register per-primitive materials for the player character
+      const defaultPlayerMatId = this.entityManager.registerMaterial({
+        baseColor: [0.20, 0.38, 0.60, 1.0],
         emissiveColor: [0, 0, 0, 0],
         roughness: 0.52,
         metallic: 0.12,
         ao: 1.0,
         alphaCutoff: 0.5,
+        flags: 0,
+      });
+
+      const playerPrimMatIds: number[] = resolvedPlayer.primitives.map((prim) => {
+        if (!prim.material && (prim.textureImageIndex === undefined || prim.textureImageIndex === null)) {
+          return defaultPlayerMatId;
+        }
+        const m = prim.material || {
+          baseColor: [0.85, 0.85, 0.88, 1.0] as [number, number, number, number],
+          emissiveColor: [0, 0, 0, 0] as [number, number, number, number],
+          roughness: 0.55,
+          metallic: 0.1,
+          ao: 1.0,
+          alphaCutoff: 0.5,
+        };
+        const texRect =
+          prim.textureImageIndex !== undefined && prim.textureImageIndex !== null
+            ? resolvedPlayer.atlasRects.get(prim.textureImageIndex)
+            : undefined;
+        return this.entityManager.registerMaterial({
+          ...m,
+          flags: texRect ? 2 : 0,
+          atlasRect: texRect,
+        });
       });
 
       const textMatId = this.entityManager.registerMaterial({
@@ -510,11 +781,18 @@ export class DestroyerEngine {
         );
       }
 
-      // Register Skeleton & Walk Clip + Jump & Idle BVH Clips
-      const jointOffset = this.animController.registerSkeleton(playerData.joints, playerData.clip);
-      if (playerData.jumpClip) this.animController.addClip(playerData.jumpClip);
-      if (playerData.idleClip) this.animController.addClip(playerData.idleClip);
-      this.animController.playClip(0);
+      // Register Skeleton & Clips
+      const jointOffset = this.animController.registerSkeleton(resolvedPlayer.joints);
+      for (const clip of resolvedPlayer.clips) {
+        this.animController.addClip(clip);
+      }
+      if (this.animController.clips.length > 0) {
+        if (this.playerWalkClipName) {
+          this.animController.playClipByName(this.playerWalkClipName, true);
+        } else {
+          this.animController.playClip(0, true);
+        }
+      }
 
       // Upload ALL Geometries to GPU
       const geometries = [
@@ -529,7 +807,7 @@ export class DestroyerEngine {
         buildingData.bannerMesh,
         buildingData.officeMesh,
         buildingData.windowMesh,
-        playerData.primitive,
+        ...resolvedPlayer.primitives,
         ...floorLabelMeshes,
       ];
       this.uploadGeometries(geometries);
@@ -712,21 +990,26 @@ export class DestroyerEngine {
       vOffset += windowVerts;
       iOffset += buildingData.windowMesh.indices.length;
 
-      // 5. Player Mesh
-      const playerVerts = Math.floor(playerData.primitive.positions.length / 3);
-      const playerMeshId = this.entityManager.registerMesh({
-        name: 'Human_Body_Player',
-        firstIndex: iOffset,
-        indexCount: playerData.primitive.indices.length,
-        baseVertex: vOffset,
-        vertexCount: playerVerts,
-        boundingRadius: playerData.primitive.boundingRadius,
-        hasSkinning: true,
-        hasMorphTargets: false,
-        morphTargetCount: 0,
-      });
-      vOffset += playerVerts;
-      iOffset += playerData.primitive.indices.length;
+      // 5. Player Meshes (supports multi-primitive rigged GLBs like Mixamo Remy)
+      const playerMeshIds: number[] = [];
+      for (let pIdx = 0; pIdx < resolvedPlayer.primitives.length; pIdx++) {
+        const p = resolvedPlayer.primitives[pIdx];
+        const pVerts = Math.floor(p.positions.length / 3);
+        const pMeshId = this.entityManager.registerMesh({
+          name: p.name || `Player_Part_${pIdx}`,
+          firstIndex: iOffset,
+          indexCount: p.indices.length,
+          baseVertex: vOffset,
+          vertexCount: pVerts,
+          boundingRadius: p.boundingRadius || 2.0,
+          hasSkinning: resolvedPlayer.isCustomRig || !!(p.joints && p.joints.length > 0),
+          hasMorphTargets: false,
+          morphTargetCount: 0,
+        });
+        playerMeshIds.push(pMeshId);
+        vOffset += pVerts;
+        iOffset += p.indices.length;
+      }
 
       // 6. 3D Text Floor Label Meshes (Floors 0 through 10)
       const floorLabelMeshIds: number[] = [];
@@ -901,27 +1184,32 @@ export class DestroyerEngine {
         name: 'Elevator_Btn_DOWN',
       });
 
-      // Player Entity
+      // Player Entities (1 per primitive, sharing the same skeleton & animOffset)
       const startPos: [number, number, number] = [0, 0, 25.0];
       const playerMat = Mat4.create();
       Mat4.fromTranslation(startPos, playerMat);
 
-      const playerEntId = this.entityManager.addEntity({
-        meshId: playerMeshId,
-        materialId: playerMatId,
-        worldMatrix: playerMat,
-        sphereCenter: [0, 1.0, 25.0, 2.5],
-        flags: 1,
-        animOffset: jointOffset,
-        name: 'Player_Character',
-      });
+      const playerEntityIds: number[] = [];
+      for (let pIdx = 0; pIdx < playerMeshIds.length; pIdx++) {
+        const entId = this.entityManager.addEntity({
+          meshId: playerMeshIds[pIdx],
+          materialId: playerPrimMatIds[pIdx] ?? defaultPlayerMatId,
+          worldMatrix: playerMat,
+          sphereCenter: [0, 1.0, 25.0, 2.5],
+          flags: 1,
+          animOffset: jointOffset,
+          name: pIdx === 0 ? 'Player_Character' : `Player_Part_${pIdx}`,
+        });
+        playerEntityIds.push(entId);
+      }
 
       // Configure Player Controller
       this.playerController.position = [0, 0, 25.0];
       this.playerController.cameraTheta = 0.0;
       this.playerController.cameraPhi = 1.25;
       this.playerController.rotationY = Math.PI;
-      this.playerController.entityId = playerEntId;
+      this.playerController.entityId = playerEntityIds[0] ?? -1;
+      this.playerController.extraEntityIds = playerEntityIds.slice(1);
 
       // Position 3rd Person Camera cleanly behind player looking toward building
       this.camera.target = [0, 1.4, 25.0];
@@ -947,6 +1235,7 @@ export class DestroyerEngine {
         metallic: 0.82,
         ao: 1.0,
         alphaCutoff: 0.5,
+        flags: 1, // Sci-Fi Mech custom PBR override
       });
 
       const floorMatId = this.entityManager.registerMaterial({
@@ -1040,6 +1329,7 @@ export class DestroyerEngine {
         metallic: 0.85,
         ao: 1.0,
         alphaCutoff: 0.5,
+        flags: 1, // Sci-Fi Mech custom PBR override
       });
 
       const floorMatId = this.entityManager.registerMaterial({
@@ -1262,51 +1552,83 @@ export class DestroyerEngine {
   async loadCustomGLB(arrayBuffer: ArrayBuffer, fileName = 'custom_model.glb'): Promise<void> {
     if (this.isDeviceLost) return;
 
+    // If inside the main building world, swap the player character seamlessly
+    if (this.currentPreset === 'anarchy') {
+      await this.loadPlayerGLB(arrayBuffer, fileName);
+      return;
+    }
+
     try {
-      const parsed = GLBLoader.parse(arrayBuffer);
+      const parsed = GLBLoader.parse(arrayBuffer, { normalizeToHeight: 3.0 });
       if (parsed.primitives.length === 0) return;
 
       this.entityManager.clear();
       this.animController.clear();
+      this.renderer.clearDiffuseAtlas();
 
-      const prim = parsed.primitives[0];
-      const mat = prim.material || {
-        baseColor: [0.8, 0.8, 0.85, 1.0],
-        emissiveColor: [0, 0, 0, 0],
-        roughness: 0.4,
-        metallic: 0.5,
-        ao: 1.0,
-        alphaCutoff: 0.5,
-      };
+      const atlasRects = await this.buildTextureAtlasFromGLB(parsed.textures);
+      const jointOffset = parsed.joints.length > 0 ? this.animController.registerSkeleton(parsed.joints) : 0;
+      for (const clip of parsed.clips) {
+        this.animController.addClip(clip);
+      }
+      if (this.animController.clips.length > 0) {
+        this.animController.playClip(0, true);
+      }
 
-      const matId = this.entityManager.registerMaterial(mat);
-      const meshId = this.entityManager.registerMesh({
-        name: fileName.replace(/\.[^/.]+$/, ''),
-        firstIndex: 0,
-        indexCount: prim.indices.length,
-        baseVertex: 0,
-        vertexCount: Math.floor(prim.positions.length / 3),
-        boundingRadius: prim.boundingRadius || 5.0,
-        hasSkinning: false,
-        hasMorphTargets: false,
-        morphTargetCount: 0,
-      });
+      this.uploadGeometries(parsed.primitives);
 
-      const interleaved = GLBLoader.interleavePrimitive(prim);
-      this.renderer.uploadGeometry(interleaved, prim.indices);
-
+      let vOffset = 0;
+      let iOffset = 0;
       const worldMat = Mat4.create();
       Mat4.fromTranslation([0, 0, 0], worldMat);
 
-      this.entityManager.addEntity({
-        meshId,
-        materialId: matId,
-        worldMatrix: worldMat,
-        sphereCenter: [0, 0, 0, prim.boundingRadius || 5.0],
-        flags: 1,
-        animOffset: 0,
-        name: fileName.replace(/\.[^/.]+$/, ''),
-      });
+      for (let i = 0; i < parsed.primitives.length; i++) {
+        const prim = parsed.primitives[i];
+        const baseMat = prim.material || {
+          baseColor: [0.8, 0.8, 0.85, 1.0] as [number, number, number, number],
+          emissiveColor: [0, 0, 0, 0] as [number, number, number, number],
+          roughness: 0.4,
+          metallic: 0.2,
+          ao: 1.0,
+          alphaCutoff: 0.5,
+        };
+        const texRect =
+          prim.textureImageIndex !== undefined && prim.textureImageIndex !== null
+            ? atlasRects.get(prim.textureImageIndex)
+            : undefined;
+
+        const matId = this.entityManager.registerMaterial({
+          ...baseMat,
+          flags: texRect ? 2 : 0,
+          atlasRect: texRect,
+        });
+
+        const vCount = Math.floor(prim.positions.length / 3);
+        const meshId = this.entityManager.registerMesh({
+          name: prim.name || `${fileName.replace(/\.[^/.]+$/, '')}_${i}`,
+          firstIndex: iOffset,
+          indexCount: prim.indices.length,
+          baseVertex: vOffset,
+          vertexCount: vCount,
+          boundingRadius: prim.boundingRadius || 5.0,
+          hasSkinning: parsed.hasSkinning,
+          hasMorphTargets: false,
+          morphTargetCount: 0,
+        });
+
+        this.entityManager.addEntity({
+          meshId,
+          materialId: matId,
+          worldMatrix: worldMat,
+          sphereCenter: [0, 1.5, 0, prim.boundingRadius || 5.0],
+          flags: 1,
+          animOffset: jointOffset,
+          name: prim.name || `${fileName.replace(/\.[^/.]+$/, '')}_${i}`,
+        });
+
+        vOffset += vCount;
+        iOffset += prim.indices.length;
+      }
 
       const device = this.deviceManager.getDevice();
       this.entityManager.uploadToGPU(device);
@@ -1373,6 +1695,7 @@ export class DestroyerEngine {
     try {
       const clipIdx = this.animController.loadBVH(bvhText, { name: name || 'Custom_BVH_Mocap' });
       const clip = this.animController.clips[clipIdx];
+      this.userLockedClip = true;
       return { success: true, clipName: clip.name, duration: clip.duration };
     } catch (err: any) {
       console.error('Failed to parse BVH:', err);
@@ -1384,7 +1707,11 @@ export class DestroyerEngine {
    * Switch active character animation clip by name
    */
   public switchAnimation(clipName: string): boolean {
-    return this.animController.playClipByName(clipName, true);
+    const ok = this.animController.playClipByName(clipName, true);
+    if (ok) {
+      this.userLockedClip = true;
+    }
+    return ok;
   }
 
   /**

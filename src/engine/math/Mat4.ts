@@ -254,4 +254,65 @@ export class Mat4 {
       m[3] * x + m[7] * y + m[11] * z + m[15] * w,
     ];
   }
+
+  static decompose(m: Float32Array): {
+    translation: [number, number, number];
+    rotation: [number, number, number, number];
+    scale: [number, number, number];
+  } {
+    const translation: [number, number, number] = [m[12], m[13], m[14]];
+
+    let sx = Math.hypot(m[0], m[1], m[2]);
+    let sy = Math.hypot(m[4], m[5], m[6]);
+    let sz = Math.hypot(m[8], m[9], m[10]);
+
+    const det =
+      m[0] * (m[5] * m[10] - m[6] * m[9]) -
+      m[4] * (m[1] * m[10] - m[2] * m[9]) +
+      m[8] * (m[1] * m[6] - m[2] * m[5]);
+    if (det < 0) sx = -sx;
+
+    const invSx = sx !== 0 ? 1 / sx : 0;
+    const invSy = sy !== 0 ? 1 / sy : 0;
+    const invSz = sz !== 0 ? 1 / sz : 0;
+
+    const r00 = m[0] * invSx, r10 = m[1] * invSx, r20 = m[2] * invSx;
+    const r01 = m[4] * invSy, r11 = m[5] * invSy, r21 = m[6] * invSy;
+    const r02 = m[8] * invSz, r12 = m[9] * invSz, r22 = m[10] * invSz;
+
+    let qx = 0, qy = 0, qz = 0, qw = 1;
+    const trace = r00 + r11 + r22;
+    if (trace > 0) {
+      const s = Math.sqrt(trace + 1.0) * 2;
+      qw = 0.25 * s;
+      qx = (r21 - r12) / s;
+      qy = (r02 - r20) / s;
+      qz = (r10 - r01) / s;
+    } else if (r00 > r11 && r00 > r22) {
+      const s = Math.sqrt(Math.max(1e-8, 1.0 + r00 - r11 - r22)) * 2;
+      qw = (r21 - r12) / s;
+      qx = 0.25 * s;
+      qy = (r01 + r10) / s;
+      qz = (r02 + r20) / s;
+    } else if (r11 > r22) {
+      const s = Math.sqrt(Math.max(1e-8, 1.0 + r11 - r00 - r22)) * 2;
+      qw = (r02 - r20) / s;
+      qx = (r01 + r10) / s;
+      qy = 0.25 * s;
+      qz = (r12 + r21) / s;
+    } else {
+      const s = Math.sqrt(Math.max(1e-8, 1.0 + r22 - r00 - r11)) * 2;
+      qw = (r10 - r01) / s;
+      qx = (r02 + r20) / s;
+      qy = (r12 + r21) / s;
+      qz = 0.25 * s;
+    }
+
+    const qLen = Math.hypot(qx, qy, qz, qw) || 1;
+    return {
+      translation,
+      rotation: [qx / qLen, qy / qLen, qz / qLen, qw / qLen],
+      scale: [sx, sy, sz],
+    };
+  }
 }

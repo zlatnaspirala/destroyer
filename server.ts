@@ -62,7 +62,7 @@ for (const scn of defaultScenes) {
   }
 }
 
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json({ limit: '100mb' }));
 app.use('/uploads', express.static(UPLOADS_DIR));
 
 // Helper: Get scene list

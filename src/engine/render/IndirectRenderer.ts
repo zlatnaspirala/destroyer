@@ -46,7 +46,17 @@ export class IndirectRenderer {
   // Textures & Depth
   private depthTexture: GPUTexture | null = null;
   private defaultWhiteTexture: GPUTexture | null = null;
+  private customDiffuseTexture: GPUTexture | null = null;
   private defaultSampler: GPUSampler | null = null;
+
+  // Last bound storage buffers (for rebinding when diffuse texture updates)
+  private boundStorageBuffers: {
+    entityStorageBuffer: GPUBuffer;
+    materialStorageBuffer: GPUBuffer;
+    visibleIndicesBuffer: GPUBuffer;
+    indirectArgsBuffer: GPUBuffer;
+    jointMatricesBuffer: GPUBuffer;
+  } | null = null;
 
   // Shadow Map (2048x2048)
   private shadowDepthTexture: GPUTexture | null = null;
@@ -211,7 +221,59 @@ export class IndirectRenderer {
       magFilter: 'linear',
       minFilter: 'linear',
       mipmapFilter: 'linear',
+      addressModeU: 'clamp-to-edge',
+      addressModeV: 'clamp-to-edge',
     });
+  }
+
+  setDiffuseAtlas(rgbaData: Uint8Array, width: number, height: number): void {
+    if (!this.device || this.deviceManager.isDeviceLost || width <= 0 || height <= 0) return;
+
+    if (this.customDiffuseTexture) {
+      try { this.customDiffuseTexture.destroy(); } catch { /* ignore */ }
+      this.customDiffuseTexture = null;
+    }
+
+    this.customDiffuseTexture = this.device.createTexture({
+      size: [width, height, 1],
+      format: 'rgba8unorm',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+
+    this.device.queue.writeTexture(
+      { texture: this.customDiffuseTexture },
+      rgbaData.buffer as ArrayBuffer,
+      { offset: rgbaData.byteOffset, bytesPerRow: width * 4, rowsPerImage: height },
+      [width, height, 1]
+    );
+
+    if (this.boundStorageBuffers) {
+      const b = this.boundStorageBuffers;
+      this.updateBindGroups(
+        b.entityStorageBuffer,
+        b.materialStorageBuffer,
+        b.visibleIndicesBuffer,
+        b.indirectArgsBuffer,
+        b.jointMatricesBuffer
+      );
+    }
+  }
+
+  clearDiffuseAtlas(): void {
+    if (this.customDiffuseTexture) {
+      try { this.customDiffuseTexture.destroy(); } catch { /* ignore */ }
+      this.customDiffuseTexture = null;
+      if (this.boundStorageBuffers) {
+        const b = this.boundStorageBuffers;
+        this.updateBindGroups(
+          b.entityStorageBuffer,
+          b.materialStorageBuffer,
+          b.visibleIndicesBuffer,
+          b.indirectArgsBuffer,
+          b.jointMatricesBuffer
+        );
+      }
+    }
   }
 
   private createShadowResources(): void {
@@ -326,6 +388,16 @@ export class IndirectRenderer {
   ): void {
     if (!this.device || !this.renderPipeline || !this.cullingPipeline) return;
 
+    this.boundStorageBuffers = {
+      entityStorageBuffer,
+      materialStorageBuffer,
+      visibleIndicesBuffer,
+      indirectArgsBuffer,
+      jointMatricesBuffer,
+    };
+
+    const activeDiffuseTex = this.customDiffuseTexture || this.defaultWhiteTexture!;
+
     this.renderBindGroup = this.device.createBindGroup({
       layout: this.renderPipeline.getBindGroupLayout(0),
       entries: [
@@ -335,7 +407,7 @@ export class IndirectRenderer {
         { binding: 3, resource: { buffer: materialStorageBuffer } },
         { binding: 4, resource: { buffer: visibleIndicesBuffer } },
         { binding: 5, resource: { buffer: jointMatricesBuffer } },
-        { binding: 6, resource: this.defaultWhiteTexture!.createView() },
+        { binding: 6, resource: activeDiffuseTex.createView() },
         { binding: 7, resource: this.defaultSampler! },
         { binding: 8, resource: this.shadowDepthTexture!.createView() },
         { binding: 9, resource: this.shadowSampler! },

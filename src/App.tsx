@@ -46,6 +46,7 @@ export default function App() {
     'BVH_Jump_Mocap',
     'BVH_Idle_Mocap',
   ]);
+  const [activePlayerSource, setActivePlayerSource] = useState('Procedural Humanoid');
 
   // Stats state
   const [stats, setStats] = useState<EngineStats>({
@@ -184,6 +185,7 @@ export default function App() {
         setSelectedEntityId(0);
         setAvailableAnimations(engine.getAvailableAnimations());
         setActiveAnimationName(engine.animController.getCurrentClipName());
+        setActivePlayerSource(engine.activePlayerSourceLabel);
         isInitializingRef.current = false;
 
         // Periodic stats update
@@ -270,16 +272,43 @@ export default function App() {
       setSelectedEntityId(0);
       setAvailableAnimations(engineRef.current.getAvailableAnimations());
       setActiveAnimationName(engineRef.current.animController.getCurrentClipName());
+      setActivePlayerSource(engineRef.current.activePlayerSourceLabel);
       setSceneVersion((v) => v + 1);
     }
   };
 
-  // Handle GLB Load
+  // Persist GLB file to /api/assets/upload in chunks so it survives reloads
+  const persistGLBAsset = async (buffer: ArrayBuffer, fileName: string) => {
+    try {
+      const bytes = new Uint8Array(buffer);
+      const chunks: string[] = [];
+      for (let i = 0; i < bytes.length; i += 0x8000) {
+        const sub = bytes.subarray(i, i + 0x8000);
+        chunks.push(String.fromCharCode.apply(null, Array.from(sub)));
+      }
+      const base64Data = btoa(chunks.join(''));
+      await fetch('/api/assets/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: `player_${fileName}`, base64Data }),
+      });
+    } catch (err) {
+      console.warn('[GLB Persist Optional Error]:', err);
+    }
+  };
+
+  // Handle GLB Load (swaps player in anarchy mode, or loads custom scene model)
   const handleLoadGLB = async (buffer: ArrayBuffer, fileName: string) => {
     if (engineRef.current && !engineRef.current.isDeviceLost) {
       await engineRef.current.loadCustomGLB(buffer, fileName);
       setSelectedEntityId(0);
+      setAvailableAnimations(engineRef.current.getAvailableAnimations());
+      setActiveAnimationName(engineRef.current.animController.getCurrentClipName());
+      setActivePlayerSource(engineRef.current.activePlayerSourceLabel);
       setSceneVersion((v) => v + 1);
+      if (currentPreset === 'anarchy') {
+        void persistGLBAsset(buffer, fileName);
+      }
     }
   };
 
@@ -565,6 +594,9 @@ export default function App() {
                     }
                   }
                 }}
+                onLoadPlayerGLB={(buffer, name) => {
+                  void handleLoadGLB(buffer, name);
+                }}
                 onSelectAnimation={(clipName) => {
                   if (engineRef.current) {
                     engineRef.current.switchAnimation(clipName);
@@ -573,6 +605,7 @@ export default function App() {
                 }}
                 availableAnimations={availableAnimations}
                 activeAnimationName={activeAnimationName}
+                activePlayerSource={activePlayerSource}
                 elevatorTargetFloor={elevatorTargetFloor}
                 onSelectElevatorFloor={(floor) => {
                   setElevatorTargetFloor(floor);

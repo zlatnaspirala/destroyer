@@ -324,6 +324,11 @@ export class FlatEntityManager {
     this.materialFloatView[offset + 10] = mat.ao;
     this.materialFloatView[offset + 11] = mat.alphaCutoff;
 
+    this.materialUintView[offset + 12] = mat.flags ?? 0;
+    this.materialFloatView[offset + 13] = mat.atlasRect?.[0] ?? 0;
+    this.materialFloatView[offset + 14] = mat.atlasRect?.[1] ?? 0;
+    this.materialFloatView[offset + 15] = mat.atlasRect?.[2] ?? 1;
+
     return id;
   }
 
@@ -347,6 +352,12 @@ export class FlatEntityManager {
       metallic: this.materialFloatView[offset + 9],
       ao: this.materialFloatView[offset + 10],
       alphaCutoff: this.materialFloatView[offset + 11],
+      flags: this.materialUintView[offset + 12],
+      atlasRect: [
+        this.materialFloatView[offset + 13],
+        this.materialFloatView[offset + 14],
+        this.materialFloatView[offset + 15],
+      ],
     };
   }
 
@@ -377,6 +388,14 @@ export class FlatEntityManager {
     }
     if (mat.alphaCutoff !== undefined) {
       this.materialFloatView[offset + 11] = mat.alphaCutoff;
+    }
+    if (mat.flags !== undefined) {
+      this.materialUintView[offset + 12] = mat.flags;
+    }
+    if (mat.atlasRect) {
+      this.materialFloatView[offset + 13] = mat.atlasRect[0];
+      this.materialFloatView[offset + 14] = mat.atlasRect[1];
+      this.materialFloatView[offset + 15] = mat.atlasRect[2];
     }
   }
 
