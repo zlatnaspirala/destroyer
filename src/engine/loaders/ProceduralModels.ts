@@ -707,9 +707,22 @@ export class ProceduralModels {
     const allIndices: number[] = [];
 
     let vertexOffset = 0;
+    let maxRadius = 0;
 
     for (const b of boxes) {
       const prim = ProceduralModels.createBoxPrimitive(b.center, b.size);
+      
+      // Calculate max distance from origin for this box
+      const halfX = b.size[0] * 0.5;
+      const halfY = b.size[1] * 0.5;
+      const halfZ = b.size[2] * 0.5;
+      const d = Math.hypot(
+        Math.abs(b.center[0]) + halfX,
+        Math.abs(b.center[1]) + halfY,
+        Math.abs(b.center[2]) + halfZ
+      );
+      if (d > maxRadius) maxRadius = d;
+
       for (let i = 0; i < prim.positions.length; i++) {
         allPositions.push(prim.positions[i]);
       }
@@ -731,7 +744,7 @@ export class ProceduralModels {
       normals: new Float32Array(allNormals),
       uvs: new Float32Array(allUVs),
       indices: new Uint32Array(allIndices),
-      boundingRadius: 35.0,
+      boundingRadius: maxRadius,
     };
   }
 
@@ -878,114 +891,160 @@ export class ProceduralModels {
   }
 
   /**
-   * Generates a 10-story skyscraper building with open stairwell floor holes, 3D text labels, and 3D elevator buttons
+   * Generates a 10-story skyscraper building with rooms, offices, windows, and furniture
+   * Refined for accessibility with clear corridors and robust floor coverage.
    */
   static createSingleBuildingWithStairsAndElevator(): {
     buildingMesh: ParsedGLBPrimitive;
+    groundSlabMesh: ParsedGLBPrimitive;
+    floorButtonsMesh: ParsedGLBPrimitive;
     doorLeftMesh: ParsedGLBPrimitive;
     doorRightMesh: ParsedGLBPrimitive;
     elevatorMesh: ParsedGLBPrimitive;
+    btnUpMesh: ParsedGLBPrimitive;
+    btnDownMesh: ParsedGLBPrimitive;
+    bannerMesh: ParsedGLBPrimitive;
+    officeMesh: ParsedGLBPrimitive;
+    windowMesh: ParsedGLBPrimitive;
   } {
-    const staticBoxes: { center: [number, number, number]; size: [number, number, number] }[] = [];
+    const buildingBoxes: { center: [number, number, number]; size: [number, number, number] }[] = [];
+    const officeBoxes: { center: [number, number, number]; size: [number, number, number] }[] = [];
+    const windowBoxes: { center: [number, number, number]; size: [number, number, number] }[] = [];
 
-    // 1. Expanded Ground Slab (40m x 40m footprint)
-    staticBoxes.push({ center: [0, -0.2, 0], size: [20, 0.2, 20] });
+    // 1. Massive Ground Slab
+    const groundSlabMesh = ProceduralModels.createBoxPrimitive([0, -0.2, 0], [2000, 0.2, 2000], 'Massive_Ground_Slab');
 
     const totalFloors = 10;
     const floorHeight = 4.0;
 
-    // 2. Build 10 Floors (Exterior Walls, Staircases & 3D Elevator Call Button Plates)
+    // 2. Build 10 Floors (Exterior & Inner Walls, Staircases, Windows)
     for (let k = 0; k < totalFloors; k++) {
       const wallY = k * floorHeight + 2.0;
 
-      // Exterior Walls for Floor k (40m building)
-      staticBoxes.push({ center: [0, wallY, -20], size: [20, 2.0, 0.4] });       // Rear Wall
-      staticBoxes.push({ center: [-20, wallY, 0], size: [0.4, 2.0, 20] });       // Left Wall
-      staticBoxes.push({ center: [20, wallY, 0], size: [0.4, 2.0, 20] });        // Right Wall
-      staticBoxes.push({ center: [-12, wallY, 20], size: [8, 2.0, 0.4] });       // Front Left Wing
-      staticBoxes.push({ center: [12, wallY, 20], size: [8, 2.0, 0.4] });        // Front Right Wing
-      staticBoxes.push({ center: [0, k * floorHeight + 3.2, 20], size: [4, 0.8, 0.4] }); // Entrance Header
+      // EXTERIOR ENVELOPE (40x40m)
+      buildingBoxes.push({ center: [0, wallY, -20], size: [20, 2.0, 0.4] });       // Rear
+      buildingBoxes.push({ center: [-20, wallY, 0], size: [0.4, 2.0, 20] });       // Left
+      buildingBoxes.push({ center: [20, wallY, 0], size: [0.4, 2.0, 20] });        // Right
+      buildingBoxes.push({ center: [-12, wallY, 20], size: [8, 2.0, 0.4] });       // Front L
+      buildingBoxes.push({ center: [12, wallY, 20], size: [8, 2.0, 0.4] });        // Front R
+      buildingBoxes.push({ center: [0, k * floorHeight + 3.2, 20], size: [4, 0.8, 0.4] }); // Header
 
-      // Architectural Elevator Control Station Pillar & Control Console Table on Floor k
-      staticBoxes.push({ center: [11.5, k * floorHeight + 0.6, 8.0], size: [0.35, 0.6, 0.35] }); // Control Table Pedestal
-      staticBoxes.push({ center: [11.5, k * floorHeight + 1.2, 8.0], size: [0.45, 0.05, 0.45] }); // Table Surface Countertop
-      staticBoxes.push({ center: [11.5, k * floorHeight + 1.3, 8.0], size: [0.18, 0.1, 0.18] });  // Glowing Ruby Red 3D Call Button on Table
+      // CENTRAL CORE PARTITIONS (Housing circulation) - With 3m Doorways
+      // Back/Front Core Walls
+      buildingBoxes.push({ center: [-5, wallY, -5], size: [2, 2.0, 0.2] });  // Back L
+      buildingBoxes.push({ center: [5, wallY, -5], size: [2, 2.0, 0.2] });   // Back R
+      buildingBoxes.push({ center: [-5, wallY, 15], size: [2, 2.0, 0.2] });  // Front L
+      buildingBoxes.push({ center: [5, wallY, 15], size: [2, 2.0, 0.2] });   // Front R
+      
+      // Side Core Walls (Clearing Stair Exit)
+      buildingBoxes.push({ center: [-7, wallY, 10], size: [0.2, 2.0, 5] });  // Core West (Front)
+      buildingBoxes.push({ center: [7, wallY, 5], size: [0.2, 2.0, 10] });   // Core East
 
-      // Staircase Steps for Floor k -> Floor k+1 (10 Steps)
+      // TENANT DIVIDERS (Moved to corners to clear stair path)
+      buildingBoxes.push({ center: [-13, wallY, -10], size: [7, 2.0, 0.2] }); // Rear West Suite
+      buildingBoxes.push({ center: [13, wallY, -10], size: [7, 2.0, 0.2] });  // Rear East Suite
+      buildingBoxes.push({ center: [-15, wallY, 10], size: [5, 2.0, 0.2] });  // Front West Suite (Near Stairs but recessed)
+
+      // WINDOW PANES
+      for (let w = -15; w <= 15; w += 10) {
+        if (w === 0 && k === 0) continue;
+        windowBoxes.push({ center: [w, wallY, -20], size: [3.5, 1.4, 0.05] }); // Rear
+        windowBoxes.push({ center: [-20, wallY, w], size: [0.05, 1.4, 3.5] }); // Left
+        windowBoxes.push({ center: [20, wallY, w], size: [0.05, 1.4, 3.5] });  // Right
+      }
+
+      // OFFICE FURNITURE (Daylight Zones)
+      const officePositions: [number, number][] = [
+        [-17, -16], [17, -16], [-17, 16], [17, 16]
+      ];
+
+      for (const pos of officePositions) {
+        const deskY = k * floorHeight + 0.75;
+        officeBoxes.push({ center: [pos[0], deskY, pos[1]], size: [2.0, 0.1, 1.0] });
+        officeBoxes.push({ center: [pos[0], k * floorHeight + 0.5, pos[1] + 1.2], size: [0.6, 0.1, 0.6] });
+        officeBoxes.push({ center: [pos[0], deskY + 0.4, pos[1] - 0.3], size: [0.8, 0.5, 0.05] });
+      }
+
+      // STAIRCASE (X=-12, Clearing approach)
       const numSteps = 10;
-      const stepRise = floorHeight / numSteps; // 0.4m per step
-      const stepDepth = 0.75;
-      const stepWidth = 2.2;
+      const stepRise = floorHeight / numSteps;
       const startZ = 7.0;
 
       for (let i = 0; i < numSteps; i++) {
         const stepY = k * floorHeight + (i + 1) * stepRise;
-        const stepZ = startZ - i * stepDepth;
-        staticBoxes.push({
+        const stepZ = startZ - i * 0.75;
+        buildingBoxes.push({
           center: [-12.0, stepY - stepRise * 0.5, stepZ],
-          size: [stepWidth, stepRise * 0.5, stepDepth * 0.5],
+          size: [2.2, stepRise * 0.5, 0.375],
         });
       }
     }
 
-    // 3. Upper Floor Slabs (Floors 1 through 10) with STAIRWELL HOLE (X in [-20, -8], Z in [-4, 8]) AND ELEVATOR HOLE (X in [11.5, 16.5], Z in [7.5, 12.5])
+    // 3. UPPER FLOOR SLABS (Robust coverage, with Stair Hole)
     for (let k = 1; k <= totalFloors; k++) {
-      const slabY = k * floorHeight - 0.1;
+      const slabY = k * floorHeight - 0.05;
 
-      // Piece 1: Central/Rear Main Floor Slab
-      staticBoxes.push({ center: [6.0, slabY, -6.25], size: [14.0, 0.1, 13.75] });
-
-      // Piece 2: Left Rear Floor Slab (behind stair hole)
-      staticBoxes.push({ center: [-14.0, slabY, -12.0], size: [6.0, 0.1, 8.0] });
-
-      // Piece 3: Left Front Floor Slab (in front of stair hole)
-      staticBoxes.push({ center: [-14.0, slabY, 14.0], size: [6.0, 0.1, 6.0] });
-
-      // Piece 4: Center Front Floor Slab (between stair hole and elevator hole)
-      staticBoxes.push({ center: [1.75, slabY, 13.75], size: [9.75, 0.1, 6.25] });
-
-      // Piece 5: Right Front Wing (in front of elevator hole)
-      staticBoxes.push({ center: [15.75, slabY, 16.25], size: [4.25, 0.1, 3.75] });
-
-      // Piece 6: Far Right Flange (beside elevator hole)
-      staticBoxes.push({ center: [18.25, slabY, 10.0], size: [1.75, 0.1, 2.5] });
+      // Slab 1: North (Rear)
+      buildingBoxes.push({ center: [0, slabY, -10.5], size: [20.0, 0.05, 9.5] });
+      // Slab 2: South (Front)
+      buildingBoxes.push({ center: [0, slabY, 17.5], size: [20.0, 0.05, 2.5] });
+      
+      // Slab 3: West Wing (Splitting for Stair Hole at X=-12, Z=[0,8])
+      buildingBoxes.push({ center: [-17, slabY, 3.5], size: [3.0, 0.05, 4.5] }); // Perimeter West
+      buildingBoxes.push({ center: [-12, slabY, -0.5], size: [2.2, 0.05, 0.5] }); // Bridge at stair bottom landing
+      buildingBoxes.push({ center: [-8.5, slabY, 3.5], size: [1.5, 0.05, 4.5] }); // Strip between stairs and core
+      
+      // Slab 4: East (Elevator Wing)
+      buildingBoxes.push({ center: [10, slabY, 10.0], size: [10.0, 0.05, 5.0] });
+      // Slab 5: Center
+      buildingBoxes.push({ center: [0, slabY, 3.5], size: [6.0, 0.05, 4.5] });
+      buildingBoxes.push({ center: [0, slabY, 11.25], size: [20.0, 0.05, 3.75] });
     }
 
-    // 4. Elevator Shaft Guide Beams (40m height)
-    staticBoxes.push({ center: [11.5, 20.0, 7.5], size: [0.2, 20.0, 0.2] });
-    staticBoxes.push({ center: [16.5, 20.0, 7.5], size: [0.2, 20.0, 0.2] });
+    const buildingMesh = ProceduralModels.combineBoxes(buildingBoxes, 'Physics_Skyscraper_Robust');
+    const officeMesh = ProceduralModels.combineBoxes(officeBoxes, 'Office_Furniture_Collection');
+    const windowMesh = ProceduralModels.combineBoxes(windowBoxes, 'Skyscraper_Windows_Glass');
 
-    const buildingMesh = ProceduralModels.combineBoxes(staticBoxes, 'Physics_Skyscraper_10Floors');
+    // Separate Floor Call Button Primitives - CORRIDOR side
+    const floorButtonBoxes: { center: [number, number, number]; size: [number, number, number] }[] = [];
+    for (let k = 0; k < totalFloors; k++) {
+      floorButtonBoxes.push({ center: [11.28, k * floorHeight + 1.6, 9.0], size: [0.05, 0.12, 0.12] });
+    }
+    const floorButtonsMesh = ProceduralModels.combineBoxes(floorButtonBoxes, 'Floor_Call_Buttons');
 
-    // Dynamic Left Door Panel
+    // Dynamic Left/Right Door Panels
     const doorLeftMesh = ProceduralModels.createBoxPrimitive([0, 0, 0], [2.0, 2.0, 0.15], 'Sliding_Door_Left');
-    // Dynamic Right Door Panel
     const doorRightMesh = ProceduralModels.createBoxPrimitive([0, 0, 0], [2.0, 2.0, 0.15], 'Sliding_Door_Right');
 
-    // Dynamic Enclosed Real Elevator Cab Mesh with 3D Control Console Table & Contrast Floor Buttons
-    const elevatorBoxes: { center: [number, number, number]; size: [number, number, number] }[] = [
-      // Main Cab Floor Slab
-      { center: [0, 0, 0], size: [2.2, 0.15, 2.2] },
-      // Enclosed Rear Cab Wall
-      { center: [0, 1.4, -2.15], size: [2.2, 1.25, 0.08] },
-      // Enclosed Side Cab Walls
-      { center: [-2.15, 1.4, 0], size: [0.08, 1.25, 2.2] },
-      { center: [2.15, 1.4, 0], size: [0.08, 1.25, 2.2] },
-      { center: [0, 2.7, 0], size: [2.2, 0.1, 2.2] }, // Roof Ceiling
-      // 3D Interior Floor Control Console Table (Contrasting Metallic Desk)
-      { center: [-1.5, 0.6, 0.8], size: [0.35, 0.55, 0.5] },  // Table Stand
-      { center: [-1.5, 1.18, 0.8], size: [0.45, 0.05, 0.6] }, // Contrasting Table Top Surface
-      { center: [-1.5, 1.26, 0.65], size: [0.12, 0.08, 0.12] }, // Glowing Emerald 3D Button UP
-      { center: [-1.5, 1.26, 0.95], size: [0.12, 0.08, 0.12] }, // Glowing Amber 3D Button DOWN
+    // Dynamic Enclosed Elevator Cab Mesh - ENLARGED
+    const elevatorCabBoxes: { center: [number, number, number]; size: [number, number, number] }[] = [
+      { center: [0, 0, 0], size: [2.4, 0.15, 2.4] }, // Floor
+      { center: [0, 1.4, -2.35], size: [2.4, 1.25, 0.08] }, // Rear
+      { center: [-2.35, 1.4, 0], size: [0.08, 1.25, 2.4] }, // Left
+      { center: [2.35, 1.4, 0], size: [0.08, 1.25, 2.4] }, // Right
+      { center: [0, 2.7, 0], size: [2.4, 0.1, 2.4] }, // Roof
+      { center: [-2.25, 1.4, 0.8], size: [0.05, 0.8, 0.3] },   // Panel Base on Left Wall
     ];
+    const elevatorMesh = ProceduralModels.combineBoxes(elevatorCabBoxes, 'Elevator_Cab_Structure');
 
-    const elevatorMesh = ProceduralModels.combineBoxes(elevatorBoxes, 'Elevator_Cab_With_3D_Buttons');
+    const btnUpMesh = ProceduralModels.createBoxPrimitive([0, 0, 0], [0.08, 0.1, 0.1], 'Elevator_Btn_UP');
+    const btnDownMesh = ProceduralModels.createBoxPrimitive([0, 0, 0], [0.08, 0.1, 0.1], 'Elevator_Btn_DOWN');
+
+    // 5. "Workers" Banner
+    const bannerMesh = ProceduralModels.create3DTextMesh('Workers', 1.0, 0.35, 'Entrance_Banner_Text');
 
     return {
       buildingMesh,
+      groundSlabMesh,
+      floorButtonsMesh,
       doorLeftMesh,
       doorRightMesh,
       elevatorMesh,
+      btnUpMesh,
+      btnDownMesh,
+      bannerMesh,
+      officeMesh,
+      windowMesh,
     };
   }
 

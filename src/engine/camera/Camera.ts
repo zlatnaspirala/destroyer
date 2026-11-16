@@ -13,7 +13,7 @@ export class Camera {
   public fov = 60 * (Math.PI / 180);
   public aspect = 16 / 9;
   public near = 0.1;
-  public far = 1000.0;
+  public far = 5000.0;
 
   // Spherical coordinates for Orbit mode
   public radius = 22.0;

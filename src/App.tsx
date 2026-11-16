@@ -24,8 +24,8 @@ export default function App() {
   const isInitializingRef = useRef(false);
 
   // Main-view panel dock visibility
-  const [showLeftPanel, setShowLeftPanel] = useState<boolean>(() => !isMobileBrowser());
-  const [showRightPanel, setShowRightPanel] = useState<boolean>(() => !isMobileBrowser());
+  const [showLeftPanel, setShowLeftPanel] = useState<boolean>(false);
+  const [showRightPanel, setShowRightPanel] = useState<boolean>(false);
   const [rightPanelTab, setRightPanelTab] = useState<'system' | 'inspector'>('system');
 
   const [currentPreset, setCurrentPreset] = useState('anarchy');
@@ -39,6 +39,7 @@ export default function App() {
   const [sceneVersion, setSceneVersion] = useState(0);
   const [initRetryKey, setInitRetryKey] = useState(0);
   const [elevatorTargetFloor, setElevatorTargetFloor] = useState(0);
+  const [playerEnergy, setPlayerEnergy] = useState(1.0);
   const [activeAnimationName, setActiveAnimationName] = useState('Human_Walk_Cycle');
   const [availableAnimations, setAvailableAnimations] = useState<string[]>([
     'Human_Walk_Cycle',
@@ -189,8 +190,9 @@ export default function App() {
         statsInterval = setInterval(() => {
           if (engineRef.current && !cancelled) {
             setStats({ ...engineRef.current.stats });
+            setPlayerEnergy(engineRef.current.getPlayerEnergy());
           }
-        }, 150);
+        }, 100);
       } catch (err: any) {
         console.error('Engine init crash:', err);
         if (!cancelled) setInitError(err?.message || String(err));
@@ -524,53 +526,70 @@ export default function App() {
 
           {/* Live Telemetry HUD Overlay */}
           {isEngineReady && !isDeviceLost && (
-            <ViewportHUD
-              stats={stats}
-              cameraMode={cameraMode}
-              onCameraModeChange={handleCameraModeChange}
-              onResetCamera={handleResetCamera}
-              isRunning={isRunning}
-              onToggleRunning={() => {
-                if (engineRef.current) {
-                  const nextState = engineRef.current.playerController.toggleRunning();
-                  setIsRunning(nextState);
-                }
-              }}
-              onJoystickMove={(x, y) => {
-                if (engineRef.current) {
-                  engineRef.current.playerController.joystickVec = [x, y];
-                }
-              }}
-              onJumpRequested={() => {
-                if (engineRef.current) {
-                  engineRef.current.playerController.jumpRequested = true;
-                }
-              }}
-              onLoadBVH={(bvhText, name) => {
-                if (engineRef.current) {
-                  const res = engineRef.current.loadBVHAnimation(bvhText, name);
-                  if (res.success) {
-                    setAvailableAnimations(engineRef.current.getAvailableAnimations());
-                    setActiveAnimationName(res.clipName);
+            <>
+              <ViewportHUD
+                stats={stats}
+                cameraMode={cameraMode}
+                onCameraModeChange={handleCameraModeChange}
+                onResetCamera={handleResetCamera}
+                isRunning={isRunning}
+                onToggleRunning={() => {
+                  if (engineRef.current) {
+                    const nextState = engineRef.current.playerController.toggleRunning();
+                    setIsRunning(nextState);
                   }
-                }
-              }}
-              onSelectAnimation={(clipName) => {
-                if (engineRef.current) {
-                  engineRef.current.switchAnimation(clipName);
-                  setActiveAnimationName(clipName);
-                }
-              }}
-              availableAnimations={availableAnimations}
-              activeAnimationName={activeAnimationName}
-              elevatorTargetFloor={elevatorTargetFloor}
-              onSelectElevatorFloor={(floor) => {
-                setElevatorTargetFloor(floor);
-                if (engineRef.current?.physics) {
-                  engineRef.current.physics.setElevatorTargetFloor(floor);
-                }
-              }}
-            />
+                }}
+                onJoystickMove={(x, y) => {
+                  if (engineRef.current) {
+                    const jX = Math.abs(x);
+                    const jY = Math.abs(y);
+                    // Mobile fix: only move if vertical dominates (allows turn in place)
+                    if (jY > 0.15 && jY > jX * 0.8) {
+                      engineRef.current.playerController.joystickVec = [x, y];
+                    } else {
+                      engineRef.current.playerController.joystickVec = [x, 0];
+                    }
+                  }
+                }}
+                onJumpRequested={() => {
+                  if (engineRef.current) {
+                    engineRef.current.playerController.jumpRequested = true;
+                  }
+                }}
+                onLoadBVH={(bvhText, name) => {
+                  if (engineRef.current) {
+                    const res = engineRef.current.loadBVHAnimation(bvhText, name);
+                    if (res.success) {
+                      setAvailableAnimations(engineRef.current.getAvailableAnimations());
+                      setActiveAnimationName(res.clipName);
+                    }
+                  }
+                }}
+                onSelectAnimation={(clipName) => {
+                  if (engineRef.current) {
+                    engineRef.current.switchAnimation(clipName);
+                    setActiveAnimationName(clipName);
+                  }
+                }}
+                availableAnimations={availableAnimations}
+                activeAnimationName={activeAnimationName}
+                elevatorTargetFloor={elevatorTargetFloor}
+                onSelectElevatorFloor={(floor) => {
+                  setElevatorTargetFloor(floor);
+                  if (engineRef.current?.physics) {
+                    engineRef.current.physics.setElevatorTargetFloor(floor);
+                  }
+                }}
+              />
+
+              {/* Energy Bar Overlay (Discrete Gray Style) */}
+              <div className="absolute bottom-6 left-1/2 -translate-x-1/2 w-48 h-1.5 bg-zinc-800/80 rounded-full overflow-hidden border border-zinc-700/50 backdrop-blur shadow-lg z-20 pointer-events-none">
+                <div 
+                  className="h-full bg-cyan-500/80 transition-all duration-150 ease-out shadow-[0_0_8px_rgba(6,182,212,0.4)]"
+                  style={{ width: `${playerEnergy * 100}%` }}
+                />
+              </div>
+            </>
           )}
         </main>
 
