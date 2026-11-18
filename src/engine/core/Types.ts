@@ -120,6 +120,13 @@ export interface EngineStats {
   totalTriangles: number;
   indirectDrawCommands: number;
   bufferMemoryBytes: number;
+  smartCullingEnabled: boolean;
+  smartCullMode: 'EXTERIOR' | 'INTERIOR';
+  smartCullBuilding: number;
+  smartCullFloor: number;
+  smartCullMinFloor: number;
+  smartCullMaxFloor: number;
+  smartCulledCount: number;
 }
 
 export interface DestroyerConfig {

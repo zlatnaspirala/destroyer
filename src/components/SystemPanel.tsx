@@ -19,16 +19,19 @@ import {
   Zap,
 } from 'lucide-react';
 import { EngineStats } from '../engine/core/Types';
+import { DestroyerEngine } from '../engine/DestroyerEngine';
 import { IndirectRenderer } from '../engine/render/IndirectRenderer';
 
 interface SystemPanelProps {
   renderer: IndirectRenderer | null;
+  engine?: DestroyerEngine | null;
   stats: EngineStats;
   onUpdate: () => void;
 }
 
 export const SystemPanel: React.FC<SystemPanelProps> = ({
   renderer,
+  engine,
   stats,
   onUpdate,
 }) => {
@@ -230,7 +233,11 @@ export const SystemPanel: React.FC<SystemPanelProps> = ({
                 : 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
             }`}
           >
-            {renderer.cullingEnabled ? 'ACTIVE (SUBGROUP ACCELERATED)' : 'DISABLED'}
+            {renderer.cullingEnabled
+              ? stats.subgroupsActive
+                ? `ACTIVE (SUBGROUPS ${stats.subgroupMinSize}-${stats.subgroupMaxSize})`
+                : 'ACTIVE (STANDARD COMPUTE)'
+              : 'DISABLED'}
           </span>
         </div>
 
@@ -239,6 +246,7 @@ export const SystemPanel: React.FC<SystemPanelProps> = ({
             <div className="text-xs font-medium text-zinc-200">6-Plane Frustum Compute Dispatch</div>
             <div className="text-[11px] text-zinc-400 mt-0.5">
               Tests all {stats.totalInstances.toLocaleString()} entity bounding spheres on GPU in parallel before draw calls.
+              {!stats.subgroupsSupported && " (Adapter does not expose WebGPU 'subgroups'; using standard compute fallback.)"}
             </div>
           </div>
           <button
@@ -250,6 +258,37 @@ export const SystemPanel: React.FC<SystemPanelProps> = ({
             }`}
           >
             {renderer.cullingEnabled ? 'Enabled' : 'Disabled'}
+          </button>
+        </div>
+
+        {/* Smart Interior / Floor Culling */}
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 bg-zinc-950/60 p-3.5 rounded-lg border border-zinc-800/60">
+          <div>
+            <div className="text-xs font-medium text-zinc-200 flex items-center gap-2">
+              <Layers className="w-3.5 h-3.5 text-cyan-400" />
+              <span>Smart Interior Floor Culling (Current Floor ± 1)</span>
+            </div>
+            <div className="text-[11px] text-zinc-400 mt-0.5">
+              {stats.smartCullMode === 'INTERIOR'
+                ? `Inside Building ${stats.smartCullBuilding + 1} · Floor ${stats.smartCullFloor}: rendering floors ${stats.smartCullMinFloor}–${stats.smartCullMaxFloor} (${stats.smartCulledCount} entities culled).`
+                : 'Exterior view: rendering all floors (0–10) of all buildings. Enter a building to enable per-floor culling.'}
+            </div>
+          </div>
+          <button
+            onClick={() => {
+              if (engine) {
+                engine.smartCullingEnabled = !engine.smartCullingEnabled;
+                engine.updateSmartCulling();
+                onUpdate();
+              }
+            }}
+            className={`px-4 py-2 rounded-lg text-xs font-mono font-semibold transition-colors shrink-0 ${
+              engine?.smartCullingEnabled !== false
+                ? 'bg-cyan-600 hover:bg-cyan-500 text-white'
+                : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300'
+            }`}
+          >
+            {engine?.smartCullingEnabled !== false ? 'Enabled' : 'Disabled'}
           </button>
         </div>
       </div>

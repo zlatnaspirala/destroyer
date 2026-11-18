@@ -1,20 +1,39 @@
 /**
  * Destroyer Engine - Jolt-Style Lightweight 3D Physics Engine
  * Features:
- * - AABB / Box Colliders with static & dynamic response
- * - Character Controller with Slide-and-Step wall sliding and stair auto-climb
+ * - AABB / Box Colliders synchronized 1:1 with ProceduralModels geometry
+ * - Sub-stepped Swept Character Controller with Slide-and-Step wall sliding & stair auto-climb
  * - Moving Platform support (Elevators with velocity inheritance)
  * - Proximity Triggers (Automatic opening doors)
  */
+
+import { ProceduralModels } from '../loaders/ProceduralModels';
 
 export interface BoxCollider {
   id: string;
   name: string;
   center: [number, number, number]; // World space center [x, y, z]
   size: [number, number, number];   // Half-extents [hx, hy, hz]
+  category?: 'wall' | 'floor' | 'stair' | 'prop';
   isTrigger?: boolean;
   onTrigger?: (playerPos: [number, number, number]) => void;
   entityId?: number;
+}
+
+export interface MoveableObject {
+  id: string;
+  entityId: number;
+  name: string;
+  position: [number, number, number];
+  halfExtents: [number, number, number];
+  velocity: [number, number, number];
+  rotationY: number;
+  angularVelY: number;
+  tiltX: number;
+  tiltZ: number;
+  mass: number;
+  restitution: number;
+  colliderId: string;
 }
 
 export interface CharacterCapsule {
@@ -42,6 +61,10 @@ export class JoltPhysics {
   public doorLeftId = 'door_left';
   public doorRightId = 'door_right';
 
+  // Dynamic Moveable Props (crates, barrels, punchable cubes)
+  public moveableObjects: MoveableObject[] = [];
+  private propColliderLookup: Map<string, MoveableObject> = new Map();
+
   constructor() {
     this.setupDefaultBuildingPhysics();
   }
@@ -54,8 +77,48 @@ export class JoltPhysics {
     this.colliders.delete(id);
   }
 
+  public addMoveableObject(params: {
+    id: string;
+    entityId: number;
+    name: string;
+    position: [number, number, number];
+    halfExtents: [number, number, number];
+    mass?: number;
+    restitution?: number;
+  }): MoveableObject {
+    const colliderId = `prop_col_${params.id}`;
+    const obj: MoveableObject = {
+      id: params.id,
+      entityId: params.entityId,
+      name: params.name,
+      position: [params.position[0], params.position[1], params.position[2]],
+      halfExtents: [params.halfExtents[0], params.halfExtents[1], params.halfExtents[2]],
+      velocity: [0, 0, 0],
+      rotationY: 0,
+      angularVelY: 0,
+      tiltX: 0,
+      tiltZ: 0,
+      mass: params.mass ?? 1.0,
+      restitution: params.restitution ?? 0.35,
+      colliderId,
+    };
+    this.moveableObjects.push(obj);
+    this.propColliderLookup.set(colliderId, obj);
+    this.addBoxCollider({
+      id: colliderId,
+      name: params.name,
+      center: [obj.position[0], obj.position[1], obj.position[2]],
+      size: [obj.halfExtents[0], obj.halfExtents[1], obj.halfExtents[2]],
+      category: 'prop',
+      entityId: params.entityId,
+    });
+    return obj;
+  }
+
   public clear(): void {
     this.colliders.clear();
+    this.moveableObjects = [];
+    this.propColliderLookup.clear();
   }
 
   public setElevatorTargetFloor(floor: number): void {
@@ -63,102 +126,39 @@ export class JoltPhysics {
   }
 
   /**
-   * Set up a 10-story skyscraper at a specific offset
+   * Set up a 10-story skyscraper at a specific offset using the exact
+   * collider specifications generated alongside visual geometry in ProceduralModels.
    */
   public addSkyscraperPhysics(offset: [number, number, number] = [0, 0, 0]): void {
     const [ox, oy, oz] = offset;
-    const totalFloors = 10;
-    const floorHeight = 4.0;
+    const specs = ProceduralModels.getSkyscraperColliderSpecs();
 
-    // 1. Exterior Walls, Pillars, and Staircase Colliders across 10 Floors
-    for (let k = 0; k < totalFloors; k++) {
-      const wallY = oy + k * floorHeight + 2.0;
-
-      // Exterior
-      this.addBoxCollider({ id: `wall_rear_${ox}_${k}`, name: `F${k} Rear`, center: [ox, wallY, oz - 20], size: [20, 2.0, 0.4] });
-      this.addBoxCollider({ id: `wall_left_${ox}_${k}`, name: `F${k} Left`, center: [ox - 20, wallY, oz], size: [0.4, 2.0, 20] });
-      this.addBoxCollider({ id: `wall_right_${ox}_${k}`, name: `F${k} Right`, center: [ox + 20, wallY, oz], size: [0.4, 2.0, 20] });
-      this.addBoxCollider({ id: `wall_front_l_${ox}_${k}`, name: `F${k} FL`, center: [ox - 12, wallY, oz + 20], size: [8, 2.0, 0.4] });
-      this.addBoxCollider({ id: `wall_front_r_${ox}_${k}`, name: `F${k} FR`, center: [ox + 12, wallY, oz + 20], size: [8, 2.0, 0.4] });
-      this.addBoxCollider({ id: `wall_arch_${ox}_${k}`, name: `F${k} Arch`, center: [ox, oy + k * floorHeight + 3.2, oz + 20], size: [4, 0.8, 0.4] });
-
-      // CENTRAL CORE PARTITIONS (Housing circulation) - With 3m Doorways (Matched to ProceduralModels)
-      this.addBoxCollider({ id: `core_bl_${ox}_${k}`, name: `F${k} Core BL`, center: [ox - 5, wallY, oz - 5], size: [2, 2.0, 0.2] });
-      this.addBoxCollider({ id: `core_br_${ox}_${k}`, name: `F${k} Core BR`, center: [ox + 5, wallY, oz - 5], size: [2, 2.0, 0.2] });
-      this.addBoxCollider({ id: `core_fl_${ox}_${k}`, name: `F${k} Core FL`, center: [ox - 5, wallY, oz + 15], size: [2, 2.0, 0.2] });
-      this.addBoxCollider({ id: `core_fr_${ox}_${k}`, name: `F${k} Core FR`, center: [ox + 5, wallY, oz + 15], size: [2, 2.0, 0.2] });
-      this.addBoxCollider({ id: `core_ws_${ox}_${k}`, name: `F${k} Core W`, center: [ox - 7, wallY, oz + 10], size: [0.2, 2.0, 5] });
-      this.addBoxCollider({ id: `core_es_${ox}_${k}`, name: `F${k} Core E`, center: [ox + 7, wallY, oz + 5], size: [0.2, 2.0, 10] });
-
-      // TENANT DIVIDERS (Corners)
-      this.addBoxCollider({ id: `div_nw_${ox}_${k}`, name: `F${k} Div NW`, center: [ox - 13, wallY, oz - 10], size: [7, 2.0, 0.2] });
-      this.addBoxCollider({ id: `div_ne_${ox}_${k}`, name: `F${k} Div NE`, center: [ox + 13, wallY, oz - 10], size: [7, 2.0, 0.2] });
-      this.addBoxCollider({ id: `div_sw_${ox}_${k}`, name: `F${k} Div SW`, center: [ox - 15, wallY, oz + 10], size: [5, 2.0, 0.2] });
-
-      // Windows
-      for (let w = -15; w <= 15; w += 10) {
-        if (w === 0 && k === 0) continue;
-        this.addBoxCollider({ id: `win_r_${ox}_${k}_${w}`, name: `F${k} Win R ${w}`, center: [ox + w, wallY, oz - 20], size: [3.5, 1.4, 0.05] });
-        this.addBoxCollider({ id: `win_l_${ox}_${k}_${w}`, name: `F${k} Win L ${w}`, center: [ox - 20, wallY, oz + w], size: [0.05, 1.4, 3.5] });
-        this.addBoxCollider({ id: `win_rt_${ox}_${k}_${w}`, name: `F${k} Win RT ${w}`, center: [ox + 20, wallY, oz + w], size: [0.05, 1.4, 3.5] });
-      }
-
-      // Furniture (Perimeter Daylight Zones)
-      const officePositions: [number, number][] = [[-17, -16], [17, -16], [-17, 16], [17, 16]];
-      for (let i = 0; i < officePositions.length; i++) {
-        const op = officePositions[i];
-        const deskY = oy + k * floorHeight + 0.75;
-        this.addBoxCollider({ id: `desk_${ox}_${k}_${i}`, name: `F${k} Desk ${i}`, center: [ox + op[0], deskY, oz + op[1]], size: [2.0, 0.1, 1.0] });
-        this.addBoxCollider({ id: `chair_${ox}_${k}_${i}`, name: `F${k} Chair ${i}`, center: [ox + op[0], oy + k * floorHeight + 0.5, oz + op[1] + 1.2], size: [0.6, 0.1, 0.6] });
-      }
-
-      this.addBoxCollider({ id: `ele_panel_${ox}_${k}`, name: `F${k} Ele`, center: [ox + 11.28, oy + k * floorHeight + 1.4, oz + 9.0], size: [0.1, 0.8, 0.4] });
-
-      // Stairs (X = -12)
-      const numSteps = 10;
-      const stepRise = floorHeight / numSteps;
-      const startZ = oz + 7.0;
-      for (let i = 0; i < numSteps; i++) {
-        const stepY = oy + k * floorHeight + (i + 1) * stepRise;
-        this.addBoxCollider({
-          id: `stair_${ox}_${k}_${i}`,
-          name: `F${k} Step ${i}`,
-          center: [ox - 12.0, stepY - stepRise * 0.5, startZ - i * 0.75],
-          size: [2.2, stepRise * 0.5, 0.375], // Matched to ProceduralModels half-extents
-        });
-      }
+    for (let i = 0; i < specs.length; i++) {
+      const spec = specs[i];
+      this.addBoxCollider({
+        id: `${spec.id}_${ox}_${oz}`,
+        name: spec.name,
+        center: [spec.center[0] + ox, spec.center[1] + oy, spec.center[2] + oz],
+        size: [spec.size[0], spec.size[1], spec.size[2]],
+        category: spec.category,
+      });
     }
 
-    // 2. Upper Floor Slabs (Matched to 7-piece Robust Scheme in ProceduralModels)
-    for (let k = 1; k <= totalFloors; k++) {
-      const slabY = oy + k * floorHeight - 0.05;
-      this.addBoxCollider({ id: `f_slab_${ox}_${k}_N`, name: `F${k} Slab North`, center: [ox, slabY, oz - 10.5], size: [20.0, 0.05, 9.5] });
-      this.addBoxCollider({ id: `f_slab_${ox}_${k}_S`, name: `F${k} Slab South`, center: [ox, slabY, oz + 17.5], size: [20.0, 0.05, 2.5] });
-      this.addBoxCollider({ id: `f_slab_${ox}_${k}_W1`, name: `F${k} Slab West 1`, center: [ox - 17, slabY, oz + 3.5], size: [3.0, 0.05, 4.5] });
-      this.addBoxCollider({ id: `f_slab_${ox}_${k}_W2`, name: `F${k} Slab West 2`, center: [ox - 12, slabY, oz - 0.5], size: [2.2, 0.05, 0.5] });
-      this.addBoxCollider({ id: `f_slab_${ox}_${k}_W3`, name: `F${k} Slab West 3`, center: [ox - 8.5, slabY, oz + 3.5], size: [1.5, 0.05, 4.5] });
-      this.addBoxCollider({ id: `f_slab_${ox}_${k}_E`, name: `F${k} Slab East`, center: [ox + 10, slabY, oz + 10.0], size: [10.0, 0.05, 5.0] });
-      this.addBoxCollider({ id: `f_slab_${ox}_${k}_C1`, name: `F${k} Slab Center 1`, center: [ox, slabY, oz + 3.5], size: [6.0, 0.05, 4.5] });
-      this.addBoxCollider({ id: `f_slab_${ox}_${k}_C2`, name: `F${k} Slab Center 2`, center: [ox, slabY, oz + 11.25], size: [20.0, 0.05, 3.75] });
-    }
-
-    // 3. Elevator Shaft Beams
-    this.addBoxCollider({ id: `ele_b1_${ox}`, name: `Ele Beam 1`, center: [ox + 11.5, oy + 20.0, oz + 7.5], size: [0.2, 20.0, 0.2] });
-    this.addBoxCollider({ id: `ele_b2_${ox}`, name: `Ele Beam 2`, center: [ox + 16.5, oy + 20.0, oz + 7.5], size: [0.2, 20.0, 0.2] });
-
-    // 4. Doors & Sensors
+    // Dynamic Doors, Trigger & Elevator Cab (Main Building at ox === 0)
     if (ox === 0) {
       this.addBoxCollider({
         id: this.doorLeftId,
         name: `Sliding Door Left`,
-        center: [ox - 2.0, oy + 2.0, oz + 20.0],
-        size: [2.0, 2.0, 0.15],
+        center: [ox - 2.0, oy + 1.2, oz + 20.0],
+        size: [1.96, 1.2, 0.15],
+        category: 'wall',
       });
       this.addBoxCollider({
         id: this.doorRightId,
         name: `Sliding Door Right`,
-        center: [ox + 2.0, oy + 2.0, oz + 20.0],
-        size: [2.0, 2.0, 0.15],
+        center: [ox + 2.0, oy + 1.2, oz + 20.0],
+        size: [1.96, 1.2, 0.15],
+        category: 'wall',
       });
       this.addBoxCollider({
         id: 'door_trigger_sensor',
@@ -174,30 +174,35 @@ export class JoltPhysics {
         name: `Elevator Floor`,
         center: [ox + 14.0, oy + 0.15, oz + 10.0],
         size: [2.4, 0.15, 2.4],
+        category: 'floor',
       });
       this.addBoxCollider({
         id: 'elevator_wall_rear',
         name: `Elevator Wall Rear`,
         center: [ox + 14.0, oy + 1.55, oz + 7.65],
         size: [2.4, 1.25, 0.08],
+        category: 'wall',
       });
       this.addBoxCollider({
         id: 'elevator_wall_left',
         name: `Elevator Wall Left`,
         center: [ox + 11.65, oy + 1.55, oz + 10.0],
         size: [0.08, 1.25, 2.4],
+        category: 'wall',
       });
       this.addBoxCollider({
         id: 'elevator_wall_right',
         name: `Elevator Wall Right`,
         center: [ox + 16.35, oy + 1.55, oz + 10.0],
         size: [0.08, 1.25, 2.4],
+        category: 'wall',
       });
       this.addBoxCollider({
         id: 'elevator_roof',
         name: `Elevator Roof`,
         center: [ox + 14.0, oy + 2.85, oz + 10.0],
         size: [2.4, 0.1, 2.4],
+        category: 'floor',
       });
     }
   }
@@ -211,11 +216,12 @@ export class JoltPhysics {
       name: 'Global Ground Slab',
       center: [0, -0.2, 0],
       size: [2000, 0.2, 2000],
+      category: 'floor',
     });
 
     // Add Main Building
     this.addSkyscraperPhysics([0, 0, 0]);
-    
+
     // Add Secondary Building (Modular Reuse Demo)
     this.addSkyscraperPhysics([60, 0, 0]);
   }
@@ -279,6 +285,214 @@ export class JoltPhysics {
     if (eleRoof) eleRoof.center[1] = this.elevatorY + 2.7;
 
     return { elevatorDeltaY };
+  }
+
+  /**
+   * Apply a punch impulse from the player toward nearby moveable objects in front of them.
+   */
+  public punchNearestObjects(
+    playerPos: [number, number, number],
+    forwardDir: [number, number, number],
+    range = 2.75,
+    power = 12.5
+  ): { hitCount: number; hitNames: string[] } {
+    const fLen = Math.hypot(forwardDir[0], forwardDir[2]) || 1;
+    const fx = forwardDir[0] / fLen;
+    const fz = forwardDir[2] / fLen;
+
+    const hitNames: string[] = [];
+    const fistY = playerPos[1] + 1.15;
+
+    for (let i = 0; i < this.moveableObjects.length; i++) {
+      const obj = this.moveableObjects[i];
+      const dx = obj.position[0] - playerPos[0];
+      const dz = obj.position[2] - playerPos[2];
+      const dy = obj.position[1] - fistY;
+
+      const surfacePad = Math.max(obj.halfExtents[0], obj.halfExtents[2]);
+      const horizDist = Math.hypot(dx, dz);
+      const effectiveDist = Math.max(0, horizDist - surfacePad);
+
+      if (effectiveDist > range) continue;
+      if (Math.abs(dy) > 1.45 + obj.halfExtents[1]) continue;
+
+      const dirX = horizDist > 0.001 ? dx / horizDist : fx;
+      const dirZ = horizDist > 0.001 ? dz / horizDist : fz;
+      const forwardDot = dirX * fx + dirZ * fz;
+
+      // Accept anything in front hemisphere/cone, or touching right next to player
+      if (forwardDot > 0.15 || effectiveDist < 0.85) {
+        const invMass = 1.0 / Math.max(0.35, obj.mass);
+        const proximityBoost = 1.0 - Math.min(0.45, (effectiveDist / range) * 0.45);
+        const impulse = power * invMass * proximityBoost;
+
+        // Blend player forward punch vector with center-to-object push vector
+        const pushX = fx * 0.72 + dirX * 0.28;
+        const pushZ = fz * 0.72 + dirZ * 0.28;
+        const pLen = Math.hypot(pushX, pushZ) || 1;
+
+        obj.velocity[0] += (pushX / pLen) * impulse;
+        obj.velocity[2] += (pushZ / pLen) * impulse;
+        obj.velocity[1] = Math.max(obj.velocity[1], 0) + (3.6 + Math.random() * 1.1) * invMass;
+
+        // Spin and impact wobble tilt
+        const crossY = fx * dirZ - fz * dirX;
+        obj.angularVelY += (crossY * 8.0 + (Math.random() - 0.5) * 3.5) * invMass;
+        obj.tiltX = -(pushZ / pLen) * 0.26;
+        obj.tiltZ = (pushX / pLen) * 0.26;
+
+        hitNames.push(obj.name);
+      }
+    }
+
+    return { hitCount: hitNames.length, hitNames };
+  }
+
+  /**
+   * Simulate gravity, floor landing, static wall ricochet, prop-prop impacts, and friction
+   * for all dynamic MoveableObjects, keeping their BoxColliders synchronized.
+   */
+  public updateMoveableObjects(dt: number): void {
+    if (this.moveableObjects.length === 0 || dt <= 0) return;
+    const clampedDt = Math.min(dt, 0.05);
+    const gravity = -24.0;
+
+    for (let i = 0; i < this.moveableObjects.length; i++) {
+      const obj = this.moveableObjects[i];
+      const hx = obj.halfExtents[0];
+      const hy = obj.halfExtents[1];
+      const hz = obj.halfExtents[2];
+
+      // Decay visual impact wobble
+      const tiltDecay = Math.max(0, 1 - clampedDt * 9.0);
+      obj.tiltX *= tiltDecay;
+      obj.tiltZ *= tiltDecay;
+
+      // Apply gravity
+      obj.velocity[1] += gravity * clampedDt;
+
+      // Integrate horizontal displacement with static wall bounce
+      const nextX = obj.position[0] + obj.velocity[0] * clampedDt;
+      const nextZ = obj.position[2] + obj.velocity[2] * clampedDt;
+      obj.position[0] = nextX;
+      obj.position[2] = nextZ;
+
+      const nextY = obj.position[1] + obj.velocity[1] * clampedDt;
+      obj.position[1] = nextY;
+
+      let grounded = false;
+
+      for (const col of this.colliders.values()) {
+        if (col.isTrigger || col.id === obj.colliderId) continue;
+
+        const cx = col.center[0];
+        const cy = col.center[1];
+        const cz = col.center[2];
+        const sx = col.size[0];
+        const sy = col.size[1];
+        const sz = col.size[2];
+
+        const overlapX = (hx + sx) - Math.abs(obj.position[0] - cx);
+        if (overlapX <= 0) continue;
+        const overlapZ = (hz + sz) - Math.abs(obj.position[2] - cz);
+        if (overlapZ <= 0) continue;
+        const overlapY = (hy + sy) - Math.abs(obj.position[1] - cy);
+        if (overlapY <= 0) continue;
+
+        // Resolve minimum penetration axis
+        if (overlapY <= overlapX && overlapY <= overlapZ) {
+          if (obj.position[1] >= cy) {
+            obj.position[1] = cy + sy + hy;
+            if (obj.velocity[1] < 0) {
+              if (obj.velocity[1] < -2.2) {
+                obj.velocity[1] = -obj.velocity[1] * obj.restitution;
+              } else {
+                obj.velocity[1] = 0;
+                grounded = true;
+              }
+            } else {
+              grounded = true;
+            }
+          } else {
+            obj.position[1] = cy - sy - hy;
+            if (obj.velocity[1] > 0) obj.velocity[1] = -obj.velocity[1] * 0.25;
+          }
+        } else if (overlapX < overlapZ) {
+          // Wall/prop hit on X
+          const sign = obj.position[0] >= cx ? 1 : -1;
+          obj.position[0] = cx + sign * (sx + hx);
+          if (col.category === 'prop') {
+            const other = this.propColliderLookup.get(col.id);
+            if (other) {
+              const relVx = obj.velocity[0] - other.velocity[0];
+              if (relVx * sign < 0) {
+                const totalMass = obj.mass + other.mass;
+                const j = -(1 + 0.45) * relVx / totalMass;
+                obj.velocity[0] += j * other.mass;
+                other.velocity[0] -= j * obj.mass;
+                other.velocity[1] = Math.max(other.velocity[1], 1.2);
+                other.angularVelY += (Math.random() - 0.5) * 3.0;
+              }
+            }
+          } else {
+            obj.velocity[0] = -obj.velocity[0] * obj.restitution;
+          }
+        } else {
+          // Wall/prop hit on Z
+          const sign = obj.position[2] >= cz ? 1 : -1;
+          obj.position[2] = cz + sign * (sz + hz);
+          if (col.category === 'prop') {
+            const other = this.propColliderLookup.get(col.id);
+            if (other) {
+              const relVz = obj.velocity[2] - other.velocity[2];
+              if (relVz * sign < 0) {
+                const totalMass = obj.mass + other.mass;
+                const j = -(1 + 0.45) * relVz / totalMass;
+                obj.velocity[2] += j * other.mass;
+                other.velocity[2] -= j * obj.mass;
+                other.velocity[1] = Math.max(other.velocity[1], 1.2);
+                other.angularVelY += (Math.random() - 0.5) * 3.0;
+              }
+            }
+          } else {
+            obj.velocity[2] = -obj.velocity[2] * obj.restitution;
+          }
+        }
+      }
+
+      // World ground clamp
+      if (obj.position[1] < hy) {
+        obj.position[1] = hy;
+        if (obj.velocity[1] < -2.2) {
+          obj.velocity[1] = -obj.velocity[1] * obj.restitution;
+        } else {
+          obj.velocity[1] = 0;
+          grounded = true;
+        }
+      }
+
+      // Friction & spin decay
+      const linFriction = grounded ? Math.max(0, 1 - clampedDt * 5.2) : Math.max(0, 1 - clampedDt * 0.45);
+      obj.velocity[0] *= linFriction;
+      obj.velocity[2] *= linFriction;
+      if (grounded && Math.hypot(obj.velocity[0], obj.velocity[2]) < 0.04) {
+        obj.velocity[0] = 0;
+        obj.velocity[2] = 0;
+      }
+
+      obj.rotationY += obj.angularVelY * clampedDt;
+      const angFriction = grounded ? Math.max(0, 1 - clampedDt * 6.0) : Math.max(0, 1 - clampedDt * 1.2);
+      obj.angularVelY *= angFriction;
+      if (Math.abs(obj.angularVelY) < 0.02) obj.angularVelY = 0;
+
+      // Sync dynamic BoxCollider center
+      const syncedCol = this.colliders.get(obj.colliderId);
+      if (syncedCol) {
+        syncedCol.center[0] = obj.position[0];
+        syncedCol.center[1] = obj.position[1];
+        syncedCol.center[2] = obj.position[2];
+      }
+    }
   }
 
   /**
@@ -352,7 +566,149 @@ export class JoltPhysics {
   }
 
   /**
-   * Professional Stable Multi-Pass Slide-and-Step Character Controller
+   * Resolves horizontal capsule penetration against a broadphase list of AABB colliders.
+   * Uses iterative deepest-penetration pushout with exact face-distance MTV fallback (no zero-normal bugs).
+   */
+  private resolveHorizontal(
+    x: number,
+    y: number,
+    z: number,
+    capsuleRadius: number,
+    capsuleHeight: number,
+    nearby: BoxCollider[]
+  ): { x: number; z: number; blocked: boolean; hitColliders: BoxCollider[] } {
+    let px = x;
+    let pz = z;
+    let blocked = false;
+    const hitColliders: BoxCollider[] = [];
+
+    for (let iter = 0; iter < 8; iter++) {
+      let hit = false;
+      let deepestPen = 0;
+      let bestNx = 0;
+      let bestNz = 0;
+      let bestCol: BoxCollider | null = null;
+
+      for (let i = 0; i < nearby.length; i++) {
+        const col = nearby[i];
+        const c = col.center;
+        const s = col.size;
+
+        const boxTop = c[1] + s[1];
+        const boxBottom = c[1] - s[1];
+
+        // Vertical overlap check (skip ground beneath feet and ceiling above head)
+        if (y >= boxTop - 0.02 || y + capsuleHeight <= boxBottom + 0.02) continue;
+
+        const minX = c[0] - s[0];
+        const maxX = c[0] + s[0];
+        const minZ = c[2] - s[2];
+        const maxZ = c[2] + s[2];
+
+        const cx = Math.max(minX, Math.min(px, maxX));
+        const cz = Math.max(minZ, Math.min(pz, maxZ));
+        const dx = px - cx;
+        const dz = pz - cz;
+        const distSq = dx * dx + dz * dz;
+
+        if (distSq < capsuleRadius * capsuleRadius) {
+          let pen = 0;
+          let nx = 0;
+          let nz = 0;
+
+          if (distSq > 1e-8) {
+            const dist = Math.sqrt(distSq);
+            pen = capsuleRadius - dist;
+            nx = dx / dist;
+            nz = dz / dist;
+          } else {
+            // Capsule center is inside or on the AABB boundary: pick true shortest exit face
+            const dLeft = px - minX;
+            const dRight = maxX - px;
+            const dBack = pz - minZ;
+            const dFront = maxZ - pz;
+
+            let minFace = dLeft;
+            nx = -1;
+            nz = 0;
+
+            if (dRight < minFace) {
+              minFace = dRight;
+              nx = 1;
+              nz = 0;
+            }
+            if (dBack < minFace) {
+              minFace = dBack;
+              nx = 0;
+              nz = -1;
+            }
+            if (dFront < minFace) {
+              minFace = dFront;
+              nx = 0;
+              nz = 1;
+            }
+
+            pen = Math.max(0, minFace) + capsuleRadius;
+          }
+
+          if (pen > deepestPen) {
+            deepestPen = pen;
+            bestNx = nx;
+            bestNz = nz;
+            bestCol = col;
+            hit = true;
+          }
+        }
+      }
+
+      if (!hit || deepestPen <= 1e-5) break;
+
+      blocked = true;
+      if (bestCol && !hitColliders.includes(bestCol)) {
+        hitColliders.push(bestCol);
+      }
+      const push = deepestPen + 1e-4;
+      px += bestNx * push;
+      pz += bestNz * push;
+    }
+
+    return { x: px, z: pz, blocked, hitColliders };
+  }
+
+  /**
+   * Checks whether placing the capsule vertically at [x, y, z] hits a ceiling/overhang.
+   */
+  private hasVerticalCeilingOverlap(
+    x: number,
+    y: number,
+    z: number,
+    capsuleRadius: number,
+    capsuleHeight: number,
+    nearby: BoxCollider[]
+  ): boolean {
+    const footprintR = capsuleRadius * 0.85;
+    for (let i = 0; i < nearby.length; i++) {
+      const col = nearby[i];
+      const c = col.center;
+      const s = col.size;
+      if (
+        x >= c[0] - s[0] - footprintR &&
+        x <= c[0] + s[0] + footprintR &&
+        z >= c[2] - s[2] - footprintR &&
+        z <= c[2] + s[2] + footprintR
+      ) {
+        const boxBottom = c[1] - s[1];
+        const boxTop = c[1] + s[1];
+        if (y + 0.05 < boxTop && y + capsuleHeight - 0.02 > boxBottom) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Sub-stepped Multi-Pass Slide-and-Step Character Controller (Tunneling-Proof)
    */
   public updateCharacterPhysics(
     pos: [number, number, number],
@@ -362,6 +718,7 @@ export class JoltPhysics {
   ): {
     newPos: [number, number, number];
     isGrounded: boolean;
+    hitCeiling: boolean;
     standingOnElevator: boolean;
   } {
     let px = pos[0];
@@ -372,93 +729,182 @@ export class JoltPhysics {
     const vy = displacement[1];
     const vz = displacement[2];
 
-    let isGrounded = false;
-    let standingOnElevator = false;
+    // 1. Broadphase Swept-AABB Pre-Filter
+    const padXZ = capsuleRadius + 1.0;
+    const minSweepX = Math.min(px, px + vx) - padXZ;
+    const maxSweepX = Math.max(px, px + vx) + padXZ;
+    const minSweepY = Math.min(py, py + vy) - 1.0;
+    const maxSweepY = Math.max(py, py + vy) + capsuleHeight + JoltPhysics.maxStepHeight + 1.0;
+    const minSweepZ = Math.min(pz, pz + vz) - padXZ;
+    const maxSweepZ = Math.max(pz, pz + vz) + padXZ;
 
-    // 1. Vertical Movement (Gravity, Jumping, Stepping)
-    const nextY = py + vy;
-    for (const collider of this.colliders.values()) {
-      if (collider.isTrigger) continue;
-      const c = collider.center;
-      const s = collider.size;
-      const boxTopY = c[1] + s[1];
-      const boxBottomY = c[1] - s[1];
-
-      const isOverFootprint =
-        px >= c[0] - s[0] - capsuleRadius &&
-        px <= c[0] + s[0] + capsuleRadius &&
-        pz >= c[2] - s[2] - capsuleRadius &&
-        pz <= c[2] + s[2] + capsuleRadius;
-
-      if (isOverFootprint) {
-        const stepHeightDiff = boxTopY - py;
-        const isSteppable = stepHeightDiff >= -0.1 && stepHeightDiff <= JoltPhysics.maxStepHeight + 0.1 && py >= boxBottomY - 0.2;
-
-        if (isSteppable && vy <= 0.1) {
-          if (nextY <= boxTopY) {
-            py = boxTopY;
-            isGrounded = true;
-            if (collider.id === this.elevatorPlatformId) standingOnElevator = true;
-          }
-        } else if (py + capsuleHeight <= boxBottomY && nextY + capsuleHeight > boxBottomY) {
-          py = boxBottomY - capsuleHeight;
-        }
+    const nearby: BoxCollider[] = [];
+    for (const col of this.colliders.values()) {
+      if (col.isTrigger) continue;
+      const c = col.center;
+      const s = col.size;
+      if (
+        c[0] + s[0] >= minSweepX && c[0] - s[0] <= maxSweepX &&
+        c[1] + s[1] >= minSweepY && c[1] - s[1] <= maxSweepY &&
+        c[2] + s[2] >= minSweepZ && c[2] - s[2] <= maxSweepZ
+      ) {
+        nearby.push(col);
       }
     }
-    
-    // Fall to nextY if not grounded by a box above
-    if (!isGrounded) {
-      py = nextY;
-    }
 
-    // 2. Horizontal Movement (Slide resolution)
-    px += vx;
-    pz += vz;
+    let isGrounded = false;
+    let hitCeiling = false;
+    let standingOnElevator = false;
 
-    // Multi-pass resolution to handle corners and sliding without double-moving
-    for (let iter = 0; iter < 3; iter++) {
-      let hit = false;
-      let deepestPen = 0;
-      let normal: [number, number, number] = [0, 0, 0];
+    // 2. Sub-stepped Horizontal Movement (Max 0.08m per substep eliminates wall tunneling)
+    const horizDist = Math.hypot(vx, vz);
+    const maxHorizStep = 0.08;
+    const hSteps = Math.max(1, Math.ceil(horizDist / maxHorizStep));
+    const stepVx = vx / hSteps;
+    const stepVz = vz / hSteps;
 
-      for (const col of this.colliders.values()) {
-        if (col.isTrigger) continue;
-        const c = col.center;
-        const s = col.size;
-        
-        // Skip if vertically out of range
-        if (py >= c[1] + s[1] - 0.05 || py + capsuleHeight <= c[1] - s[1] + 0.05) continue;
+    for (let step = 0; step < hSteps; step++) {
+      const targetX = px + stepVx;
+      const targetZ = pz + stepVz;
 
-        const cx = Math.max(c[0] - s[0], Math.min(px, c[0] + s[0]));
-        const cz = Math.max(c[2] - s[2], Math.min(pz, c[2] + s[2]));
-        const dx = px - cx;
-        const dz = pz - cz;
-        const dist = Math.hypot(dx, dz);
+      const resolved = this.resolveHorizontal(targetX, py, targetZ, capsuleRadius, capsuleHeight, nearby);
 
-        if (dist < capsuleRadius) {
-          const pen = capsuleRadius - dist;
-          if (pen > deepestPen) {
-            deepestPen = pen;
-            hit = true;
-            if (dist > 0.001) {
-              normal = [dx / dist, 0, dz / dist];
-            } else {
-              // Minimal penetration axis fallback
-              const ox = Math.abs(px - c[0]) / (s[0] + capsuleRadius);
-              const oz = Math.abs(pz - c[2]) / (s[2] + capsuleRadius);
-              if (ox > oz) normal = [Math.sign(px - c[0]), 0, 0];
-              else normal = [0, 0, Math.sign(pz - c[2])];
+      // Check for smooth stair / low-curb auto-step if blocked horizontally while walking/settling (not jumping up)
+      if (resolved.blocked && vy <= 0.05) {
+        let bestStepY = -1;
+        for (let i = 0; i < resolved.hitColliders.length; i++) {
+          const hitCol = resolved.hitColliders[i];
+          // Never auto-climb full-height architectural walls or handrails
+          if (hitCol.category === 'wall') continue;
+
+          const colTop = hitCol.center[1] + hitCol.size[1];
+          const rise = colTop - py;
+          if (rise > 0.005 && rise <= JoltPhysics.maxStepHeight + 0.02) {
+            if (colTop > bestStepY) bestStepY = colTop;
+          }
+        }
+
+        if (bestStepY > py && !this.hasVerticalCeilingOverlap(targetX, bestStepY, targetZ, capsuleRadius, capsuleHeight, nearby)) {
+          const steppedRes = this.resolveHorizontal(targetX, bestStepY, targetZ, capsuleRadius, capsuleHeight, nearby);
+          const normalProgress = Math.hypot(resolved.x - px, resolved.z - pz);
+          const steppedProgress = Math.hypot(steppedRes.x - px, steppedRes.z - pz);
+          if (steppedProgress > normalProgress + 0.002) {
+            px = steppedRes.x;
+            pz = steppedRes.z;
+            py = bestStepY;
+            isGrounded = true;
+            continue;
+          }
+        }
+      }
+
+      px = resolved.x;
+      pz = resolved.z;
+
+      // Light physical nudge when walking directly into moveable props
+      if (resolved.blocked && (Math.abs(stepVx) > 1e-5 || Math.abs(stepVz) > 1e-5)) {
+        const nudgeScale = 3.2;
+        for (let i = 0; i < resolved.hitColliders.length; i++) {
+          const hitCol = resolved.hitColliders[i];
+          if (hitCol.category !== 'prop') continue;
+          const propObj = this.propColliderLookup.get(hitCol.id);
+          if (propObj) {
+            const dx = propObj.position[0] - px;
+            const dz = propObj.position[2] - pz;
+            const dLen = Math.hypot(dx, dz) || 1;
+            const pushInto = (stepVx * dx + stepVz * dz) / dLen;
+            if (pushInto > 0) {
+              propObj.velocity[0] += (dx / dLen) * nudgeScale * (1 / Math.max(0.5, propObj.mass)) * 0.25;
+              propObj.velocity[2] += (dz / dLen) * nudgeScale * (1 / Math.max(0.5, propObj.mass)) * 0.25;
             }
           }
         }
       }
-
-      if (!hit) break;
-
-      // Resolve penetration: push out and continue to next iteration to handle secondary collisions
-      px += normal[0] * deepestPen;
-      pz += normal[2] * deepestPen;
     }
+
+    // 3. Sub-stepped Vertical Movement (Gravity, Floor Support, Ceiling Clamp)
+    const vertSteps = Math.max(1, Math.ceil(Math.abs(vy) / 0.15));
+    const stepVy = vy / vertSteps;
+    const footRadius = capsuleRadius * 0.85;
+
+    for (let step = 0; step < vertSteps; step++) {
+      const nextY = py + stepVy;
+      let hitFloor = false;
+      let stepHitCeiling = false;
+      let landedY = py;
+      let clampedCeilingY = nextY;
+
+      for (let i = 0; i < nearby.length; i++) {
+        const col = nearby[i];
+        const c = col.center;
+        const s = col.size;
+        const boxTopY = c[1] + s[1];
+        const boxBottomY = c[1] - s[1];
+
+        const isOverFootprint =
+          px >= c[0] - s[0] - footRadius &&
+          px <= c[0] + s[0] + footRadius &&
+          pz >= c[2] - s[2] - footRadius &&
+          pz <= c[2] + s[2] + footRadius;
+
+        if (!isOverFootprint) continue;
+
+        // Grounding / landing on top of box (never catch while jumping upward)
+        if (stepVy <= 0.001 && py >= boxTopY - 0.12 && nextY <= boxTopY + 0.01) {
+          if (!hitFloor || boxTopY > landedY) {
+            landedY = boxTopY;
+            hitFloor = true;
+            isGrounded = true;
+            if (col.id === this.elevatorPlatformId) standingOnElevator = true;
+          }
+        } else if (stepVy > 0 && py + capsuleHeight <= boxBottomY + 0.05 && nextY + capsuleHeight > boxBottomY) {
+          // Ceiling impact clamp
+          const clampY = boxBottomY - capsuleHeight;
+          if (!stepHitCeiling || clampY < clampedCeilingY) {
+            clampedCeilingY = clampY;
+            stepHitCeiling = true;
+          }
+        }
+      }
+
+      if (hitFloor) {
+        py = landedY;
+        break;
+      } else if (stepHitCeiling) {
+        py = Math.max(py, clampedCeilingY);
+        hitCeiling = true;
+        break;
+      } else {
+        py = nextY;
+      }
+    }
+
+    // Check resting ground contact when not jumping upward
+    if (!isGrounded && vy <= 0.001) {
+      for (let i = 0; i < nearby.length; i++) {
+        const col = nearby[i];
+        const c = col.center;
+        const s = col.size;
+        const boxTopY = c[1] + s[1];
+        if (
+          Math.abs(py - boxTopY) <= 0.02 &&
+          px >= c[0] - s[0] - footRadius &&
+          px <= c[0] + s[0] + footRadius &&
+          pz >= c[2] - s[2] - footRadius &&
+          pz <= c[2] + s[2] + footRadius
+        ) {
+          py = boxTopY;
+          isGrounded = true;
+          if (col.id === this.elevatorPlatformId) standingOnElevator = true;
+          break;
+        }
+      }
+    }
+
+    // 4. Final Hard Horizontal Safety Pass (Guarantees 0 penetration at frame end)
+    const finalResolved = this.resolveHorizontal(px, py, pz, capsuleRadius, capsuleHeight, nearby);
+    px = finalResolved.x;
+    pz = finalResolved.z;
 
     // World floor guard
     if (py < 0) {
@@ -469,7 +915,9 @@ export class JoltPhysics {
     return {
       newPos: [px, py, pz],
       isGrounded,
+      hitCeiling,
       standingOnElevator,
     };
   }
 }
+

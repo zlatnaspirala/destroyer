@@ -458,6 +458,37 @@ export class FlatEntityManager {
     }
   }
 
+  setEntityVisible(id: number, visible: boolean): void {
+    if (id < 0 || id >= this.nextEntityId) return;
+    const eOffset = id * FlatEntityManager.ENTITY_STRIDE_FLOATS;
+    if (visible) {
+      this.entityUintView[eOffset + 22] |= 1;
+    } else {
+      this.entityUintView[eOffset + 22] &= ~1;
+    }
+    const rec = this.entityRecords[id];
+    if (rec && rec.id === id) {
+      rec.isActive = visible;
+    }
+  }
+
+  isEntityVisible(id: number): boolean {
+    if (id < 0 || id >= this.nextEntityId) return false;
+    const eOffset = id * FlatEntityManager.ENTITY_STRIDE_FLOATS;
+    return (this.entityUintView[eOffset + 22] & 1) !== 0;
+  }
+
+  getVisibleFlagEntityCount(): number {
+    let count = 0;
+    for (let i = 0; i < this.activeEntityCount; i++) {
+      const eOffset = i * FlatEntityManager.ENTITY_STRIDE_FLOATS;
+      if ((this.entityUintView[eOffset + 22] & 1) !== 0) {
+        count++;
+      }
+    }
+    return count;
+  }
+
   duplicateEntity(id: number): number {
     const record = this.entityRecords.find((r) => r.id === id);
     if (!record || this.activeEntityCount >= this.maxEntities) return -1;

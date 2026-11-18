@@ -17,7 +17,7 @@ struct CameraUniforms {
   frustumPlanes: array<vec4<f32>, 6>,
   cullingEnabled: u32,
   totalEntities: u32,
-  pad0: u32,
+  cullDistance: f32,
   pad1: u32,
 };
 
@@ -54,6 +54,15 @@ fn isSphereInFrustum(center: vec3<f32>, radius: f32) -> bool {
   return true;
 }
 
+fn isWithinCullDistance(center: vec3<f32>, radius: f32) -> bool {
+  // cullDistance <= 0 disables distance cap; mega ground slabs (radius >= 1000m) stay visible
+  if (camera.cullDistance <= 0.0 || radius >= 1000.0) {
+    return true;
+  }
+  let distToCam = length(center - camera.camPos.xyz);
+  return (distToCam - radius) <= camera.cullDistance;
+}
+
 @compute @workgroup_size(64, 1, 1)
 fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
   let entityIndex = globalId.x;
@@ -68,7 +77,8 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
     return;
   }
 
-  let worldCenter = (entity.worldMatrix * vec4<f32>(entity.sphereCenter.xyz, 1.0)).xyz;
+  // sphereCenter.xyz is stored in world space by FlatEntityManager
+  let worldCenter = entity.sphereCenter.xyz;
   let maxScale = max(
     length(entity.worldMatrix[0].xyz),
     max(length(entity.worldMatrix[1].xyz), length(entity.worldMatrix[2].xyz))
@@ -77,7 +87,7 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
 
   var isVisible = true;
   if (camera.cullingEnabled == 1u) {
-    isVisible = isSphereInFrustum(worldCenter, worldRadius);
+    isVisible = isSphereInFrustum(worldCenter, worldRadius) && isWithinCullDistance(worldCenter, worldRadius);
   }
 
   if (isVisible) {
@@ -105,7 +115,7 @@ struct CameraUniforms {
   frustumPlanes: array<vec4<f32>, 6>,
   cullingEnabled: u32,
   totalEntities: u32,
-  pad0: u32,
+  cullDistance: f32,
   pad1: u32,
 };
 
@@ -142,6 +152,14 @@ fn isSphereInFrustum(center: vec3<f32>, radius: f32) -> bool {
   return true;
 }
 
+fn isWithinCullDistance(center: vec3<f32>, radius: f32) -> bool {
+  if (camera.cullDistance <= 0.0 || radius >= 1000.0) {
+    return true;
+  }
+  let distToCam = length(center - camera.camPos.xyz);
+  return (distToCam - radius) <= camera.cullDistance;
+}
+
 @compute @workgroup_size(64, 1, 1)
 fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
   let entityIndex = globalId.x;
@@ -153,7 +171,7 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
     let isActive = (entity.flags & 1u) != 0u;
 
     if (isActive) {
-      let worldCenter = (entity.worldMatrix * vec4<f32>(entity.sphereCenter.xyz, 1.0)).xyz;
+      let worldCenter = entity.sphereCenter.xyz;
       let maxScale = max(
         length(entity.worldMatrix[0].xyz),
         max(length(entity.worldMatrix[1].xyz), length(entity.worldMatrix[2].xyz))
@@ -161,7 +179,7 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
       let worldRadius = entity.sphereCenter.w * maxScale;
 
       if (camera.cullingEnabled == 1u) {
-        isVisible = isSphereInFrustum(worldCenter, worldRadius);
+        isVisible = isSphereInFrustum(worldCenter, worldRadius) && isWithinCullDistance(worldCenter, worldRadius);
       } else {
         isVisible = true;
       }
@@ -169,10 +187,14 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
     }
   }
 
-  // SIMD Subgroup compaction
+  // SIMD Subgroup ballot compaction check (early exit if entire subgroup is culled)
   let vote = subgroupBallot(isVisible);
+  let anyVisible = (vote.x | vote.y | vote.z | vote.w) != 0u;
+  if (!anyVisible || !isVisible) {
+    return;
+  }
 
-  if (isVisible && meshIndex < arrayLength(&indirectCommands)) {
+  if (meshIndex < arrayLength(&indirectCommands)) {
     let slot = atomicAdd(&indirectCommands[meshIndex].instanceCount, 1u);
     let globalSlot = meshIndex * 10000u + slot;
     if (globalSlot < arrayLength(&visibleIndices)) {

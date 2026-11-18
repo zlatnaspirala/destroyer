@@ -12,12 +12,13 @@ import { DeviceManager } from '../core/Device';
 import { FlatEntityManager } from '../core/FlatEntityManager';
 import { DRAW_INDEXED_INDIRECT_STRIDE_BYTES, EngineStats } from '../core/Types';
 import { Mat4 } from '../math/Mat4';
-import { CULLING_COMPUTE_WGSL } from '../shaders/CullingComputeWGSL';
+import { CULLING_STANDARD_WGSL, CULLING_SUBGROUPS_WGSL } from '../shaders/CullingComputeWGSL';
 import { RENDER_PIPELINE_WGSL, SHADOW_PIPELINE_WGSL } from '../shaders/RenderPipelineWGSL';
 
 export interface RendererOptions {
   enableSubgroups: boolean;
   enableCulling: boolean;
+  cullDistance?: number;
 }
 
 export class IndirectRenderer {
@@ -64,7 +65,9 @@ export class IndirectRenderer {
   public lightViewProjMatrix = new Float32Array(16);
 
   // Settings
-  public cullingEnabled = false;
+  public cullingEnabled = true;
+  public cullDistance = 150.0;
+  public subgroupsActive = false;
   public bloomEnabled = true;
   public ssrEnabled = false;
   public volumetricEnabled = false;
@@ -101,6 +104,7 @@ export class IndirectRenderer {
     this.device = this.deviceManager.getDevice();
     this.context = this.deviceManager.getContext();
     this.cullingEnabled = options.enableCulling;
+    this.cullDistance = options.cullDistance ?? 150.0;
 
     // Create textures & samplers
     this.createDefaultTexture();
@@ -111,11 +115,6 @@ export class IndirectRenderer {
     const renderModule = this.device.createShaderModule({
       label: 'RenderPipelineModule',
       code: RENDER_PIPELINE_WGSL,
-    });
-
-    const cullingModule = this.device.createShaderModule({
-      label: 'CullingComputeModule',
-      code: CULLING_COMPUTE_WGSL,
     });
 
     const shadowModule = this.device.createShaderModule({
@@ -189,15 +188,45 @@ export class IndirectRenderer {
       },
     });
 
-    // 3. Compute Culling Pipeline
-    this.cullingPipeline = this.device.createComputePipeline({
-      label: 'DestroyerCullingPipeline',
-      layout: 'auto',
-      compute: {
-        module: cullingModule,
-        entryPoint: 'main',
-      },
-    });
+    // 3. Compute Culling Pipeline (uses SIMD Subgroups shader when device supports 'subgroups')
+    const canUseSubgroups =
+      options.enableSubgroups && this.device.features.has('subgroups' as GPUFeatureName);
+    this.subgroupsActive = false;
+
+    if (canUseSubgroups) {
+      try {
+        const subgroupCullingModule = this.device.createShaderModule({
+          label: 'CullingSubgroupsComputeModule',
+          code: CULLING_SUBGROUPS_WGSL,
+        });
+        this.cullingPipeline = await this.device.createComputePipelineAsync({
+          label: 'DestroyerSubgroupsCullingPipeline',
+          layout: 'auto',
+          compute: {
+            module: subgroupCullingModule,
+            entryPoint: 'main',
+          },
+        });
+        this.subgroupsActive = true;
+      } catch (subErr) {
+        console.warn('Subgroup compute pipeline failed, falling back to standard culling:', subErr);
+      }
+    }
+
+    if (!this.subgroupsActive) {
+      const cullingModule = this.device.createShaderModule({
+        label: 'CullingComputeModule',
+        code: CULLING_STANDARD_WGSL,
+      });
+      this.cullingPipeline = this.device.createComputePipeline({
+        label: 'DestroyerCullingPipeline',
+        layout: 'auto',
+        compute: {
+          module: cullingModule,
+          entryPoint: 'main',
+        },
+      });
+    }
   }
 
   private createDefaultTexture(): void {
@@ -501,7 +530,7 @@ export class IndirectRenderer {
       const u32Cam = new Uint32Array(this.camUniformsData.buffer);
       u32Cam[92] = this.cullingEnabled ? 1 : 0;
       u32Cam[93] = this.entityManager.activeEntityCount;
-      u32Cam[94] = 0;
+      this.camUniformsData[94] = this.cullDistance;
       u32Cam[95] = 0;
 
       this.device.queue.writeBuffer(

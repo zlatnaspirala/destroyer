@@ -523,6 +523,65 @@ Frame Time: 0.12
 `;
 
   /**
+   * Built-in BVH Motion Capture Dataset for Quick Character Punch
+   */
+  static readonly BVH_PUNCH_DATA = `
+HIERARCHY
+ROOT Hips
+{
+  OFFSET 0.00 0.00 0.00
+  CHANNELS 6 Xposition Yposition Zposition Zrotation Xrotation Yrotation
+  JOINT LeftHip
+  {
+    OFFSET -0.11 -0.19 0.00
+    CHANNELS 3 Zrotation Xrotation Yrotation
+    End Site
+    {
+      OFFSET 0.00 -0.80 0.00
+    }
+  }
+  JOINT RightHip
+  {
+    OFFSET 0.11 -0.19 0.00
+    CHANNELS 3 Zrotation Xrotation Yrotation
+    End Site
+    {
+      OFFSET 0.00 -0.80 0.00
+    }
+  }
+  JOINT LeftShoulder
+  {
+    OFFSET -0.32 0.48 0.00
+    CHANNELS 3 Zrotation Xrotation Yrotation
+    End Site
+    {
+      OFFSET 0.00 -0.58 0.00
+    }
+  }
+  JOINT RightShoulder
+  {
+    OFFSET 0.32 0.48 0.00
+    CHANNELS 3 Zrotation Xrotation Yrotation
+    End Site
+    {
+      OFFSET 0.00 -0.58 0.00
+    }
+  }
+}
+MOTION
+Frames: 8
+Frame Time: 0.06
+0.0 0.0 0.0 0.0 0.0 0.0     0.0 0.0 0.0     0.0 0.0 0.0    0.0 0.0 0.0     0.0 0.0 0.0
+0.0 -0.03 0.0 0.0 6.0 -14.0 0.0 -10.0 0.0   0.0 12.0 0.0   0.0 -35.0 0.0   0.0 28.0 0.0
+0.0 -0.04 0.0 0.0 12.0 22.0 0.0 -18.0 0.0   0.0 18.0 0.0   0.0 -42.0 0.0   0.0 -88.0 -12.0
+0.0 -0.04 0.0 0.0 14.0 26.0 0.0 -20.0 0.0   0.0 20.0 0.0   0.0 -40.0 0.0   0.0 -94.0 -14.0
+0.0 -0.03 0.0 0.0 10.0 16.0 0.0 -14.0 0.0   0.0 14.0 0.0   0.0 -30.0 0.0   0.0 -65.0 -8.0
+0.0 -0.01 0.0 0.0 5.0 6.0   0.0 -6.0 0.0    0.0 6.0 0.0    0.0 -14.0 0.0   0.0 -28.0 -2.0
+0.0 0.0 0.0 0.0 2.0 2.0     0.0 -2.0 0.0    0.0 2.0 0.0    0.0 -4.0 0.0    0.0 -8.0 0.0
+0.0 0.0 0.0 0.0 0.0 0.0     0.0 0.0 0.0     0.0 0.0 0.0    0.0 0.0 0.0     0.0 0.0 0.0
+`;
+
+  /**
    * Helper to create the default jump AnimationClip directly from the BVH mocap data
    */
   static createJumpClip(): AnimationClip {
@@ -541,5 +600,12 @@ Frame Time: 0.12
    */
   static createIdleClip(): AnimationClip {
     return this.parse(this.BVH_IDLE_DATA, { name: 'BVH_Idle_Mocap' });
+  }
+
+  /**
+   * Helper to create the punch AnimationClip directly from the BVH mocap data
+   */
+  static createPunchClip(): AnimationClip {
+    return this.parse(this.BVH_PUNCH_DATA, { name: 'BVH_Punch_Mocap' });
   }
 }

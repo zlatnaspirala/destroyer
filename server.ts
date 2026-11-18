@@ -118,14 +118,17 @@ app.delete('/api/scenes/:fileName', (req, res) => {
 
 app.get('/api/assets', (req, res) => {
   const files = fs.readdirSync(UPLOADS_DIR);
-  const assets = files.map(file => {
-    const stat = fs.statSync(path.join(UPLOADS_DIR, file));
-    return {
-      name: file,
-      url: `/uploads/${file}`,
-      sizeBytes: stat.size
-    };
-  });
+  const assets = files
+    .map(file => {
+      const stat = fs.statSync(path.join(UPLOADS_DIR, file));
+      return {
+        name: file,
+        url: `/uploads/${file}`,
+        sizeBytes: stat.size,
+        mtimeMs: stat.mtimeMs
+      };
+    })
+    .sort((a, b) => b.mtimeMs - a.mtimeMs);
   res.json(assets);
 });
 

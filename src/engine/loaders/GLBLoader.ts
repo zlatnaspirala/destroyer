@@ -494,6 +494,13 @@ export class GLBLoader {
         }
       }
 
+      let alphaCutoff = 0.0;
+      if (m.alphaMode === 'MASK') {
+        alphaCutoff = m.alphaCutoff ?? 0.5;
+      } else if (m.alphaMode === 'BLEND') {
+        alphaCutoff = 0.15;
+      }
+
       return {
         material: {
           baseColor: [bcf[0] ?? 1, bcf[1] ?? 1, bcf[2] ?? 1, bcf[3] ?? 1],
@@ -501,7 +508,7 @@ export class GLBLoader {
           roughness: pbr.roughnessFactor !== undefined ? pbr.roughnessFactor : 0.55,
           metallic: pbr.metallicFactor !== undefined ? pbr.metallicFactor : 0.1,
           ao: 1.0,
-          alphaCutoff: m.alphaCutoff ?? 0.5,
+          alphaCutoff,
         },
         textureImageIndex,
       };
@@ -523,6 +530,9 @@ export class GLBLoader {
 
       for (let pIdx = 0; pIdx < mesh.primitives.length; pIdx++) {
         const prim = mesh.primitives[pIdx];
+        if (prim.extensions?.KHR_draco_mesh_compression) {
+          throw new Error('Draco-compressed GLB meshes are not supported; please re-export without Draco compression.');
+        }
         if (!prim.attributes || prim.attributes.POSITION === undefined) continue;
         if (prim.mode !== undefined && prim.mode !== 4) continue; // Only TRIANGLES (mode 4)
 

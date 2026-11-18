@@ -7,6 +7,7 @@ export default defineConfig({
     react(),
     tailwindcss(),
   ],
+  assetsInclude: ['**/*.glb', '**/*.gltf', '**/*.fbx', '**/*.bvh'],
   server: {
     port: 3000,
     host: '0.0.0.0',

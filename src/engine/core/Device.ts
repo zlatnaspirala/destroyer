@@ -117,12 +117,36 @@ export class DeviceManager {
     }
 
     this.adapter = adapter;
-    this.hasSubgroups = preferSubgroups && adapter.features.has('subgroups' as GPUFeatureName);
+    const adapterSupportsSubgroups =
+      preferSubgroups && adapter.features.has('subgroups' as GPUFeatureName);
 
-    // Acquire device - Safe standard device acquisition
+    const adapterInfo = (adapter as any).info;
+    if (adapterInfo) {
+      if (typeof adapterInfo.subgroupMinSize === 'number') {
+        this.subgroupMinSize = adapterInfo.subgroupMinSize;
+      }
+      if (typeof adapterInfo.subgroupMaxSize === 'number') {
+        this.subgroupMaxSize = adapterInfo.subgroupMaxSize;
+      }
+    }
+
+    const requestConfiguredDevice = async (targetAdapter: GPUAdapter, withSubgroups: boolean): Promise<GPUDevice> => {
+      if (withSubgroups) {
+        try {
+          return await targetAdapter.requestDevice({
+            requiredFeatures: ['subgroups' as GPUFeatureName],
+          });
+        } catch (subErr) {
+          console.warn('requestDevice with subgroups failed, falling back to standard device:', subErr);
+        }
+      }
+      return await targetAdapter.requestDevice();
+    };
+
+    // Acquire device with subgroups enabled when supported by the adapter
     let device: GPUDevice | null = null;
     try {
-      device = await adapter.requestDevice();
+      device = await requestConfiguredDevice(adapter, adapterSupportsSubgroups);
     } catch (err: any) {
       console.warn('Primary requestDevice failed, attempting recovery after pause:', err);
       await new Promise((resolve) => setTimeout(resolve, 300));
@@ -130,7 +154,9 @@ export class DeviceManager {
         const freshAdapter = await tryGetAdapter();
         if (freshAdapter) {
           this.adapter = freshAdapter;
-          device = await freshAdapter.requestDevice();
+          const freshSubgroups =
+            preferSubgroups && freshAdapter.features.has('subgroups' as GPUFeatureName);
+          device = await requestConfiguredDevice(freshAdapter, freshSubgroups);
         }
       } catch (recoveryErr: any) {
         console.error('Recovery requestDevice failed:', recoveryErr);
@@ -143,6 +169,7 @@ export class DeviceManager {
     }
 
     this.device = device;
+    this.hasSubgroups = preferSubgroups && device.features.has('subgroups' as GPUFeatureName);
     this.presentationFormat = navigator.gpu.getPreferredCanvasFormat();
 
     // Listen to device loss

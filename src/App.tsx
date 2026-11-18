@@ -28,7 +28,6 @@ export default function App() {
   const [showRightPanel, setShowRightPanel] = useState<boolean>(false);
   const [rightPanelTab, setRightPanelTab] = useState<'system' | 'inspector'>('system');
 
-  const [currentPreset, setCurrentPreset] = useState('anarchy');
   const [selectedEntityId, setSelectedEntityId] = useState<number | null>(null);
   const [isEngineReady, setIsEngineReady] = useState(false);
   const [initError, setInitError] = useState<string | null>(null);
@@ -47,6 +46,7 @@ export default function App() {
     'BVH_Idle_Mocap',
   ]);
   const [activePlayerSource, setActivePlayerSource] = useState('Procedural Humanoid');
+  const [isDraggingGLB, setIsDraggingGLB] = useState(false);
 
   // Stats state
   const [stats, setStats] = useState<EngineStats>({
@@ -65,6 +65,13 @@ export default function App() {
     totalTriangles: 0,
     indirectDrawCommands: 0,
     bufferMemoryBytes: 0,
+    smartCullingEnabled: true,
+    smartCullMode: 'EXTERIOR',
+    smartCullBuilding: -1,
+    smartCullFloor: -1,
+    smartCullMinFloor: 0,
+    smartCullMaxFloor: 10,
+    smartCulledCount: 0,
   });
 
   // Touch & Pointer state for orbit controls
@@ -177,7 +184,6 @@ export default function App() {
         }
 
         engineRef.current = engine;
-        await engine.loadScenePreset('anarchy');
         engine.start();
         triggerResize();
         setIsEngineReady(true);
@@ -264,19 +270,6 @@ export default function App() {
     return () => clearTimeout(timeout);
   }, [showLeftPanel, showRightPanel, triggerResize]);
 
-  // Handle Preset Selection
-  const handleSelectPreset = async (preset: string) => {
-    setCurrentPreset(preset);
-    if (engineRef.current && !engineRef.current.isDeviceLost) {
-      await engineRef.current.loadScenePreset(preset);
-      setSelectedEntityId(0);
-      setAvailableAnimations(engineRef.current.getAvailableAnimations());
-      setActiveAnimationName(engineRef.current.animController.getCurrentClipName());
-      setActivePlayerSource(engineRef.current.activePlayerSourceLabel);
-      setSceneVersion((v) => v + 1);
-    }
-  };
-
   // Persist GLB file to /api/assets/upload in chunks so it survives reloads
   const persistGLBAsset = async (buffer: ArrayBuffer, fileName: string) => {
     try {
@@ -297,7 +290,7 @@ export default function App() {
     }
   };
 
-  // Handle GLB Load (swaps player in anarchy mode, or loads custom scene model)
+  // Handle GLB Load (replaces player character in Anarchy game)
   const handleLoadGLB = async (buffer: ArrayBuffer, fileName: string) => {
     if (engineRef.current && !engineRef.current.isDeviceLost) {
       await engineRef.current.loadCustomGLB(buffer, fileName);
@@ -306,9 +299,7 @@ export default function App() {
       setActiveAnimationName(engineRef.current.animController.getCurrentClipName());
       setActivePlayerSource(engineRef.current.activePlayerSourceLabel);
       setSceneVersion((v) => v + 1);
-      if (currentPreset === 'anarchy') {
-        void persistGLBAsset(buffer, fileName);
-      }
+      void persistGLBAsset(buffer, fileName);
     }
   };
 
@@ -343,37 +334,21 @@ export default function App() {
       button: e.button,
     };
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
-    if (engineRef.current && currentPreset === 'anarchy') {
-      engineRef.current.playerController.handlePointerDown(e.clientX, e.clientY, e.button);
+    if (engineRef.current) {
+      engineRef.current.playerController.handlePointerDown(e.clientX, e.clientY, e.button, e.pointerType);
     }
   };
 
   const handlePointerMove = (e: React.PointerEvent) => {
     if (!pointerState.current.isDown || !engineRef.current || engineRef.current.isDeviceLost) return;
 
-    const dx = e.clientX - pointerState.current.lastX;
-    const dy = e.clientY - pointerState.current.lastY;
     pointerState.current.lastX = e.clientX;
     pointerState.current.lastY = e.clientY;
-
-    if (currentPreset === 'anarchy') {
-      engineRef.current.playerController.handlePointerMove(e.clientX, e.clientY);
-    } else {
-      const camera = engineRef.current.camera;
-      if (pointerState.current.button === 0) {
-        camera.orbit(-dx * 0.006, -dy * 0.006);
-      } else if (pointerState.current.button === 2 || pointerState.current.button === 1) {
-        const speed = camera.radius * 0.002;
-        camera.target[0] -= dx * speed;
-        camera.target[1] += dy * speed;
-        camera.updatePositionFromSpherical();
-        camera.updateMatrices();
-      }
-    }
+    engineRef.current.playerController.handlePointerMove(e.clientX, e.clientY);
   };
 
   const handlePointerUp = (e: React.PointerEvent) => {
-    if (pointerState.current.isDown && engineRef.current && currentPreset === 'anarchy' && canvasRef.current) {
+    if (pointerState.current.isDown && engineRef.current && canvasRef.current) {
       const distMoved = Math.hypot(e.clientX - pointerState.current.startX, e.clientY - pointerState.current.startY);
       if (distMoved < 8) {
         const rect = canvasRef.current.getBoundingClientRect();
@@ -383,7 +358,7 @@ export default function App() {
       }
     }
     pointerState.current.isDown = false;
-    if (engineRef.current && currentPreset === 'anarchy') {
+    if (engineRef.current) {
       engineRef.current.playerController.handlePointerUp();
     }
     try {
@@ -396,11 +371,7 @@ export default function App() {
   const handleWheel = (e: React.WheelEvent) => {
     if (!engineRef.current || engineRef.current.isDeviceLost) return;
     const delta = e.deltaY * 0.02;
-    if (currentPreset === 'anarchy') {
-      engineRef.current.playerController.handleZoom(delta);
-    } else {
-      engineRef.current.camera.zoom(delta * 2);
-    }
+    engineRef.current.playerController.handleZoom(delta);
   };
 
   const handleCameraModeChange = (mode: 'ORBIT' | 'FPS' | 'FLY') => {
@@ -412,13 +383,9 @@ export default function App() {
 
   const handleResetCamera = () => {
     if (engineRef.current) {
-      engineRef.current.camera.position = [0, 8, 22];
-      engineRef.current.camera.target = [0, 1, 0];
-      engineRef.current.camera.radius = 22;
-      engineRef.current.camera.theta = 0.5;
-      engineRef.current.camera.phi = 0.45;
-      engineRef.current.camera.updatePositionFromSpherical();
-      engineRef.current.camera.updateMatrices();
+      engineRef.current.playerController.cameraTheta = 0.0;
+      engineRef.current.playerController.cameraPhi = 1.25;
+      engineRef.current.playerController.cameraDistance = 7.5;
     }
   };
 
@@ -432,8 +399,6 @@ export default function App() {
         onToggleRightPanel={() => setShowRightPanel((prev) => !prev)}
         rightPanelTab={rightPanelTab}
         onSetRightPanelTab={setRightPanelTab}
-        currentPreset={currentPreset}
-        onSelectPreset={handleSelectPreset}
         onResetCamera={handleResetCamera}
         onSpawnCube={handleSpawnCube}
         fps={stats.fps}
@@ -472,7 +437,42 @@ export default function App() {
         )}
 
         {/* CENTER: 3D WebGPU Viewport Canvas (Always mounted and visible) */}
-        <main className="flex-1 min-w-0 min-h-0 h-full relative overflow-hidden bg-zinc-950">
+        <main
+          onDragOver={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (!isDraggingGLB) setIsDraggingGLB(true);
+          }}
+          onDragLeave={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            setIsDraggingGLB(false);
+          }}
+          onDrop={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            setIsDraggingGLB(false);
+            const file = e.dataTransfer?.files?.[0];
+            if (file && /\.glb$/i.test(file.name)) {
+              const reader = new FileReader();
+              reader.onload = (ev) => {
+                const buf = ev.target?.result;
+                if (buf instanceof ArrayBuffer) {
+                  void handleLoadGLB(buf, file.name);
+                }
+              };
+              reader.readAsArrayBuffer(file);
+            }
+          }}
+          className="flex-1 min-w-0 min-h-0 h-full relative overflow-hidden bg-zinc-950"
+        >
+          {isDraggingGLB && (
+            <div className="absolute inset-0 z-40 bg-emerald-950/60 border-2 border-dashed border-emerald-400 flex items-center justify-center pointer-events-none backdrop-blur-sm">
+              <div className="px-5 py-3 rounded-xl bg-zinc-950/90 border border-emerald-400/70 text-emerald-300 font-mono text-sm font-bold shadow-2xl">
+                Drop .GLB file to replace Player Character
+              </div>
+            </div>
+          )}
           <canvas
             ref={canvasRef}
             onPointerDown={handlePointerDown}
@@ -570,19 +570,17 @@ export default function App() {
                 }}
                 onJoystickMove={(x, y) => {
                   if (engineRef.current) {
-                    const jX = Math.abs(x);
-                    const jY = Math.abs(y);
-                    // Mobile fix: only move if vertical dominates (allows turn in place)
-                    if (jY > 0.15 && jY > jX * 0.8) {
-                      engineRef.current.playerController.joystickVec = [x, y];
-                    } else {
-                      engineRef.current.playerController.joystickVec = [x, 0];
-                    }
+                    engineRef.current.playerController.joystickVec = [x, y];
                   }
                 }}
                 onJumpRequested={() => {
                   if (engineRef.current) {
                     engineRef.current.playerController.jumpRequested = true;
+                  }
+                }}
+                onPunchRequested={() => {
+                  if (engineRef.current) {
+                    engineRef.current.playerController.punchRequested = true;
                   }
                 }}
                 onLoadBVH={(bvhText, name) => {
@@ -674,6 +672,7 @@ export default function App() {
               {rightPanelTab === 'system' ? (
                 <SystemPanel
                   renderer={engineRef.current?.renderer ?? null}
+                  engine={engineRef.current ?? null}
                   stats={stats}
                   onUpdate={() => setSceneVersion((v) => v + 1)}
                 />

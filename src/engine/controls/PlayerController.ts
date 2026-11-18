@@ -21,8 +21,8 @@ export class PlayerController {
   public gravity = -28.0;
   public jumpStrength = 11.5;
   public energy = 1.0; // 0 to 1.0
-  public energyRegenRate = 0.15; // 15% per second
-  public jumpEnergyCost = 0.2;  // 20% per jump
+  public energyRegenRate = 0.22; // 22% per second
+  public jumpEnergyCost = 0.12;  // 12% per jump
   public runEnergyCost = 0.1;   // 10% per second while running and moving
 
   public rotationY = 0;        // Player facing yaw angle in radians
@@ -31,6 +31,16 @@ export class PlayerController {
   public jumpTime = 0;         // Seconds elapsed since jump launch
   public readonly jumpTotalDuration = 0.82; // Total air duration
   public landingImpactTimer = 0; // Landing compression timer
+  public isPunching = false;   // Character punch action state
+  public punchTime = 0;        // Elapsed seconds in punch animation
+  public readonly punchDuration = 0.42;
+  public punchEnergyCost = 0.05;
+  public lastPunchHitCount = 0;
+  public lastPunchHitNames: string[] = [];
+  private punchCooldown = 0;
+  private punchImpactTriggered = false;
+  private coyoteTimer = 0;       // Grace period after stepping off a ledge/stair
+  private jumpBufferTimer = 0;   // Input buffer so taps right before landing still jump
   public walkSpeedForward = 8.5;
   public runSpeedForward = 16.0;
   public moveSpeedBackward = 4.0;
@@ -54,8 +64,10 @@ export class PlayerController {
   private keys: Record<string, boolean> = {};
   public joystickVec: [number, number] = [0, 0];
   public jumpRequested = false;
+  public punchRequested = false;
 
   private isPointerDragging = false;
+  private isTouchPointer = false;
   private lastPointerX = 0;
   private lastPointerY = 0;
 
@@ -78,6 +90,10 @@ export class PlayerController {
         if (e.code === 'Space') {
           e.preventDefault();
           this.jump();
+        }
+        if (e.code === 'KeyF' && !e.repeat) {
+          e.preventDefault();
+          this.punch();
         }
 
         // 3D Elevator Button interaction via E key or Digit keys
@@ -209,20 +225,45 @@ export class PlayerController {
     this.isRunning = running;
   }
 
+  public punch(): boolean {
+    if (this.isPunching || this.punchCooldown > 0 || this.energy < 0.03) {
+      return false;
+    }
+    this.isPunching = true;
+    this.punchTime = 0;
+    this.punchImpactTriggered = false;
+    this.punchCooldown = 0.44;
+    this.lastPunchHitCount = 0;
+    this.lastPunchHitNames = [];
+    this.energy = Math.max(0, this.energy - this.punchEnergyCost);
+    return true;
+  }
+
   public jump(): void {
-    if (this.isGrounded && this.energy >= this.jumpEnergyCost) {
+    this.jumpBufferTimer = 0.18;
+    this.tryExecuteJump();
+  }
+
+  private tryExecuteJump(): boolean {
+    const canCoyoteJump = this.coyoteTimer > 0 && !this.isJumping;
+    if ((this.isGrounded || canCoyoteJump) && this.energy >= 0.05) {
       this.velocityY = this.jumpStrength;
       this.isGrounded = false;
       this.isJumping = true;
       this.jumpTime = 0;
       this.landingImpactTimer = 0;
-      this.energy -= this.jumpEnergyCost;
+      this.coyoteTimer = 0;
+      this.jumpBufferTimer = 0;
+      this.energy = Math.max(0, this.energy - this.jumpEnergyCost);
+      return true;
     }
+    return false;
   }
 
-  public handlePointerDown(x: number, y: number, button: number): void {
+  public handlePointerDown(x: number, y: number, button: number, pointerType = 'mouse'): void {
     if (button === 0 || button === 2) {
       this.isPointerDragging = true;
+      this.isTouchPointer = pointerType === 'touch';
       this.lastPointerX = x;
       this.lastPointerY = y;
     }
@@ -235,9 +276,12 @@ export class PlayerController {
     this.lastPointerX = x;
     this.lastPointerY = y;
 
-    // Manual camera orbit via mouse drag
-    this.cameraTheta += dx * 0.005;
-    this.cameraPhi += dy * 0.004;
+    // Gentle touch sensitivity on mobile vs crisp mouse drag on desktop
+    const yawSens = this.isTouchPointer ? 0.0020 : 0.005;
+    const pitchSens = this.isTouchPointer ? 0.0016 : 0.004;
+
+    this.cameraTheta += dx * yawSens;
+    this.cameraPhi += dy * pitchSens;
 
     // Clamp vertical camera pitch (phi: 0.02 to 1.52 rad) - allows looking straight up at sky
     this.cameraPhi = Math.max(0.02, Math.min(1.52, this.cameraPhi));
@@ -245,6 +289,7 @@ export class PlayerController {
 
   public handlePointerUp(): void {
     this.isPointerDragging = false;
+    this.isTouchPointer = false;
   }
 
   public handleZoom(delta: number): void {
@@ -258,55 +303,123 @@ export class PlayerController {
     this.energy = Math.min(1.0, this.energy + this.energyRegenRate * deltaSec);
     const canRun = this.isRunning && this.energy > 0.05;
 
-    // 1. Handle A / D Rotation with smooth angular dampening (A = Turn Left, D = Turn Right)
-    let targetTurn = 0;
-    if (this.keys['KeyA'] || this.keys['ArrowLeft']) targetTurn += 1;
-    if (this.keys['KeyD'] || this.keys['ArrowRight']) targetTurn -= 1;
+    // 1. Handle A / D Rotation and Proportional Mobile Joystick Turning
+    const joyRawX = this.joystickVec[0];
+    const joyRawY = this.joystickVec[1];
+    const joyAbsX = Math.abs(joyRawX);
+    const joyAbsY = Math.abs(joyRawY);
 
-    if (Math.abs(this.joystickVec[0]) > 0.15) {
-      targetTurn -= Math.sign(this.joystickVec[0]);
+    let keyTurn = 0;
+    if (this.keys['KeyA'] || this.keys['ArrowLeft']) keyTurn += 1;
+    if (this.keys['KeyD'] || this.keys['ArrowRight']) keyTurn -= 1;
+
+    let joyTurn = 0;
+    const isJoyWalking = joyAbsY > 0.25 && joyAbsY > joyAbsX * 0.85;
+    // Wide straight-walk deadzone (0.42) prevents thumb jitter from curving straight forward movement
+    const joyTurnDeadzone = isJoyWalking ? 0.42 : 0.22;
+    if (joyAbsX > joyTurnDeadzone) {
+      const normalizedX = (joyAbsX - joyTurnDeadzone) / (1.0 - joyTurnDeadzone);
+      // Slow, gentle quadratic analog curve for precise mobile aiming
+      const maxJoyTurnScale = isJoyWalking ? 0.28 : 0.40;
+      joyTurn = -Math.sign(joyRawX) * Math.pow(normalizedX, 1.8) * maxJoyTurnScale;
     }
 
-    // Smoothly lerp turn speed for fluid rotation
-    this.currentTurnSpeed += (targetTurn * this.turnSpeed - this.currentTurnSpeed) * Math.min(1.0, deltaSec * 14.0);
+    const targetTurn = keyTurn + joyTurn;
+
+    if (Math.abs(targetTurn) < 1e-4) {
+      // Zero immediately on release/straight-walk so cached angular inertia never twists forward walk
+      this.currentTurnSpeed = 0;
+    } else {
+      this.currentTurnSpeed += (targetTurn * this.turnSpeed - this.currentTurnSpeed) * Math.min(1.0, deltaSec * 14.0);
+    }
     this.cameraTheta += this.currentTurnSpeed * deltaSec;
 
     // Keep Player Facing Angle synchronized to Camera Yaw
     this.rotationY = this.cameraTheta + Math.PI;
 
-    // 2. Check Jump trigger
-    if (this.jumpRequested) {
-      this.jump();
-      this.jumpRequested = false;
+    // 2. Check Jump trigger, coyote time, and buffered jump input
+    if (this.isGrounded) {
+      this.coyoteTimer = 0.16;
+    } else {
+      this.coyoteTimer = Math.max(0, this.coyoteTimer - deltaSec);
     }
 
-    // 3. Handle W Forward & S Backpedal Movement with smooth acceleration/friction
-    let isForward = false;
-    let isBackward = false;
+    if (this.jumpRequested) {
+      this.jumpBufferTimer = 0.18;
+      this.jumpRequested = false;
+    } else {
+      this.jumpBufferTimer = Math.max(0, this.jumpBufferTimer - deltaSec);
+    }
 
-    if (this.keys['KeyW'] || this.keys['ArrowUp']) isForward = true;
-    if (this.keys['KeyS'] || this.keys['ArrowDown']) isBackward = true;
+    if (this.jumpBufferTimer > 0) {
+      this.tryExecuteJump();
+    }
 
-    // Joystick: Only walk if horizontal input is not dominant (allows turning in place)
-    const joyX = Math.abs(this.joystickVec[0]);
-    const joyY = Math.abs(this.joystickVec[1]);
-    if (joyY > 0.15 && joyY > joyX * 0.8) {
-      if (this.joystickVec[1] < -0.15) isForward = true;
-      if (this.joystickVec[1] > 0.15) isBackward = true;
+    // 2b. Punch cooldown, buffered request & timed impact impulse
+    this.punchCooldown = Math.max(0, this.punchCooldown - deltaSec);
+    if (this.punchRequested) {
+      this.punch();
+      this.punchRequested = false;
+    }
+    if (this.isPunching) {
+      this.punchTime += deltaSec;
+      if (this.punchTime >= 0.12 && !this.punchImpactTriggered) {
+        this.punchImpactTriggered = true;
+        if (this.engine.physics) {
+          const punchFwdX = -Math.sin(this.cameraTheta);
+          const punchFwdZ = -Math.cos(this.cameraTheta);
+          const hitRes = this.engine.physics.punchNearestObjects(
+            this.position,
+            [punchFwdX, 0, punchFwdZ],
+            2.75,
+            13.0
+          );
+          this.lastPunchHitCount = hitRes.hitCount;
+          this.lastPunchHitNames = hitRes.hitNames;
+        }
+      }
+      if (this.punchTime >= this.punchDuration) {
+        this.isPunching = false;
+        this.punchTime = 0;
+      }
+    }
+
+    // 3. Handle W Forward & S Backpedal Movement with analog mobile throttle
+    let keyForward = false;
+    let keyBackward = false;
+
+    if (this.keys['KeyW'] || this.keys['ArrowUp']) keyForward = true;
+    if (this.keys['KeyS'] || this.keys['ArrowDown']) keyBackward = true;
+
+    let joyThrottle = 0;
+    if (joyAbsY > 0.22 && joyAbsY > joyAbsX * 0.85) {
+      const normY = (joyAbsY - 0.22) / 0.78;
+      // Smooth analog speed on mobile (slower max pace than desktop keyboard for indoor control)
+      joyThrottle = Math.pow(normY, 1.25) * 0.58;
     }
 
     let targetSpeed = 0;
-    if (isForward) {
+    if (keyForward) {
       targetSpeed = canRun ? this.runSpeedForward : this.walkSpeedForward;
       if (canRun) {
         this.energy = Math.max(0, this.energy - this.runEnergyCost * deltaSec);
       }
-    } else if (isBackward) {
+    } else if (keyBackward) {
       targetSpeed = -this.moveSpeedBackward;
+    } else if (joyThrottle > 0) {
+      if (joyRawY < 0) {
+        const baseForward = canRun ? this.runSpeedForward : this.walkSpeedForward;
+        targetSpeed = baseForward * joyThrottle;
+        if (canRun) {
+          this.energy = Math.max(0, this.energy - this.runEnergyCost * deltaSec);
+        }
+      } else {
+        targetSpeed = -this.moveSpeedBackward * joyThrottle;
+      }
     }
 
-    // Smooth velocity dampening (silky acceleration and friction deceleration)
-    const friction = targetSpeed === 0 ? (Math.abs(targetTurn) > 0.1 ? 35.0 : 12.0) : 12.0;
+    // Smooth velocity dampening (quick crisp stop when changing direction)
+    const friction = targetSpeed === 0 ? 22.0 : 12.0;
     this.currentSpeed += (targetSpeed - this.currentSpeed) * Math.min(1.0, deltaSec * friction);
     this.isMoving = Math.abs(this.currentSpeed) > 0.1 || Math.abs(this.currentTurnSpeed) > 0.1;
 
@@ -335,10 +448,19 @@ export class PlayerController {
       );
 
       this.position = physRes.newPos;
-      this.isGrounded = physRes.isGrounded;
+      // Preserve airborne state while launching upward so high-FPS frames don't re-ground immediately
+      if (this.velocityY > 0.5) {
+        this.isGrounded = false;
+      } else {
+        this.isGrounded = physRes.isGrounded;
+      }
 
-      if (physRes.isGrounded) {
-        if (this.velocityY < 0) {
+      if (physRes.hitCeiling && this.velocityY > 0) {
+        this.velocityY = 0;
+      }
+
+      if (this.isGrounded) {
+        if (this.velocityY <= 0) {
           this.velocityY = 0;
           if (this.isJumping) {
             this.isJumping = false;
@@ -388,11 +510,11 @@ export class PlayerController {
       );
     }
 
-    // 5. Check if Player has entered the building structure (Indoor detection)
-    const inBuildingX = Math.abs(this.position[0]) < 19.5;
-    const inBuildingZ = Math.abs(this.position[2]) < 19.5;
-    const inBuildingY = this.position[1] >= 0 && this.position[1] < 42.0;
-    const isIndoors = inBuildingX && inBuildingZ && inBuildingY;
+    // 5. Check if Player has entered either building structure (Indoor detection)
+    const inMainBuilding = Math.abs(this.position[0]) < 19.6 && Math.abs(this.position[2]) < 19.6;
+    const inSecondBuilding = Math.abs(this.position[0] - 60.0) < 19.6 && Math.abs(this.position[2]) < 19.6;
+    const inBuildingY = this.position[1] >= 0 && this.position[1] < 40.0;
+    const isIndoors = (inMainBuilding || inSecondBuilding) && inBuildingY;
 
     // Target camera distance: 2.8m close-up inside building vs 7.5m outside
     const targetDistance = isIndoors ? 2.8 : 7.5;

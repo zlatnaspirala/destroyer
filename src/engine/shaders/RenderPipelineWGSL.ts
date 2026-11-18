@@ -19,7 +19,7 @@ struct CameraUniforms {
   frustumPlanes: array<vec4<f32>, 6>,
   cullingEnabled: u32,
   totalEntities: u32,
-  pad0: u32,
+  cullDistance: f32,
   pad1: u32,
 };
 
@@ -269,6 +269,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
   let hasTex = (mat.flags & 2u) != 0u;
   let sampleUV = select(in.uv, vec2<f32>(mat.pad1, mat.pad2) + wrappedUV * mat.pad3, hasTex);
   let rawTexColor = textureSample(t_diffuse, s_diffuse, sampleUV);
+  if (hasTex && mat.alphaCutoff > 0.01 && rawTexColor.a < mat.alphaCutoff) {
+    discard;
+  }
   let texColor = select(vec4<f32>(1.0), rawTexColor, hasTex);
 
   var albedo = mat.baseColor.rgb * texColor.rgb;
@@ -431,7 +434,7 @@ struct CameraUniforms {
   frustumPlanes: array<vec4<f32>, 6>,
   cullingEnabled: u32,
   totalEntities: u32,
-  pad0: u32,
+  cullDistance: f32,
   pad1: u32,
 };
 

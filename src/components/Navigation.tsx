@@ -20,8 +20,6 @@ interface NavigationProps {
   onToggleRightPanel: () => void;
   rightPanelTab: 'system' | 'inspector';
   onSetRightPanelTab: (tab: 'system' | 'inspector') => void;
-  currentPreset: string;
-  onSelectPreset: (preset: string) => void;
   onResetCamera: () => void;
   onSpawnCube: () => void;
   fps: number;
@@ -35,25 +33,15 @@ export const Navigation: React.FC<NavigationProps> = ({
   onToggleRightPanel,
   rightPanelTab,
   onSetRightPanelTab,
-  currentPreset,
-  onSelectPreset,
   onResetCamera,
   onSpawnCube,
   fps,
   subgroupsActive = false,
 }) => {
-  const presets = [
-    { id: 'anarchy', label: 'Anarchy (GTA City Grid)' },
-    { id: 'massive_indirect', label: '10,000 Mechs (Indirect)' },
-    { id: 'skinned_mech', label: 'Skinned Mechs (Rig)' },
-    { id: 'morph_core', label: 'Quantum Core (Morph)' },
-    { id: 'wave_terrain', label: 'Harmonic Waves' },
-  ];
-
   return (
     <header className="h-11 sm:h-12 border-b border-zinc-800/80 bg-zinc-950/95 backdrop-blur-md px-2 sm:px-4 flex items-center justify-between shrink-0 select-none z-30 font-sans">
-      {/* Zone 1: Logo & Preset Selector */}
-      <div className="flex items-center gap-2 sm:gap-4 min-w-0">
+      {/* Zone 1: Logo & Game Title */}
+      <div className="flex items-center gap-2 sm:gap-3 min-w-0">
         <div className="flex items-center gap-1.5 shrink-0">
           <div className="w-6 h-6 rounded bg-gradient-to-br from-cyan-500 to-indigo-600 flex items-center justify-center font-bold text-white text-xs shadow-md shadow-cyan-500/20">
             D
@@ -63,21 +51,9 @@ export const Navigation: React.FC<NavigationProps> = ({
           </span>
         </div>
 
-        {/* Demo Preset Dropdown */}
-        <div className="relative flex items-center">
-          <select
-            value={currentPreset}
-            onChange={(e) => onSelectPreset(e.target.value)}
-            className="bg-zinc-900 border border-zinc-700/80 text-zinc-200 text-xs rounded px-2 py-1 focus:outline-none focus:border-cyan-500 font-medium cursor-pointer max-w-[140px] sm:max-w-[190px] truncate"
-            title="Switch Demo Preset"
-          >
-            {presets.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.label}
-              </option>
-            ))}
-          </select>
-        </div>
+        <span className="px-2 py-0.5 rounded bg-zinc-900 border border-zinc-700/80 text-cyan-300 text-[11px] font-mono font-bold tracking-wider uppercase truncate">
+          ANARCHY
+        </span>
       </div>
 
       {/* Zone 2: Main View Panel Toggles */}
@@ -144,10 +120,10 @@ export const Navigation: React.FC<NavigationProps> = ({
         <button
           onClick={onSpawnCube}
           className="hidden md:flex items-center gap-1 px-2 py-1 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded text-xs text-zinc-300 hover:text-white transition-colors"
-          title="Spawn Procedural Cube"
+          title="Spawn Moveable Crate in Front of Player"
         >
           <Plus className="w-3 h-3 text-cyan-400" />
-          <span>Add Cube</span>
+          <span>Add Crate</span>
         </button>
 
         <button

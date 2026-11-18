@@ -7,6 +7,7 @@
  */
 
 import { VertexAnimationController } from './animation/VertexAnimation';
+import { MixamoAnimations } from './animation/MixamoAnimations';
 import { Camera } from './camera/Camera';
 import { PlayerController } from './controls/PlayerController';
 import { DeviceManager } from './core/Device';
@@ -54,7 +55,6 @@ export class DestroyerEngine {
   public isDeviceLost = false;
   public onDeviceLost?: (info: GPUDeviceLostInfo) => void;
 
-  public currentPreset = 'massive_indirect';
   public stats: EngineStats = {
     fps: 60,
     frameTimeMs: 16.6,
@@ -71,17 +71,34 @@ export class DestroyerEngine {
     totalTriangles: 0,
     indirectDrawCommands: 0,
     bufferMemoryBytes: 0,
+    smartCullingEnabled: true,
+    smartCullMode: 'EXTERIOR',
+    smartCullBuilding: -1,
+    smartCullFloor: -1,
+    smartCullMinFloor: 0,
+    smartCullMaxFloor: 10,
+    smartCulledCount: 0,
   };
 
   private currentCanvas: HTMLCanvasElement | null = null;
   private currentSubgroupsPreference = true;
   private currentCullingPreference = true;
 
+  public smartCullingEnabled = true;
+  private buildingFloorEntities: { buildingIndex: 0 | 1; floor: number; entityIds: number[] }[] = [];
+  private buildingBannerEntityIds: [number, number] = [-1, -1];
+  private groundSlabEntityId = -1;
+  private playerEntityIds: number[] = [];
+
   private customPlayerGLB: { buffer: ArrayBuffer; name: string } | null = null;
   private isCustomPlayerRig = false;
   private playerWalkClipName = 'Human_Walk_Cycle';
   private playerIdleClipName: string | null = 'BVH_Idle_Mocap';
   private playerJumpClipName: string | null = 'BVH_Jump_Mocap';
+  private playerPunchClipName: string | null = 'BVH_Punch_Mocap';
+  private anarchyCrateMeshId = -1;
+  private anarchyCrateMatId = -1;
+  private tempPropMat = Mat4.create();
   private userLockedClip = false;
   public activePlayerSourceLabel = 'Procedural Humanoid';
 
@@ -146,12 +163,12 @@ export class DestroyerEngine {
 
       // Update initial stats
       this.stats.subgroupsSupported = res.hasSubgroups;
-      this.stats.subgroupsActive = res.hasSubgroups && this.currentSubgroupsPreference;
+      this.stats.subgroupsActive = this.renderer.subgroupsActive;
       this.stats.subgroupMinSize = res.subgroupMinSize;
       this.stats.subgroupMaxSize = res.subgroupMaxSize;
 
-      // Load initial scene
-      await this.loadScenePreset(this.currentPreset);
+      // Load Anarchy game world
+      await this.loadAnarchyWorld();
 
       return { success: true };
     } catch (err: any) {
@@ -253,24 +270,24 @@ export class DestroyerEngine {
         this.lastFpsUpdate = currentTime;
       }
 
-      // Update dynamic physics objects (automatic sliding door & elevator platform)
-      if (this.currentPreset === 'anarchy' && this.physics) {
+      // Update dynamic physics objects (automatic sliding door, elevator, moveable props)
+      if (this.physics) {
         const { elevatorDeltaY } = this.physics.updateDynamicPhysics(deltaSec, this.playerController.position);
 
         // Update Left Sliding Door Matrix
         if (this.doorLeftEntityId >= 0) {
           const leftDoorMat = Mat4.create();
           const doorX = -2.0 - this.physics.doorOpenFactor * 3.5;
-          Mat4.fromTranslation([doorX, 2.0, 20.0], leftDoorMat);
-          this.entityManager.updateEntityMatrix(this.doorLeftEntityId, leftDoorMat, [doorX, 2.0, 20.0], 4.0);
+          Mat4.fromTranslation([doorX, 1.2, 20.0], leftDoorMat);
+          this.entityManager.updateEntityMatrix(this.doorLeftEntityId, leftDoorMat, [doorX, 1.2, 20.0], 4.0);
         }
 
         // Update Right Sliding Door Matrix
         if (this.doorRightEntityId >= 0) {
           const rightDoorMat = Mat4.create();
           const doorX = 2.0 + this.physics.doorOpenFactor * 3.5;
-          Mat4.fromTranslation([doorX, 2.0, 20.0], rightDoorMat);
-          this.entityManager.updateEntityMatrix(this.doorRightEntityId, rightDoorMat, [doorX, 2.0, 20.0], 4.0);
+          Mat4.fromTranslation([doorX, 1.2, 20.0], rightDoorMat);
+          this.entityManager.updateEntityMatrix(this.doorRightEntityId, rightDoorMat, [doorX, 1.2, 20.0], 4.0);
         }
 
         // Update Moving Elevator Platform Matrix
@@ -302,6 +319,23 @@ export class DestroyerEngine {
         if (playerOnElevator && elevatorDeltaY !== 0) {
           this.playerController.position[1] += elevatorDeltaY;
         }
+
+        // Update moveable crates & barrels physics and sync entity matrices
+        this.physics.updateMoveableObjects(deltaSec);
+        for (let i = 0; i < this.physics.moveableObjects.length; i++) {
+          const obj = this.physics.moveableObjects[i];
+          if (obj.entityId < 0) continue;
+          const cx = Math.cos(obj.tiltX * 0.5), sx = Math.sin(obj.tiltX * 0.5);
+          const cy = Math.cos(obj.rotationY * 0.5), sy = Math.sin(obj.rotationY * 0.5);
+          const cz = Math.cos(obj.tiltZ * 0.5), sz = Math.sin(obj.tiltZ * 0.5);
+          const qw = cy * cx * cz + sy * sx * sz;
+          const qx = cy * sx * cz + sy * cx * sz;
+          const qy = sy * cx * cz - cy * sx * sz;
+          const qz = cy * cx * sz - sy * sx * cz;
+          Mat4.fromTranslationRotationScale(obj.position, [qx, qy, qz, qw], [1, 1, 1], this.tempPropMat);
+          const rad = Math.max(1.2, Math.hypot(obj.halfExtents[0], obj.halfExtents[1], obj.halfExtents[2]) + 0.3);
+          this.entityManager.updateEntityMatrix(obj.entityId, this.tempPropMat, obj.position, rad);
+        }
       }
 
       // Camera update
@@ -311,53 +345,56 @@ export class DestroyerEngine {
       this.playerController.update(deltaSec);
 
       // Vertex animation update (supports both procedural 5-bone rig and custom GLB Mixamo rigs)
-      if (this.currentPreset === 'anarchy') {
-        if (this.userLockedClip) {
-          this.animController.update(deltaSec);
-        } else if (!this.isCustomPlayerRig) {
-          if (!this.playerController.isGrounded) {
-            const jumpTime = Math.min(0.82, this.playerController.jumpTime);
-            this.animController.evaluateClipAtTime('BVH_Jump_Mocap', jumpTime);
-          } else if (this.playerController.landingImpactTimer > 0) {
-            this.animController.evaluateClipAtTime('BVH_Jump_Mocap', 0.80);
-          } else if (this.playerController.isMoving) {
-            const currentClip = this.animController.getCurrentClipName();
-            if (currentClip !== 'Human_Walk_Cycle') {
-              this.animController.playClipByName('Human_Walk_Cycle', true);
-            }
-            const speedFactor = this.playerController.isRunning ? 1.6 : 1.0;
-            this.animController.update(deltaSec * speedFactor);
-          } else {
-            const currentClip = this.animController.getCurrentClipName();
-            if (currentClip !== 'BVH_Idle_Mocap') {
-              this.animController.playClipByName('BVH_Idle_Mocap', true);
-            }
-            this.animController.update(deltaSec);
+      if (this.userLockedClip) {
+        this.animController.update(deltaSec);
+      } else if (!this.isCustomPlayerRig) {
+        if (this.playerController.isPunching) {
+          this.animController.evaluateClipAtTime('BVH_Punch_Mocap', this.playerController.punchTime);
+        } else if (!this.playerController.isGrounded) {
+          const jumpTime = Math.min(0.82, this.playerController.jumpTime);
+          this.animController.evaluateClipAtTime('BVH_Jump_Mocap', jumpTime);
+        } else if (this.playerController.landingImpactTimer > 0) {
+          this.animController.evaluateClipAtTime('BVH_Jump_Mocap', 0.80);
+        } else if (this.playerController.isMoving) {
+          const currentClip = this.animController.getCurrentClipName();
+          if (currentClip !== 'Human_Walk_Cycle') {
+            this.animController.playClipByName('Human_Walk_Cycle', true);
           }
+          const speedFactor = this.playerController.isRunning ? 1.6 : 1.0;
+          this.animController.update(deltaSec * speedFactor);
         } else {
-          // Custom rigged GLB (e.g. Mixamo Remy / standard-walk.glb)
-          if (!this.playerController.isGrounded && this.playerJumpClipName) {
-            this.animController.evaluateClipAtTime(this.playerJumpClipName, this.playerController.jumpTime);
-          } else if (this.playerController.isMoving && this.playerWalkClipName) {
-            const currentClip = this.animController.getCurrentClipName();
-            if (currentClip !== this.playerWalkClipName) {
-              this.animController.playClipByName(this.playerWalkClipName, true);
-            }
-            const speedFactor = this.playerController.isRunning ? 1.5 : 1.0;
-            this.animController.update(deltaSec * speedFactor);
-          } else if (this.playerIdleClipName) {
-            const currentClip = this.animController.getCurrentClipName();
-            if (currentClip !== this.playerIdleClipName) {
-              this.animController.playClipByName(this.playerIdleClipName, true);
-            }
-            this.animController.update(deltaSec);
-          } else if (this.playerWalkClipName) {
-            this.animController.evaluateClipAtTime(this.playerWalkClipName, 0);
+          const currentClip = this.animController.getCurrentClipName();
+          if (currentClip !== 'BVH_Idle_Mocap') {
+            this.animController.playClipByName('BVH_Idle_Mocap', true);
           }
+          this.animController.update(deltaSec);
         }
       } else {
-        this.animController.update(deltaSec);
+        // Custom rigged GLB (e.g. Mixamo Remy / standard-walk.glb)
+        if (this.playerController.isPunching && this.playerPunchClipName) {
+          this.animController.evaluateClipAtTime(this.playerPunchClipName, this.playerController.punchTime);
+        } else if (!this.playerController.isGrounded && this.playerJumpClipName) {
+          this.animController.evaluateClipAtTime(this.playerJumpClipName, this.playerController.jumpTime);
+        } else if (this.playerController.isMoving && this.playerWalkClipName) {
+          const currentClip = this.animController.getCurrentClipName();
+          if (currentClip !== this.playerWalkClipName) {
+            this.animController.playClipByName(this.playerWalkClipName, true);
+          }
+          const speedFactor = this.playerController.isRunning ? 1.5 : 1.0;
+          this.animController.update(deltaSec * speedFactor);
+        } else if (this.playerIdleClipName) {
+          const currentClip = this.animController.getCurrentClipName();
+          if (currentClip !== this.playerIdleClipName) {
+            this.animController.playClipByName(this.playerIdleClipName, true);
+          }
+          this.animController.update(deltaSec);
+        } else if (this.playerWalkClipName) {
+          this.animController.evaluateClipAtTime(this.playerWalkClipName, 0);
+        }
       }
+
+      // Update Smart Floor/Interior Culling before uploading entity flags to GPU
+      this.updateSmartCulling();
 
       // Upload dynamic entities & joint matrices to GPU
       if (!this.deviceManager.isDeviceLost) {
@@ -373,10 +410,9 @@ export class DestroyerEngine {
       this.stats.fps = this.currentFps;
       this.stats.frameTimeMs = Number(this.currentFrameTime.toFixed(1));
       this.stats.totalInstances = this.entityManager.activeEntityCount;
-      this.stats.visibleInstances = this.renderer.cullingEnabled
-        ? Math.round(this.entityManager.activeEntityCount * 0.85)
-        : this.entityManager.activeEntityCount;
-      this.stats.culledInstances = this.stats.totalInstances - this.stats.visibleInstances;
+      const activeVisibleCount = this.entityManager.getVisibleFlagEntityCount();
+      this.stats.visibleInstances = activeVisibleCount;
+      this.stats.culledInstances = Math.max(0, this.stats.totalInstances - activeVisibleCount);
       this.stats.totalVertices = this.entityManager.getTotalVertices();
       this.stats.totalTriangles = this.entityManager.getTotalTriangles();
       this.stats.indirectDrawCommands = this.entityManager.meshCount;
@@ -433,16 +469,28 @@ export class DestroyerEngine {
   }
 
   private async buildTextureAtlasFromGLB(
-    textures: GLBTextureImage[]
+    textures: GLBTextureImage[],
+    primitives?: ParsedGLBPrimitive[]
   ): Promise<Map<number, [number, number, number]>> {
     const rectMap = new Map<number, [number, number, number]>();
-    if (textures.length === 0 || typeof document === 'undefined') {
+    let targetTextures = textures;
+    if (primitives && primitives.length > 0) {
+      const usedSet = new Set<number>();
+      for (const p of primitives) {
+        if (p.textureImageIndex !== undefined && p.textureImageIndex !== null) {
+          usedSet.add(p.textureImageIndex);
+        }
+      }
+      targetTextures = textures.filter((t) => usedSet.has(t.index));
+    }
+
+    if (targetTextures.length === 0 || typeof document === 'undefined') {
       this.renderer.clearDiffuseAtlas();
       return rectMap;
     }
 
     const decoded: { index: number; bitmap: ImageBitmap }[] = [];
-    for (const tex of textures) {
+    for (const tex of targetTextures) {
       try {
         const copy = new Uint8Array(tex.bytes);
         const blob = new Blob([copy], { type: tex.mimeType || 'image/png' });
@@ -459,7 +507,7 @@ export class DestroyerEngine {
     }
 
     const cols = Math.ceil(Math.sqrt(decoded.length));
-    const tileSize = cols <= 2 ? 512 : 256;
+    const tileSize = cols <= 4 ? 512 : 256;
     const atlasSize = cols * tileSize;
 
     const canvas = document.createElement('canvas');
@@ -508,7 +556,7 @@ export class DestroyerEngine {
     let glbBuffer: ArrayBuffer | null = this.customPlayerGLB?.buffer ?? null;
     let glbName = this.customPlayerGLB?.name ?? '';
 
-    // 2. Check server-persisted GLB uploads (/api/assets)
+    // 2. Check server-persisted GLB uploads (/api/assets, sorted newest-first)
     if (!glbBuffer) {
       try {
         const res = await fetch('/api/assets', { cache: 'no-store' });
@@ -516,9 +564,7 @@ export class DestroyerEngine {
           const assets: { name: string; url: string }[] = await res.json();
           const glbAssets = assets.filter((a) => /\.glb$/i.test(a.name));
           if (glbAssets.length > 0) {
-            const preferred =
-              glbAssets.find((a) => /player|remy|walk|character/i.test(a.name)) ||
-              glbAssets[glbAssets.length - 1];
+            const preferred = glbAssets[0];
             glbBuffer = await this.tryFetchGLB(preferred.url);
             if (glbBuffer) glbName = preferred.name;
           }
@@ -528,20 +574,30 @@ export class DestroyerEngine {
       }
     }
 
-    // 3. Check standard workspace paths for user-converted GLB
+    // 3. Check Vite-discovered workspace assets & standard workspace paths
     if (!glbBuffer) {
+      const globUrls = Object.values(
+        import.meta.glob('/src/assets/**/*.glb', { query: '?url', eager: true, import: 'default' })
+      ) as string[];
+
       const candidatePaths = [
-        '/src/assets/animations/character-remy/standard-walk.glb',
+        ...globUrls,
         '/src/assets/animations/character-remy/remy.glb',
+        '/src/assets/animations/character-remy/Remy.glb',
+        '/src/assets/animations/character-remy/standard-walk.glb',
+        '/assets/animations/character-remy/remy.glb',
         '/assets/animations/character-remy/standard-walk.glb',
+        '/assets/remy.glb',
         '/assets/standard-walk.glb',
+        '/remy.glb',
         '/standard-walk.glb',
       ];
       for (const candidate of candidatePaths) {
+        if (!candidate) continue;
         const buf = await this.tryFetchGLB(candidate);
         if (buf) {
           glbBuffer = buf;
-          glbName = candidate.split('/').pop() || 'player.glb';
+          glbName = candidate.split('/').pop()?.split('?')[0] || 'player.glb';
           break;
         }
       }
@@ -551,11 +607,30 @@ export class DestroyerEngine {
       try {
         const parsed = GLBLoader.parse(glbBuffer, { normalizeToHeight: 1.75 });
         if (parsed.primitives.length > 0) {
-          const atlasRects = await this.buildTextureAtlasFromGLB(parsed.textures);
+          const atlasRects = await this.buildTextureAtlasFromGLB(parsed.textures, parsed.primitives);
+
+          let finalClips = [...parsed.clips];
+          if (parsed.hasSkinning && MixamoAnimations.isMixamoSkeleton(parsed.joints)) {
+            const generated = MixamoAnimations.generateStandardClips(parsed.joints);
+            if (finalClips.length === 0) {
+              finalClips = generated;
+            } else {
+              // Fill in Idle / Jump / Punch if only a walk clip was embedded
+              const hasIdle = finalClips.some((c) => /idle|stand|breath/i.test(c.name));
+              const hasJump = finalClips.some((c) => /jump|air/i.test(c.name));
+              const hasPunch = finalClips.some((c) => /punch|jab|hit|attack/i.test(c.name));
+              for (const g of generated) {
+                if (!hasIdle && g.name === 'Mixamo_Idle_Cycle') finalClips.push(g);
+                if (!hasJump && g.name === 'Mixamo_Jump_Cycle') finalClips.push(g);
+                if (!hasPunch && g.name === 'Mixamo_Punch_Cycle') finalClips.push(g);
+              }
+            }
+          }
+
           return {
             primitives: parsed.primitives,
             joints: parsed.joints,
-            clips: parsed.clips,
+            clips: finalClips,
             atlasRects,
             isCustomRig: parsed.hasSkinning && parsed.joints.length > 0,
             sourceLabel: `GLB: ${glbName}`,
@@ -607,7 +682,7 @@ export class DestroyerEngine {
 
   async loadPlayerGLB(arrayBuffer: ArrayBuffer, fileName = 'player.glb'): Promise<void> {
     if (this.isDeviceLost) return;
-    const wasAnarchy = this.currentPreset === 'anarchy' && this.playerController.entityId >= 0;
+    const hasExistingPlayer = this.playerController.entityId >= 0;
     const savedPos: [number, number, number] = [...this.playerController.position];
     const savedTheta = this.playerController.cameraTheta;
     const savedPhi = this.playerController.cameraPhi;
@@ -616,9 +691,9 @@ export class DestroyerEngine {
 
     this.customPlayerGLB = { buffer: arrayBuffer, name: fileName };
     this.userLockedClip = false;
-    await this.loadScenePreset('anarchy');
+    await this.loadAnarchyWorld();
 
-    if (wasAnarchy) {
+    if (hasExistingPlayer) {
       this.playerController.position = savedPos;
       this.playerController.cameraTheta = savedTheta;
       this.playerController.cameraPhi = savedPhi;
@@ -628,22 +703,26 @@ export class DestroyerEngine {
     }
   }
 
-  async loadScenePreset(preset: string): Promise<void> {
+  async loadAnarchyWorld(): Promise<void> {
     if (this.isDeviceLost) return;
 
-    this.currentPreset = preset;
     this.entityManager.clear();
     this.animController.clear();
     this.renderer.clearDiffuseAtlas();
     this.renderer.waveFactor = 0.0;
     this.playerController.extraEntityIds = [];
+    this.anarchyCrateMeshId = -1;
+    this.anarchyCrateMatId = -1;
     this.userLockedClip = false;
+    this.buildingFloorEntities = [];
+    this.buildingBannerEntityIds = [-1, -1];
+    this.groundSlabEntityId = -1;
+    this.playerEntityIds = [];
 
     const device = this.deviceManager.getDevice();
-    const mobile = isMobileBrowser();
 
-    if (preset === 'anarchy') {
-      // Single 10-story business building with opening door, interior stairs, and elevator
+    // Single 10-story business building with opening door, interior stairs, elevator & punchable props
+    {
       this.physics.setupDefaultBuildingPhysics();
 
       const buildingData = ProceduralModels.createSingleBuildingWithStairsAndElevator();
@@ -654,17 +733,21 @@ export class DestroyerEngine {
       if (this.isCustomPlayerRig) {
         const clips = resolvedPlayer.clips;
         this.playerWalkClipName =
-          clips.find((c) => /walk|mixamo|run|move|armature/i.test(c.name))?.name ||
+          clips.find((c) => /walk|run|move/i.test(c.name))?.name ||
+          clips.find((c) => /mixamo|armature/i.test(c.name))?.name ||
           clips[0]?.name ||
           '';
         this.playerIdleClipName =
           clips.find((c) => /idle|stand|breath/i.test(c.name))?.name || null;
         this.playerJumpClipName =
           clips.find((c) => /jump|air/i.test(c.name))?.name || null;
+        this.playerPunchClipName =
+          clips.find((c) => /punch|jab|hit|attack/i.test(c.name))?.name || null;
       } else {
         this.playerWalkClipName = 'Human_Walk_Cycle';
         this.playerIdleClipName = 'BVH_Idle_Mocap';
         this.playerJumpClipName = 'BVH_Jump_Mocap';
+        this.playerPunchClipName = 'BVH_Punch_Mocap';
       }
 
       const concreteMatId = this.entityManager.registerMaterial({
@@ -677,12 +760,39 @@ export class DestroyerEngine {
       });
 
       const glassMatId = this.entityManager.registerMaterial({
-        baseColor: [0.35, 0.75, 0.95, 0.6], // Glass Blue
-        emissiveColor: [0.05, 0.15, 0.25, 0.3],
-        roughness: 0.05,
-        metallic: 0.95,
+        baseColor: [0.12, 0.30, 0.42, 1.0], // Architectural Curtain Glass
+        emissiveColor: [0.04, 0.14, 0.22, 0.45],
+        roughness: 0.06,
+        metallic: 0.92,
         ao: 1.0,
         alphaCutoff: 0.1,
+      });
+
+      const metalTrimMatId = this.entityManager.registerMaterial({
+        baseColor: [0.13, 0.15, 0.20, 1.0], // Brushed Gunmetal Trim & Mullions
+        emissiveColor: [0, 0, 0, 0],
+        roughness: 0.36,
+        metallic: 0.86,
+        ao: 1.0,
+        alphaCutoff: 0.5,
+      });
+
+      const interiorAccentMatId = this.entityManager.registerMaterial({
+        baseColor: [0.64, 0.66, 0.70, 1.0], // Light Architectural Stone / Trim
+        emissiveColor: [0, 0, 0, 0],
+        roughness: 0.78,
+        metallic: 0.06,
+        ao: 1.0,
+        alphaCutoff: 0.5,
+      });
+
+      const ceilingLightMatId = this.entityManager.registerMaterial({
+        baseColor: [0.92, 0.96, 1.0, 1.0], // Linear LED Fixture
+        emissiveColor: [0.65, 0.78, 0.92, 1.0],
+        roughness: 0.20,
+        metallic: 0.05,
+        ao: 1.0,
+        alphaCutoff: 0.5,
       });
 
       const furnitureMatId = this.entityManager.registerMaterial({
@@ -781,6 +891,31 @@ export class DestroyerEngine {
         );
       }
 
+      // Generate Moveable Physics Crates & Barrels
+      const cratePrim = ProceduralModels.createPhysicsCrate(0.9);
+      const barrelPrim = ProceduralModels.createPhysicsBarrel(0.38, 1.05, 12);
+      const crateMatId = this.entityManager.registerMaterial(
+        cratePrim.material ?? {
+          baseColor: [0.76, 0.48, 0.20, 1.0],
+          emissiveColor: [0.06, 0.03, 0.0, 0.2],
+          roughness: 0.62,
+          metallic: 0.18,
+          ao: 1.0,
+          alphaCutoff: 0.5,
+        }
+      );
+      const barrelMatId = this.entityManager.registerMaterial(
+        barrelPrim.material ?? {
+          baseColor: [0.16, 0.62, 0.82, 1.0],
+          emissiveColor: [0.02, 0.08, 0.14, 0.3],
+          roughness: 0.34,
+          metallic: 0.72,
+          ao: 1.0,
+          alphaCutoff: 0.5,
+        }
+      );
+      this.anarchyCrateMatId = crateMatId;
+
       // Register Skeleton & Clips
       const jointOffset = this.animController.registerSkeleton(resolvedPlayer.joints);
       for (const clip of resolvedPlayer.clips) {
@@ -794,248 +929,81 @@ export class DestroyerEngine {
         }
       }
 
-      // Upload ALL Geometries to GPU
-      const geometries = [
-        buildingData.buildingMesh,
-        buildingData.groundSlabMesh,
-        buildingData.floorButtonsMesh,
-        buildingData.doorLeftMesh,
-        buildingData.doorRightMesh,
-        buildingData.elevatorMesh,
-        buildingData.btnUpMesh,
-        buildingData.btnDownMesh,
-        buildingData.bannerMesh,
-        buildingData.officeMesh,
-        buildingData.windowMesh,
-        ...resolvedPlayer.primitives,
-        ...floorLabelMeshes,
-      ];
-      this.uploadGeometries(geometries);
+      // Queue ALL Geometries & Register Meshes in exact synchronized order
+      const pendingMeshes: { prim: ParsedGLBPrimitive; name: string; boundingRadius: number; hasSkinning?: boolean }[] = [];
+      const queueMesh = (prim: ParsedGLBPrimitive, name: string, boundingRadius: number, hasSkinning = false): number => {
+        const idx = pendingMeshes.length;
+        pendingMeshes.push({ prim, name, boundingRadius, hasSkinning });
+        return idx;
+      };
+
+      const groundMeshId = queueMesh(buildingData.groundSlabMesh, 'Massive_Ground_Mesh', 5000.0);
+
+      // Per-floor skyscraper meshes (0..9 stories + 10 rooftop)
+      const floorMeshSpecs = buildingData.floors.map((fl) => ({
+        floor: fl.floor,
+        buildingMeshId: fl.buildingMesh ? queueMesh(fl.buildingMesh, `Skyscraper_S${fl.floor}_Building`, 32.0) : -1,
+        metalTrimMeshId: fl.metalTrimMesh ? queueMesh(fl.metalTrimMesh, `Skyscraper_S${fl.floor}_MetalTrim`, 32.0) : -1,
+        interiorAccentMeshId: fl.interiorAccentMesh
+          ? queueMesh(fl.interiorAccentMesh, `Skyscraper_S${fl.floor}_InteriorAccent`, 32.0)
+          : -1,
+        ceilingLightMeshId: fl.ceilingLightMesh
+          ? queueMesh(fl.ceilingLightMesh, `Skyscraper_S${fl.floor}_CeilingLights`, 32.0)
+          : -1,
+        officeMeshId: fl.officeMesh ? queueMesh(fl.officeMesh, `Skyscraper_S${fl.floor}_Office`, 32.0) : -1,
+        windowMeshId: fl.windowMesh ? queueMesh(fl.windowMesh, `Skyscraper_S${fl.floor}_Windows`, 32.0) : -1,
+      }));
+
+      const floorButtonMeshId = queueMesh(buildingData.floorButtonMesh, 'Floor_Call_Button_Mesh', 0.5);
+      const doorLeftMeshId = queueMesh(buildingData.doorLeftMesh, 'Door_Left_Mesh', 5.0);
+      const doorRightMeshId = queueMesh(buildingData.doorRightMesh, 'Door_Right_Mesh', 5.0);
+      const elevatorMeshId = queueMesh(buildingData.elevatorMesh, 'Elevator_Cab_Mesh', 5.0);
+      const btnUpMeshId = queueMesh(buildingData.btnUpMesh, 'Elevator_Btn_UP_Mesh', 1.0);
+      const btnDownMeshId = queueMesh(buildingData.btnDownMesh, 'Elevator_Btn_DOWN_Mesh', 1.0);
+      const bannerMeshId = queueMesh(buildingData.bannerMesh, 'Banner_Text_Mesh', 10.0);
+
+      const playerMeshIds: number[] = resolvedPlayer.primitives.map((p, pIdx) =>
+        queueMesh(
+          p,
+          p.name || `Player_Part_${pIdx}`,
+          p.boundingRadius || 2.0,
+          resolvedPlayer.isCustomRig || !!(p.joints && p.joints.length > 0)
+        )
+      );
+
+      const floorLabelMeshIds: number[] = floorLabelMeshes.map((prim, k) =>
+        queueMesh(prim, `3D_Text_Floor_${k}`, 5.0)
+      );
+
+      const crateMeshId = queueMesh(cratePrim, 'Moveable_Physics_Crate', cratePrim.boundingRadius || 0.9);
+      this.anarchyCrateMeshId = crateMeshId;
+      const barrelMeshId = queueMesh(barrelPrim, 'Moveable_Physics_Barrel', barrelPrim.boundingRadius || 0.7);
+
+      this.uploadGeometries(pendingMeshes.map((m) => m.prim));
 
       let vOffset = 0;
       let iOffset = 0;
-
-      // 1. Building Mesh
-      const buildVerts = Math.floor(buildingData.buildingMesh.positions.length / 3);
-      const buildingMeshId = this.entityManager.registerMesh({
-        name: 'Skyscraper_Rooms_Mesh',
-        firstIndex: iOffset,
-        indexCount: buildingData.buildingMesh.indices.length,
-        baseVertex: vOffset,
-        vertexCount: buildVerts,
-        boundingRadius: 100.0,
-        hasSkinning: false,
-        hasMorphTargets: false,
-        morphTargetCount: 0,
-      });
-      vOffset += buildVerts;
-      iOffset += buildingData.buildingMesh.indices.length;
-
-      // 1a. Ground Slab Mesh
-      const groundVerts = Math.floor(buildingData.groundSlabMesh.positions.length / 3);
-      const groundMeshId = this.entityManager.registerMesh({
-        name: 'Massive_Ground_Mesh',
-        firstIndex: iOffset,
-        indexCount: buildingData.groundSlabMesh.indices.length,
-        baseVertex: vOffset,
-        vertexCount: groundVerts,
-        boundingRadius: 5000.0,
-        hasSkinning: false,
-        hasMorphTargets: false,
-        morphTargetCount: 0,
-      });
-      vOffset += groundVerts;
-      iOffset += buildingData.groundSlabMesh.indices.length;
-
-      // 1b. Floor Buttons Mesh
-      const floorBtnVerts = Math.floor(buildingData.floorButtonsMesh.positions.length / 3);
-      const floorButtonsMeshId = this.entityManager.registerMesh({
-        name: 'Floor_Buttons_Mesh',
-        firstIndex: iOffset,
-        indexCount: buildingData.floorButtonsMesh.indices.length,
-        baseVertex: vOffset,
-        vertexCount: floorBtnVerts,
-        boundingRadius: 100.0,
-        hasSkinning: false,
-        hasMorphTargets: false,
-        morphTargetCount: 0,
-      });
-      vOffset += floorBtnVerts;
-      iOffset += buildingData.floorButtonsMesh.indices.length;
-
-      // 2. Left Door Mesh
-      const doorLeftVerts = Math.floor(buildingData.doorLeftMesh.positions.length / 3);
-      const doorLeftMeshId = this.entityManager.registerMesh({
-        name: 'Door_Left_Mesh',
-        firstIndex: iOffset,
-        indexCount: buildingData.doorLeftMesh.indices.length,
-        baseVertex: vOffset,
-        vertexCount: doorLeftVerts,
-        boundingRadius: 5.0,
-        hasSkinning: false,
-        hasMorphTargets: false,
-        morphTargetCount: 0,
-      });
-      vOffset += doorLeftVerts;
-      iOffset += buildingData.doorLeftMesh.indices.length;
-
-      // 3. Right Door Mesh
-      const doorRightVerts = Math.floor(buildingData.doorRightMesh.positions.length / 3);
-      const doorRightMeshId = this.entityManager.registerMesh({
-        name: 'Door_Right_Mesh',
-        firstIndex: iOffset,
-        indexCount: buildingData.doorRightMesh.indices.length,
-        baseVertex: vOffset,
-        vertexCount: doorRightVerts,
-        boundingRadius: 5.0,
-        hasSkinning: false,
-        hasMorphTargets: false,
-        morphTargetCount: 0,
-      });
-      vOffset += doorRightVerts;
-      iOffset += buildingData.doorRightMesh.indices.length;
-
-      // 4. Elevator Mesh
-      const eleVerts = Math.floor(buildingData.elevatorMesh.positions.length / 3);
-      const elevatorMeshId = this.entityManager.registerMesh({
-        name: 'Elevator_Cab_Mesh',
-        firstIndex: iOffset,
-        indexCount: buildingData.elevatorMesh.indices.length,
-        baseVertex: vOffset,
-        vertexCount: eleVerts,
-        boundingRadius: 5.0,
-        hasSkinning: false,
-        hasMorphTargets: false,
-        morphTargetCount: 0,
-      });
-      vOffset += eleVerts;
-      iOffset += buildingData.elevatorMesh.indices.length;
-
-      // 4b. Cab Buttons
-      const btnUpVerts = Math.floor(buildingData.btnUpMesh.positions.length / 3);
-      const btnUpMeshId = this.entityManager.registerMesh({
-        name: 'Elevator_Btn_UP_Mesh',
-        firstIndex: iOffset,
-        indexCount: buildingData.btnUpMesh.indices.length,
-        baseVertex: vOffset,
-        vertexCount: btnUpVerts,
-        boundingRadius: 1.0,
-        hasSkinning: false,
-        hasMorphTargets: false,
-        morphTargetCount: 0,
-      });
-      vOffset += btnUpVerts;
-      iOffset += buildingData.btnUpMesh.indices.length;
-
-      const btnDownVerts = Math.floor(buildingData.btnDownMesh.positions.length / 3);
-      const btnDownMeshId = this.entityManager.registerMesh({
-        name: 'Elevator_Btn_DOWN_Mesh',
-        firstIndex: iOffset,
-        indexCount: buildingData.btnDownMesh.indices.length,
-        baseVertex: vOffset,
-        vertexCount: btnDownVerts,
-        boundingRadius: 1.0,
-        hasSkinning: false,
-        hasMorphTargets: false,
-        morphTargetCount: 0,
-      });
-      vOffset += btnDownVerts;
-      iOffset += buildingData.btnDownMesh.indices.length;
-
-      // 4c. Banner Mesh
-      const bannerVerts = Math.floor(buildingData.bannerMesh.positions.length / 3);
-      const bannerMeshId = this.entityManager.registerMesh({
-        name: 'Banner_Text_Mesh',
-        firstIndex: iOffset,
-        indexCount: buildingData.bannerMesh.indices.length,
-        baseVertex: vOffset,
-        vertexCount: bannerVerts,
-        boundingRadius: 10.0,
-        hasSkinning: false,
-        hasMorphTargets: false,
-        morphTargetCount: 0,
-      });
-      vOffset += bannerVerts;
-      iOffset += buildingData.bannerMesh.indices.length;
-
-      // 4d. Office Mesh
-      const officeVerts = Math.floor(buildingData.officeMesh.positions.length / 3);
-      const officeMeshId = this.entityManager.registerMesh({
-        name: 'Office_Furniture_Mesh',
-        firstIndex: iOffset,
-        indexCount: buildingData.officeMesh.indices.length,
-        baseVertex: vOffset,
-        vertexCount: officeVerts,
-        boundingRadius: 100.0,
-        hasSkinning: false,
-        hasMorphTargets: false,
-        morphTargetCount: 0,
-      });
-      vOffset += officeVerts;
-      iOffset += buildingData.officeMesh.indices.length;
-
-      // 4e. Window Mesh
-      const windowVerts = Math.floor(buildingData.windowMesh.positions.length / 3);
-      const windowMeshId = this.entityManager.registerMesh({
-        name: 'Window_Glass_Mesh',
-        firstIndex: iOffset,
-        indexCount: buildingData.windowMesh.indices.length,
-        baseVertex: vOffset,
-        vertexCount: windowVerts,
-        boundingRadius: 100.0,
-        hasSkinning: false,
-        hasMorphTargets: false,
-        morphTargetCount: 0,
-      });
-      vOffset += windowVerts;
-      iOffset += buildingData.windowMesh.indices.length;
-
-      // 5. Player Meshes (supports multi-primitive rigged GLBs like Mixamo Remy)
-      const playerMeshIds: number[] = [];
-      for (let pIdx = 0; pIdx < resolvedPlayer.primitives.length; pIdx++) {
-        const p = resolvedPlayer.primitives[pIdx];
-        const pVerts = Math.floor(p.positions.length / 3);
-        const pMeshId = this.entityManager.registerMesh({
-          name: p.name || `Player_Part_${pIdx}`,
+      for (const m of pendingMeshes) {
+        const vCount = Math.floor(m.prim.positions.length / 3);
+        this.entityManager.registerMesh({
+          name: m.name,
           firstIndex: iOffset,
-          indexCount: p.indices.length,
-          baseVertex: vOffset,
-          vertexCount: pVerts,
-          boundingRadius: p.boundingRadius || 2.0,
-          hasSkinning: resolvedPlayer.isCustomRig || !!(p.joints && p.joints.length > 0),
-          hasMorphTargets: false,
-          morphTargetCount: 0,
-        });
-        playerMeshIds.push(pMeshId);
-        vOffset += pVerts;
-        iOffset += p.indices.length;
-      }
-
-      // 6. 3D Text Floor Label Meshes (Floors 0 through 10)
-      const floorLabelMeshIds: number[] = [];
-      for (let k = 0; k <= 10; k++) {
-        const prim = floorLabelMeshes[k];
-        const vCount = Math.floor(prim.positions.length / 3);
-        const mId = this.entityManager.registerMesh({
-          name: `3D_Text_Floor_${k}`,
-          firstIndex: iOffset,
-          indexCount: prim.indices.length,
+          indexCount: m.prim.indices.length,
           baseVertex: vOffset,
           vertexCount: vCount,
-          boundingRadius: 5.0,
-          hasSkinning: false,
+          boundingRadius: m.boundingRadius,
+          hasSkinning: !!m.hasSkinning,
           hasMorphTargets: false,
           morphTargetCount: 0,
         });
-        floorLabelMeshIds.push(mId);
         vOffset += vCount;
-        iOffset += prim.indices.length;
+        iOffset += m.prim.indices.length;
       }
 
       // Add Entities
       const groundMat = Mat4.create();
       Mat4.fromTranslation([0, 0, 0], groundMat);
-      this.entityManager.addEntity({
+      this.groundSlabEntityId = this.entityManager.addEntity({
         meshId: groundMeshId,
         materialId: concreteMatId,
         worldMatrix: groundMat,
@@ -1044,90 +1012,156 @@ export class DestroyerEngine {
         name: 'Massive_Ground_Slab',
       });
 
-      // Buildings
+      // Buildings (Main at [0,0,0], Secondary at [60,0,0]) partitioned per floor (0..10)
       const offsets: [number, number, number][] = [[0, 0, 0], [60, 0, 0]];
       offsets.forEach((off, idx) => {
+        const buildingIndex = idx as 0 | 1;
         const nameSuffix = idx === 0 ? 'Main' : 'Secondary';
         const mat = Mat4.create();
         Mat4.fromTranslation(off, mat);
 
-        // Building
-        this.entityManager.addEntity({
-          meshId: buildingMeshId,
-          materialId: concreteMatId,
-          worldMatrix: mat,
-          sphereCenter: [off[0], 20, off[2], 2000.0],
-          flags: 1,
-          name: `${nameSuffix}_Building`,
-        });
+        const floorMap = new Map<number, number[]>();
+        for (let k = 0; k <= 10; k++) floorMap.set(k, []);
 
-        // Windows
-        this.entityManager.addEntity({
-          meshId: windowMeshId,
-          materialId: glassMatId,
-          worldMatrix: mat,
-          sphereCenter: [off[0], 20, off[2], 2000.0],
-          flags: 1,
-          name: `${nameSuffix}_Windows`,
-        });
+        for (const fl of floorMeshSpecs) {
+          const list = floorMap.get(fl.floor)!;
+          const localCenter: [number, number, number, number] = [0, fl.floor * 4.0 + 2.0, 0, 32.0];
 
-        // Office Furniture
-        this.entityManager.addEntity({
-          meshId: officeMeshId,
-          materialId: furnitureMatId,
-          worldMatrix: mat,
-          sphereCenter: [off[0], 20, off[2], 2000.0],
-          flags: 1,
-          name: `${nameSuffix}_Office`,
-        });
+          if (fl.buildingMeshId >= 0) {
+            list.push(
+              this.entityManager.addEntity({
+                meshId: fl.buildingMeshId,
+                materialId: concreteMatId,
+                worldMatrix: mat,
+                sphereCenter: localCenter,
+                flags: 1,
+                name: `${nameSuffix}_F${fl.floor}_Building`,
+              })
+            );
+          }
+          if (fl.metalTrimMeshId >= 0) {
+            list.push(
+              this.entityManager.addEntity({
+                meshId: fl.metalTrimMeshId,
+                materialId: metalTrimMatId,
+                worldMatrix: mat,
+                sphereCenter: localCenter,
+                flags: 1,
+                name: `${nameSuffix}_F${fl.floor}_MetalTrim`,
+              })
+            );
+          }
+          if (fl.interiorAccentMeshId >= 0) {
+            list.push(
+              this.entityManager.addEntity({
+                meshId: fl.interiorAccentMeshId,
+                materialId: interiorAccentMatId,
+                worldMatrix: mat,
+                sphereCenter: localCenter,
+                flags: 1,
+                name: `${nameSuffix}_F${fl.floor}_InteriorAccent`,
+              })
+            );
+          }
+          if (fl.ceilingLightMeshId >= 0) {
+            list.push(
+              this.entityManager.addEntity({
+                meshId: fl.ceilingLightMeshId,
+                materialId: ceilingLightMatId,
+                worldMatrix: mat,
+                sphereCenter: localCenter,
+                flags: 1,
+                name: `${nameSuffix}_F${fl.floor}_CeilingLights`,
+              })
+            );
+          }
+          if (fl.windowMeshId >= 0) {
+            list.push(
+              this.entityManager.addEntity({
+                meshId: fl.windowMeshId,
+                materialId: glassMatId,
+                worldMatrix: mat,
+                sphereCenter: localCenter,
+                flags: 1,
+                name: `${nameSuffix}_F${fl.floor}_Windows`,
+              })
+            );
+          }
+          if (fl.officeMeshId >= 0) {
+            list.push(
+              this.entityManager.addEntity({
+                meshId: fl.officeMeshId,
+                materialId: furnitureMatId,
+                worldMatrix: mat,
+                sphereCenter: localCenter,
+                flags: 1,
+                name: `${nameSuffix}_F${fl.floor}_Office`,
+              })
+            );
+          }
+        }
 
-        // Banner
+        // Banner (above front entrance at Y=4.4)
         const bannerMat = Mat4.create();
         Mat4.fromTranslation([off[0], 4.4, off[2] + 20.25], bannerMat);
-        this.entityManager.addEntity({
+        this.buildingBannerEntityIds[buildingIndex] = this.entityManager.addEntity({
           meshId: bannerMeshId,
           materialId: textMatId,
           worldMatrix: bannerMat,
-          sphereCenter: [off[0], 4.4, off[2] + 20.25, 20.0],
+          sphereCenter: [0, 0, 0, 12.0],
           flags: 1,
           name: `${nameSuffix}_Banner`,
         });
-      });
 
-      // Floor Buttons Entity
-      const mainBuildMat = Mat4.create();
-      this.entityManager.addEntity({
-        meshId: floorButtonsMeshId,
-        materialId: btnDownMatId,
-        worldMatrix: mainBuildMat,
-        sphereCenter: [11.5, 20.0, 9.0, 50.0],
-        flags: 1,
-        name: 'Floor_Call_Buttons',
-      });
+        // Main building floor call buttons (0..9) & 3D Text Floor Labels (0..10)
+        if (buildingIndex === 0) {
+          for (let k = 0; k < 10; k++) {
+            const btnMat = Mat4.create();
+            Mat4.fromTranslation([11.32, k * 4.0 + 1.6, 9.0], btnMat);
+            const btnId = this.entityManager.addEntity({
+              meshId: floorButtonMeshId,
+              materialId: btnDownMatId,
+              worldMatrix: btnMat,
+              sphereCenter: [0, 0, 0, 0.5],
+              flags: 1,
+              name: `Floor_Call_Button_F${k}`,
+            });
+            floorMap.get(k)!.push(btnId);
+          }
 
-      // 3D Text Floor Label Entities for Main Building
-      for (let k = 0; k <= 10; k++) {
-        const labelMat = Mat4.create();
-        const labelPos: [number, number, number] = [0, k * 4.0 + 2.6, -19.6];
-        Mat4.fromTranslation(labelPos, labelMat);
-        this.entityManager.addEntity({
-          meshId: floorLabelMeshIds[k],
-          materialId: textMatId,
-          worldMatrix: labelMat,
-          sphereCenter: [labelPos[0], labelPos[1], labelPos[2], 10.0],
-          flags: 1,
-          name: `3D_Label_Main_Floor_${k}`,
-        });
-      }
+          for (let k = 0; k <= 10; k++) {
+            const labelMat = Mat4.create();
+            const labelPos: [number, number, number] = [0, k * 4.0 + 2.6, -19.6];
+            Mat4.fromTranslation(labelPos, labelMat);
+            const labelId = this.entityManager.addEntity({
+              meshId: floorLabelMeshIds[k],
+              materialId: textMatId,
+              worldMatrix: labelMat,
+              sphereCenter: [0, 0, 0, 8.0],
+              flags: 1,
+              name: `3D_Label_Main_Floor_${k}`,
+            });
+            floorMap.get(k)!.push(labelId);
+          }
+        }
+
+        for (let k = 0; k <= 10; k++) {
+          this.buildingFloorEntities.push({
+            buildingIndex,
+            floor: k,
+            entityIds: floorMap.get(k)!,
+          });
+        }
+      });
 
       // Left Door Entity
       const doorLeftMat = Mat4.create();
-      Mat4.fromTranslation([-2.0, 2.0, 20.0], doorLeftMat);
+      Mat4.fromTranslation([-2.0, 1.2, 20.0], doorLeftMat);
       this.doorLeftEntityId = this.entityManager.addEntity({
         meshId: doorLeftMeshId,
         materialId: doorMatId,
         worldMatrix: doorLeftMat,
-        sphereCenter: [-2.0, 2.0, 20.0, 4.0],
+        sphereCenter: [-2.0, 1.2, 20.0, 4.0],
         flags: 1,
         animOffset: 0,
         name: 'Sliding_Door_Left',
@@ -1135,12 +1169,12 @@ export class DestroyerEngine {
 
       // Right Door Entity
       const doorRightMat = Mat4.create();
-      Mat4.fromTranslation([2.0, 2.0, 20.0], doorRightMat);
+      Mat4.fromTranslation([2.0, 1.2, 20.0], doorRightMat);
       this.doorRightEntityId = this.entityManager.addEntity({
         meshId: doorRightMeshId,
         materialId: doorMatId,
         worldMatrix: doorRightMat,
-        sphereCenter: [2.0, 2.0, 20.0, 4.0],
+        sphereCenter: [2.0, 1.2, 20.0, 4.0],
         flags: 1,
         animOffset: 0,
         name: 'Sliding_Door_Right',
@@ -1202,6 +1236,57 @@ export class DestroyerEngine {
         });
         playerEntityIds.push(entId);
       }
+      this.playerEntityIds = playerEntityIds;
+
+      // Moveable Punchable Crates & Barrels in courtyard & ground lobby
+      const propSpawns: {
+        kind: 'crate' | 'barrel';
+        name: string;
+        pos: [number, number, number];
+        mass: number;
+        restitution: number;
+      }[] = [
+        // Front courtyard flanking walkway (immediately visible & punchable at spawn)
+        { kind: 'crate', name: 'Courtyard_Crate_01', pos: [-2.4, 0.53, 22.8], mass: 1.0, restitution: 0.35 },
+        { kind: 'crate', name: 'Courtyard_Crate_02', pos: [2.4, 0.53, 22.8], mass: 1.0, restitution: 0.35 },
+        { kind: 'crate', name: 'Courtyard_Crate_03', pos: [-3.8, 0.53, 22.1], mass: 1.1, restitution: 0.35 },
+        { kind: 'crate', name: 'Courtyard_Crate_Stack', pos: [-3.8, 1.44, 22.1], mass: 0.9, restitution: 0.38 },
+        { kind: 'crate', name: 'Courtyard_Crate_04', pos: [3.6, 0.45, 24.0], mass: 1.0, restitution: 0.35 },
+        { kind: 'barrel', name: 'Courtyard_Barrel_01', pos: [-2.2, 0.525, 24.1], mass: 1.25, restitution: 0.42 },
+        { kind: 'barrel', name: 'Courtyard_Barrel_02', pos: [2.3, 0.525, 24.2], mass: 1.25, restitution: 0.42 },
+        { kind: 'barrel', name: 'Courtyard_Barrel_03', pos: [3.9, 0.605, 21.8], mass: 1.25, restitution: 0.42 },
+        // Inside ground lobby
+        { kind: 'crate', name: 'Lobby_Crate_01', pos: [-6.5, 0.45, 11.2], mass: 1.0, restitution: 0.35 },
+        { kind: 'crate', name: 'Lobby_Crate_02', pos: [-5.5, 0.45, 11.2], mass: 1.0, restitution: 0.35 },
+        { kind: 'crate', name: 'Lobby_Crate_Stack', pos: [-6.0, 1.35, 11.2], mass: 0.9, restitution: 0.38 },
+        { kind: 'barrel', name: 'Lobby_Barrel_01', pos: [-4.2, 0.525, 9.6], mass: 1.25, restitution: 0.42 },
+      ];
+
+      for (let i = 0; i < propSpawns.length; i++) {
+        const sp = propSpawns[i];
+        const isCrate = sp.kind === 'crate';
+        const halfExt: [number, number, number] = isCrate ? [0.45, 0.45, 0.45] : [0.38, 0.525, 0.38];
+        const propMat = Mat4.create();
+        Mat4.fromTranslation(sp.pos, propMat);
+        const propEntityId = this.entityManager.addEntity({
+          meshId: isCrate ? crateMeshId : barrelMeshId,
+          materialId: isCrate ? crateMatId : barrelMatId,
+          worldMatrix: propMat,
+          sphereCenter: [sp.pos[0], sp.pos[1], sp.pos[2], 1.2],
+          flags: 1,
+          animOffset: 0,
+          name: sp.name,
+        });
+        this.physics.addMoveableObject({
+          id: `prop_${i}_${sp.name}`,
+          entityId: propEntityId,
+          name: sp.name,
+          position: sp.pos,
+          halfExtents: halfExt,
+          mass: sp.mass,
+          restitution: sp.restitution,
+        });
+      }
 
       // Configure Player Controller
       this.playerController.position = [0, 0, 25.0];
@@ -1217,467 +1302,170 @@ export class DestroyerEngine {
       this.camera.theta = 0.0;
       this.camera.phi = 1.25;
       this.camera.updatePositionFromSpherical();
-    } else if (preset === 'massive_indirect') {
-      // Preset 1: Indirect Instances (Sci-Fi Mech Battlefield on Reflective Arena)
-      const countSide = mobile ? 8 : 60;
-      const spacing = 4.2;
-      const startX = -((countSide - 1) * spacing) / 2;
-      const startZ = -((countSide - 1) * spacing) / 2;
-
-      const mechData = ProceduralModels.createSkinnedMech();
-      const floorSize = Math.max(160, countSide * spacing + 40);
-      const floorData = ProceduralModels.createArenaFloor(floorSize, 32);
-
-      const mechMatId = this.entityManager.registerMaterial({
-        baseColor: [0.18, 0.45, 0.85, 1.0], // Armored cobalt blue
-        emissiveColor: [0, 0, 0, 0],
-        roughness: 0.28,
-        metallic: 0.82,
-        ao: 1.0,
-        alphaCutoff: 0.5,
-        flags: 1, // Sci-Fi Mech custom PBR override
-      });
-
-      const floorMatId = this.entityManager.registerMaterial({
-        baseColor: [0.14, 0.16, 0.22, 1.0], // Dark reflective titanium arena floor
-        emissiveColor: [0, 0, 0, 0],
-        roughness: 0.32,
-        metallic: 0.7,
-        ao: 1.0,
-        alphaCutoff: 0.5,
-      });
-
-      const mechVertCount = Math.floor(mechData.primitive.positions.length / 3);
-      const floorVertCount = Math.floor(floorData.positions.length / 3);
-
-      const mechMeshId = this.entityManager.registerMesh({
-        name: 'Sci-Fi Combat Mech',
-        firstIndex: 0,
-        indexCount: mechData.primitive.indices.length,
-        baseVertex: 0,
-        vertexCount: mechVertCount,
-        boundingRadius: 3.5,
-        hasSkinning: true,
-        hasMorphTargets: false,
-        morphTargetCount: 0,
-      });
-
-      const floorMeshId = this.entityManager.registerMesh({
-        name: 'Battlefield Arena Floor',
-        firstIndex: mechData.primitive.indices.length,
-        indexCount: floorData.indices.length,
-        baseVertex: mechVertCount,
-        vertexCount: floorVertCount,
-        boundingRadius: floorSize * 0.75,
-        hasSkinning: false,
-        hasMorphTargets: false,
-        morphTargetCount: 0,
-      });
-
-      this.uploadGeometries([mechData.primitive, floorData]);
-
-      // Add Arena Floor
-      const floorMat = Mat4.create();
-      Mat4.fromTranslation([0, 0, 0], floorMat);
-      this.entityManager.addEntity({
-        meshId: floorMeshId,
-        materialId: floorMatId,
-        worldMatrix: floorMat,
-        sphereCenter: [0, 0, 0, floorSize * 0.75],
-        flags: 1,
-        animOffset: 0,
-        name: 'Arena_Battle_Floor',
-      });
-
-      // Add Mechs in military formation
-      const animOffset = this.animController.registerSkeleton(mechData.joints, mechData.clip);
-      for (let z = 0; z < countSide; z++) {
-        for (let x = 0; x < countSide; x++) {
-          const posX = startX + x * spacing;
-          const posZ = startZ + z * spacing;
-          const mat = Mat4.create();
-          Mat4.fromTranslation([posX, 0, posZ], mat);
-
-          this.entityManager.addEntity({
-            meshId: mechMeshId,
-            materialId: mechMatId,
-            worldMatrix: mat,
-            sphereCenter: [posX, 1.6, posZ, 3.5],
-            flags: 1,
-            animOffset,
-            name: `Mech_${x}_${z}`,
-          });
-        }
-      }
-
-      const camDist = mobile ? 28 : 85;
-      this.camera.position = [0, mobile ? 14 : 42, camDist];
-      this.camera.target = [0, 1.5, 0];
-      this.camera.radius = camDist;
-      this.camera.theta = 0.45;
-      this.camera.phi = 0.55;
-      this.camera.updatePositionFromSpherical();
-    } else if (preset === 'skinned_mech') {
-      // Preset 2: 3 High-Detail Animated Combat Mechs on Arena Floor
-      const mechData = ProceduralModels.createSkinnedMech();
-      const floorData = ProceduralModels.createArenaFloor(100, 24);
-
-      const mechMatId = this.entityManager.registerMaterial({
-        baseColor: [0.85, 0.45, 0.15, 1.0], // Industrial amber combat mech
-        emissiveColor: [0, 0, 0, 0],
-        roughness: 0.25,
-        metallic: 0.85,
-        ao: 1.0,
-        alphaCutoff: 0.5,
-        flags: 1, // Sci-Fi Mech custom PBR override
-      });
-
-      const floorMatId = this.entityManager.registerMaterial({
-        baseColor: [0.12, 0.14, 0.18, 1.0], // Dark reflective titanium arena floor
-        emissiveColor: [0, 0, 0, 0],
-        roughness: 0.35,
-        metallic: 0.65,
-        ao: 1.0,
-        alphaCutoff: 0.5,
-      });
-
-      const mechVertCount = Math.floor(mechData.primitive.positions.length / 3);
-      const floorVertCount = Math.floor(floorData.positions.length / 3);
-
-      const mechMeshId = this.entityManager.registerMesh({
-        name: 'Alpha Combat Mech',
-        firstIndex: 0,
-        indexCount: mechData.primitive.indices.length,
-        baseVertex: 0,
-        vertexCount: mechVertCount,
-        boundingRadius: 3.5,
-        hasSkinning: true,
-        hasMorphTargets: false,
-        morphTargetCount: 0,
-      });
-
-      const floorMeshId = this.entityManager.registerMesh({
-        name: 'Battlefield Arena Floor',
-        firstIndex: mechData.primitive.indices.length,
-        indexCount: floorData.indices.length,
-        baseVertex: mechVertCount,
-        vertexCount: floorVertCount,
-        boundingRadius: 75.0,
-        hasSkinning: false,
-        hasMorphTargets: false,
-        morphTargetCount: 0,
-      });
-
-      this.uploadGeometries([mechData.primitive, floorData]);
-
-      // Add Arena Floor
-      const floorMat = Mat4.create();
-      Mat4.fromTranslation([0, 0, 0], floorMat);
-      this.entityManager.addEntity({
-        meshId: floorMeshId,
-        materialId: floorMatId,
-        worldMatrix: floorMat,
-        sphereCenter: [0, 0, 0, 75.0],
-        flags: 1,
-        animOffset: 0,
-        name: 'Arena_Battle_Floor',
-      });
-
-      // Add 3 Squadron Mechs
-      const animOffset = this.animController.registerSkeleton(mechData.joints, mechData.clip);
-      const positions: [number, number, number][] = [
-        [-5.5, 0, 0],
-        [0, 0, 1.5],
-        [5.5, 0, 0],
-      ];
-
-      positions.forEach((pos, idx) => {
-        const mat = Mat4.create();
-        Mat4.fromTranslation(pos, mat);
-        this.entityManager.addEntity({
-          meshId: mechMeshId,
-          materialId: mechMatId,
-          worldMatrix: mat,
-          sphereCenter: [pos[0], 1.6, pos[2], 3.5],
-          flags: 1,
-          animOffset,
-          name: `Squadron_Mech_0${idx + 1}`,
-        });
-      });
-
-      this.camera.position = [0, 4.5, 14];
-      this.camera.target = [0, 1.6, 0];
-      this.camera.radius = 14;
-      this.camera.theta = 0.3;
-      this.camera.phi = 0.55;
-      this.camera.updatePositionFromSpherical();
-    } else if (preset === 'morph_core') {
-      // Preset 3: Quantum Morph Core with Reflective Platform
-      const coreData = ProceduralModels.createMorphingCore();
-      const floorData = ProceduralModels.createArenaFloor(60, 20);
-
-      const coreMatId = this.entityManager.registerMaterial({
-        baseColor: [0.95, 0.35, 0.45, 1.0],
-        emissiveColor: [0.8, 0.1, 0.25, 1.2],
-        roughness: 0.18,
-        metallic: 0.92,
-        ao: 1.0,
-        alphaCutoff: 0.5,
-      });
-
-      const floorMatId = this.entityManager.registerMaterial({
-        baseColor: [0.12, 0.14, 0.18, 1.0],
-        emissiveColor: [0, 0, 0, 0],
-        roughness: 0.3,
-        metallic: 0.7,
-        ao: 1.0,
-        alphaCutoff: 0.5,
-      });
-
-      const coreVertCount = Math.floor(coreData.primitive.positions.length / 3);
-      const floorVertCount = Math.floor(floorData.positions.length / 3);
-
-      const coreMeshId = this.entityManager.registerMesh({
-        name: 'Quantum Morph Core',
-        firstIndex: 0,
-        indexCount: coreData.primitive.indices.length,
-        baseVertex: 0,
-        vertexCount: coreVertCount,
-        boundingRadius: 4.0,
-        hasSkinning: false,
-        hasMorphTargets: true,
-        morphTargetCount: 2,
-      });
-
-      const floorMeshId = this.entityManager.registerMesh({
-        name: 'Containment Floor',
-        firstIndex: coreData.primitive.indices.length,
-        indexCount: floorData.indices.length,
-        baseVertex: coreVertCount,
-        vertexCount: floorVertCount,
-        boundingRadius: 45.0,
-        hasSkinning: false,
-        hasMorphTargets: false,
-        morphTargetCount: 0,
-      });
-
-      this.uploadGeometries([coreData.primitive, floorData]);
-
-      // Add Floor
-      const floorMat = Mat4.create();
-      Mat4.fromTranslation([0, 0, 0], floorMat);
-      this.entityManager.addEntity({
-        meshId: floorMeshId,
-        materialId: floorMatId,
-        worldMatrix: floorMat,
-        sphereCenter: [0, 0, 0, 45.0],
-        flags: 1,
-        animOffset: 0,
-        name: 'Containment_Floor',
-      });
-
-      // Add Floating Core
-      const coreMat = Mat4.create();
-      Mat4.fromTranslation([0, 3.2, 0], coreMat);
-      this.entityManager.addEntity({
-        meshId: coreMeshId,
-        materialId: coreMatId,
-        worldMatrix: coreMat,
-        sphereCenter: [0, 3.2, 0, 4.0],
-        flags: 1,
-        animOffset: 0,
-        name: 'Quantum_Core_Prime',
-      });
-
-      this.camera.position = [0, 5, 13];
-      this.camera.target = [0, 2.8, 0];
-      this.camera.radius = 13;
-      this.camera.theta = 0.35;
-      this.camera.phi = 0.55;
-      this.camera.updatePositionFromSpherical();
-    } else if (preset === 'wave_terrain') {
-      // Preset 4: Harmonic Wave Terrain Grid
-      const gridDim = mobile ? 36 : 64;
-      const terrainData = ProceduralModels.createTerrainGrid(gridDim, 55.0);
-      const pbrMat: FlatMaterial = {
-        baseColor: [0.15, 0.75, 0.65, 1.0],
-        emissiveColor: [0.0, 0.1, 0.15, 0.2],
-        roughness: 0.35,
-        metallic: 0.65,
-        ao: 1.0,
-        alphaCutoff: 0.5,
-      };
-
-      const matId = this.entityManager.registerMaterial(pbrMat);
-      const meshId = this.entityManager.registerMesh({
-        name: 'Harmonic Terrain Grid',
-        firstIndex: 0,
-        indexCount: terrainData.indices.length,
-        baseVertex: 0,
-        vertexCount: Math.floor(terrainData.positions.length / 3),
-        boundingRadius: 40.0,
-        hasSkinning: false,
-        hasMorphTargets: false,
-        morphTargetCount: 0,
-      });
-
-      const interleaved = GLBLoader.interleavePrimitive(terrainData);
-      this.renderer.uploadGeometry(interleaved, terrainData.indices);
-
-      const mat = Mat4.create();
-      Mat4.fromTranslation([0, 0, 0], mat);
-
-      this.entityManager.addEntity({
-        meshId,
-        materialId: matId,
-        worldMatrix: mat,
-        sphereCenter: [0, 0, 0, 40.0],
-        flags: 1,
-        animOffset: 0,
-        name: 'Harmonic_Wave_Grid',
-      });
-
-      this.renderer.waveFactor = 1.0;
-      this.camera.position = [0, 22, 45];
-      this.camera.target = [0, 0, 0];
-      this.camera.radius = 45;
-      this.camera.theta = 0.5;
-      this.camera.phi = 0.5;
-      this.camera.updatePositionFromSpherical();
     }
 
+    this.updateSmartCulling();
     this.entityManager.uploadToGPU(device);
+  }
+
+  /**
+   * Smart Floor / Interior Culling System:
+   * - Exterior: renders all buildings (floors 0..10), banners, doors, elevator, and props.
+   * - Interior (inside Main or Secondary building): renders ONLY currentFloor - 1 .. currentFloor + 1
+   *   (clamped to [0, 10]) of the occupied building, culls the unentered building completely,
+   *   and culls out-of-range doors, elevator cab, banners, and moveable props.
+   */
+  public updateSmartCulling(): void {
+    const totalCount = this.entityManager.activeEntityCount;
+    if (!this.smartCullingEnabled) {
+      for (let i = 0; i < totalCount; i++) {
+        this.entityManager.setEntityVisible(i, true);
+      }
+      this.stats.smartCullingEnabled = false;
+      this.stats.smartCullMode = 'EXTERIOR';
+      this.stats.smartCullBuilding = -1;
+      this.stats.smartCullFloor = -1;
+      this.stats.smartCullMinFloor = 0;
+      this.stats.smartCullMaxFloor = 10;
+      this.stats.smartCulledCount = 0;
+      return;
+    }
+
+    const [px, py, pz] = this.playerController.position;
+    let activeBuilding: -1 | 0 | 1 = -1;
+
+    if (py >= -0.5 && py < 43.8 && Math.abs(pz) <= 19.6) {
+      if (Math.abs(px) <= 19.6) {
+        activeBuilding = 0;
+      } else if (Math.abs(px - 60.0) <= 19.6) {
+        activeBuilding = 1;
+      }
+    }
+
+    if (activeBuilding === -1) {
+      for (let i = 0; i < totalCount; i++) {
+        this.entityManager.setEntityVisible(i, true);
+      }
+      this.stats.smartCullingEnabled = true;
+      this.stats.smartCullMode = 'EXTERIOR';
+      this.stats.smartCullBuilding = -1;
+      this.stats.smartCullFloor = -1;
+      this.stats.smartCullMinFloor = 0;
+      this.stats.smartCullMaxFloor = 10;
+      this.stats.smartCulledCount = 0;
+      return;
+    }
+
+    const currentFloor = Math.max(0, Math.min(10, Math.floor((py + 0.35) / 4.0)));
+    const minFloor = Math.max(0, currentFloor - 1);
+    const maxFloor = Math.min(10, currentFloor + 1);
+
+    if (this.groundSlabEntityId >= 0) {
+      this.entityManager.setEntityVisible(this.groundSlabEntityId, true);
+    }
+
+    for (let i = 0; i < this.playerEntityIds.length; i++) {
+      this.entityManager.setEntityVisible(this.playerEntityIds[i], true);
+    }
+
+    for (let i = 0; i < this.buildingFloorEntities.length; i++) {
+      const entry = this.buildingFloorEntities[i];
+      const show =
+        entry.buildingIndex === activeBuilding &&
+        entry.floor >= minFloor &&
+        entry.floor <= maxFloor;
+      for (let j = 0; j < entry.entityIds.length; j++) {
+        this.entityManager.setEntityVisible(entry.entityIds[j], show);
+      }
+    }
+
+    for (let bIdx = 0; bIdx < 2; bIdx++) {
+      const bId = this.buildingBannerEntityIds[bIdx];
+      if (bId >= 0) {
+        this.entityManager.setEntityVisible(bId, bIdx === activeBuilding && minFloor <= 1);
+      }
+    }
+
+    const showDoors = activeBuilding === 0 && minFloor <= 1;
+    if (this.doorLeftEntityId >= 0) this.entityManager.setEntityVisible(this.doorLeftEntityId, showDoors);
+    if (this.doorRightEntityId >= 0) this.entityManager.setEntityVisible(this.doorRightEntityId, showDoors);
+
+    const bandMinY = minFloor * 4.0 - 1.0;
+    const bandMaxY = (maxFloor + 1) * 4.0 + 1.0;
+    const eleY = this.physics.elevatorY;
+    const elevatorInBand =
+      activeBuilding === 0 &&
+      eleY + 2.8 >= bandMinY &&
+      eleY <= bandMaxY;
+    if (this.elevatorEntityId >= 0) this.entityManager.setEntityVisible(this.elevatorEntityId, elevatorInBand);
+    if (this.elevatorBtnUpEntityId >= 0) this.entityManager.setEntityVisible(this.elevatorBtnUpEntityId, elevatorInBand);
+    if (this.elevatorBtnDownEntityId >= 0) this.entityManager.setEntityVisible(this.elevatorBtnDownEntityId, elevatorInBand);
+
+    for (let i = 0; i < this.physics.moveableObjects.length; i++) {
+      const obj = this.physics.moveableObjects[i];
+      if (obj.entityId < 0) continue;
+      const [ox, oy, oz] = obj.position;
+      const inMainFootprint = Math.abs(ox) <= 20.6 && Math.abs(oz) <= 20.6;
+      const inSecFootprint = Math.abs(ox - 60.0) <= 20.6 && Math.abs(oz) <= 20.6;
+      let propVisible = false;
+      if (activeBuilding === 0 && !inSecFootprint) {
+        propVisible = inMainFootprint
+          ? oy >= bandMinY && oy <= bandMaxY
+          : minFloor <= 1 && oy >= bandMinY && oy <= bandMaxY;
+      } else if (activeBuilding === 1 && inSecFootprint) {
+        propVisible = oy >= bandMinY && oy <= bandMaxY;
+      }
+      this.entityManager.setEntityVisible(obj.entityId, propVisible);
+    }
+
+    const visibleNow = this.entityManager.getVisibleFlagEntityCount();
+    this.stats.smartCullingEnabled = true;
+    this.stats.smartCullMode = 'INTERIOR';
+    this.stats.smartCullBuilding = activeBuilding;
+    this.stats.smartCullFloor = currentFloor;
+    this.stats.smartCullMinFloor = minFloor;
+    this.stats.smartCullMaxFloor = maxFloor;
+    this.stats.smartCulledCount = Math.max(0, totalCount - visibleNow);
   }
 
   async loadCustomGLB(arrayBuffer: ArrayBuffer, fileName = 'custom_model.glb'): Promise<void> {
     if (this.isDeviceLost) return;
-
-    // If inside the main building world, swap the player character seamlessly
-    if (this.currentPreset === 'anarchy') {
-      await this.loadPlayerGLB(arrayBuffer, fileName);
-      return;
-    }
-
-    try {
-      const parsed = GLBLoader.parse(arrayBuffer, { normalizeToHeight: 3.0 });
-      if (parsed.primitives.length === 0) return;
-
-      this.entityManager.clear();
-      this.animController.clear();
-      this.renderer.clearDiffuseAtlas();
-
-      const atlasRects = await this.buildTextureAtlasFromGLB(parsed.textures);
-      const jointOffset = parsed.joints.length > 0 ? this.animController.registerSkeleton(parsed.joints) : 0;
-      for (const clip of parsed.clips) {
-        this.animController.addClip(clip);
-      }
-      if (this.animController.clips.length > 0) {
-        this.animController.playClip(0, true);
-      }
-
-      this.uploadGeometries(parsed.primitives);
-
-      let vOffset = 0;
-      let iOffset = 0;
-      const worldMat = Mat4.create();
-      Mat4.fromTranslation([0, 0, 0], worldMat);
-
-      for (let i = 0; i < parsed.primitives.length; i++) {
-        const prim = parsed.primitives[i];
-        const baseMat = prim.material || {
-          baseColor: [0.8, 0.8, 0.85, 1.0] as [number, number, number, number],
-          emissiveColor: [0, 0, 0, 0] as [number, number, number, number],
-          roughness: 0.4,
-          metallic: 0.2,
-          ao: 1.0,
-          alphaCutoff: 0.5,
-        };
-        const texRect =
-          prim.textureImageIndex !== undefined && prim.textureImageIndex !== null
-            ? atlasRects.get(prim.textureImageIndex)
-            : undefined;
-
-        const matId = this.entityManager.registerMaterial({
-          ...baseMat,
-          flags: texRect ? 2 : 0,
-          atlasRect: texRect,
-        });
-
-        const vCount = Math.floor(prim.positions.length / 3);
-        const meshId = this.entityManager.registerMesh({
-          name: prim.name || `${fileName.replace(/\.[^/.]+$/, '')}_${i}`,
-          firstIndex: iOffset,
-          indexCount: prim.indices.length,
-          baseVertex: vOffset,
-          vertexCount: vCount,
-          boundingRadius: prim.boundingRadius || 5.0,
-          hasSkinning: parsed.hasSkinning,
-          hasMorphTargets: false,
-          morphTargetCount: 0,
-        });
-
-        this.entityManager.addEntity({
-          meshId,
-          materialId: matId,
-          worldMatrix: worldMat,
-          sphereCenter: [0, 1.5, 0, prim.boundingRadius || 5.0],
-          flags: 1,
-          animOffset: jointOffset,
-          name: prim.name || `${fileName.replace(/\.[^/.]+$/, '')}_${i}`,
-        });
-
-        vOffset += vCount;
-        iOffset += prim.indices.length;
-      }
-
-      const device = this.deviceManager.getDevice();
-      this.entityManager.uploadToGPU(device);
-    } catch (err) {
-      console.error('[Load GLB Error]:', err);
-    }
+    await this.loadPlayerGLB(arrayBuffer, fileName);
   }
 
-  spawnProceduralCube(name = 'Procedural_Cube'): number {
-    if (this.isDeviceLost) return -1;
+  spawnProceduralCube(name = 'Moveable_Crate'): number {
+    if (this.isDeviceLost || this.anarchyCrateMeshId < 0 || this.anarchyCrateMatId < 0) return -1;
 
-    const cubeData = ProceduralModels.createCube(1.5);
-    const pbrMat: FlatMaterial = {
-      baseColor: [Math.random() * 0.8 + 0.2, Math.random() * 0.8 + 0.2, Math.random() * 0.8 + 0.2, 1.0],
-      emissiveColor: [0.1, 0.1, 0.1, 0.2],
-      roughness: 0.3,
-      metallic: 0.5,
-      ao: 1.0,
-      alphaCutoff: 0.5,
-    };
-    const matId = this.entityManager.registerMaterial(pbrMat);
-    const meshId = this.entityManager.registerMesh({
-      name,
-      firstIndex: 0,
-      indexCount: cubeData.indices.length,
-      baseVertex: 0,
-      vertexCount: Math.floor(cubeData.positions.length / 3),
-      boundingRadius: cubeData.boundingRadius,
-      hasSkinning: false,
-      hasMorphTargets: false,
-      morphTargetCount: 0,
-    });
-
-    const interleaved = GLBLoader.interleavePrimitive(cubeData);
-    this.renderer.uploadGeometry(interleaved, cubeData.indices);
-
-    const posX = (Math.random() - 0.5) * 10;
-    const posZ = (Math.random() - 0.5) * 10;
+    const p = this.playerController.position;
+    const fwdX = -Math.sin(this.playerController.cameraTheta);
+    const fwdZ = -Math.cos(this.playerController.cameraTheta);
+    const spawnPos: [number, number, number] = [
+      p[0] + fwdX * 2.4,
+      p[1] + 0.65,
+      p[2] + fwdZ * 2.4,
+    ];
     const worldMat = Mat4.create();
-    Mat4.fromTranslation([posX, 1.0, posZ], worldMat);
+    Mat4.fromTranslation(spawnPos, worldMat);
+    const idx = this.physics.moveableObjects.length + 1;
+    const propName = name === 'Procedural_Cube' || name === 'Moveable_Crate' ? `Spawned_Crate_${idx}` : name;
 
     const entityId = this.entityManager.addEntity({
-      meshId,
-      materialId: matId,
+      meshId: this.anarchyCrateMeshId,
+      materialId: this.anarchyCrateMatId,
       worldMatrix: worldMat,
-      sphereCenter: [posX, 1.0, posZ, 2.0],
+      sphereCenter: [spawnPos[0], spawnPos[1], spawnPos[2], 1.2],
       flags: 1,
       animOffset: 0,
-      name,
+      name: propName,
+    });
+    this.physics.addMoveableObject({
+      id: `spawned_${Date.now()}_${idx}`,
+      entityId,
+      name: propName,
+      position: spawnPos,
+      halfExtents: [0.45, 0.45, 0.45],
+      mass: 1.0,
+      restitution: 0.38,
     });
 
     const device = this.deviceManager.getDevice();

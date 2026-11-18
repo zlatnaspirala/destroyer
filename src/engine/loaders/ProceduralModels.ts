@@ -3,397 +3,31 @@
  * Pre-configured with Bone Skinning, Morph Targets, and PBR Materials
  */
 
-import { AnimationClip, MorphTargetData, SkeletonJoint } from '../core/Types';
+import { AnimationClip, SkeletonJoint } from '../core/Types';
 import { ParsedGLBPrimitive } from './GLBLoader';
 import { OBJParser } from './OBJParser';
 import { HUMAN_BODY_OBJ_DATA } from './HumanBodyOBJ';
 import { BVHLoader } from './BVHLoader';
 
+export interface BuildingColliderSpec {
+  id: string;
+  name: string;
+  center: [number, number, number];
+  size: [number, number, number];
+  category: 'wall' | 'floor' | 'stair' | 'prop';
+}
+
+export interface SkyscraperFloorGeometry {
+  floor: number;
+  buildingMesh?: ParsedGLBPrimitive;
+  metalTrimMesh?: ParsedGLBPrimitive;
+  interiorAccentMesh?: ParsedGLBPrimitive;
+  ceilingLightMesh?: ParsedGLBPrimitive;
+  officeMesh?: ParsedGLBPrimitive;
+  windowMesh?: ParsedGLBPrimitive;
+}
+
 export class ProceduralModels {
-  /**
-   * Generates a Skinned Sci-Fi Combat Mech with 4 skeletal joints and animation clip
-   */
-  static createSkinnedMech(): { primitive: ParsedGLBPrimitive; joints: SkeletonJoint[]; clip: AnimationClip } {
-    const vertices: number[] = [];
-    const normals: number[] = [];
-    const uvs: number[] = [];
-    const indices: number[] = [];
-    const jointsData: number[] = [];
-    const weightsData: number[] = [];
-
-    const addBox = (
-      center: [number, number, number],
-      size: [number, number, number],
-      jointIdx: number
-    ) => {
-      const baseIdx = vertices.length / 3;
-      const hx = size[0] * 0.5, hy = size[1] * 0.5, hz = size[2] * 0.5;
-
-      const boxVerts = [
-        // Front
-        -hx, -hy,  hz,   hx, -hy,  hz,   hx,  hy,  hz,  -hx,  hy,  hz,
-        // Back
-        -hx, -hy, -hz,  -hx,  hy, -hz,   hx,  hy, -hz,   hx, -hy, -hz,
-        // Top
-        -hx,  hy, -hz,  -hx,  hy,  hz,   hx,  hy,  hz,   hx,  hy, -hz,
-        // Bottom
-        -hx, -hy, -hz,   hx, -hy, -hz,   hx, -hy,  hz,  -hx, -hy,  hz,
-        // Right
-         hx, -hy, -hz,   hx,  hy, -hz,   hx,  hy,  hz,   hx, -hy,  hz,
-        // Left
-        -hx, -hy, -hz,  -hx, -hy,  hz,  -hx,  hy,  hz,  -hx,  hy, -hz,
-      ];
-
-      const boxNorms = [
-        0, 0, 1,  0, 0, 1,  0, 0, 1,  0, 0, 1,
-        0, 0, -1, 0, 0, -1, 0, 0, -1, 0, 0, -1,
-        0, 1, 0,  0, 1, 0,  0, 1, 0,  0, 1, 0,
-        0, -1, 0, 0, -1, 0, 0, -1, 0, 0, -1, 0,
-        1, 0, 0,  1, 0, 0,  1, 0, 0,  1, 0, 0,
-        -1, 0, 0, -1, 0, 0, -1, 0, 0, -1, 0, 0,
-      ];
-
-      for (let i = 0; i < boxVerts.length; i += 3) {
-        vertices.push(boxVerts[i] + center[0], boxVerts[i + 1] + center[1], boxVerts[i + 2] + center[2]);
-        normals.push(boxNorms[i], boxNorms[i + 1], boxNorms[i + 2]);
-        uvs.push(i % 2, (i / 3) % 2);
-
-        jointsData.push(jointIdx, 0, 0, 0);
-        weightsData.push(1.0, 0.0, 0.0, 0.0);
-      }
-
-      for (let face = 0; face < 6; face++) {
-        const offset = baseIdx + face * 4;
-        indices.push(offset, offset + 1, offset + 2, offset, offset + 2, offset + 3);
-      }
-    };
-
-    // Joint 0: Pelvis & Legs
-    addBox([0, 0.7, 0], [1.3, 0.4, 1.1], 0); // Pelvis core
-    addBox([-0.65, 0.4, 0], [0.35, 0.55, 0.45], 0); // Left thigh
-    addBox([0.65, 0.4, 0], [0.35, 0.55, 0.45], 0); // Right thigh
-    addBox([-0.65, 0.1, 0.1], [0.55, 0.2, 0.85], 0); // Left foot
-    addBox([0.65, 0.1, 0.1], [0.55, 0.2, 0.85], 0); // Right foot
-
-    // Joint 1: Torso / Cockpit & Armor
-    addBox([0, 1.5, 0], [1.7, 1.1, 1.5], 1); // Main cockpit
-    addBox([0, 1.6, 0.6], [1.3, 0.6, 0.4], 1); // Angled chest plate
-    addBox([0, 1.7, 0.82], [0.9, 0.18, 0.12], 1); // Cybernetic visor
-    addBox([-1.15, 1.85, 0], [0.65, 0.4, 0.85], 1); // Left shoulder pauldron
-    addBox([1.15, 1.85, 0], [0.65, 0.4, 0.85], 1); // Right shoulder pauldron
-    addBox([-0.45, 1.75, -0.85], [0.35, 0.7, 0.45], 1); // Left exhaust thruster
-    addBox([0.45, 1.75, -0.85], [0.35, 0.7, 0.45], 1); // Right exhaust thruster
-
-    // Joint 2: Left Heavy Weapon (Rotary Vulcan Cannon)
-    addBox([-1.4, 1.5, 0.2], [0.35, 0.35, 0.6], 2); // Arm actuator
-    addBox([-1.4, 1.45, 0.85], [0.55, 0.55, 0.9], 2); // Gun housing
-    addBox([-1.4, 1.45, 1.55], [0.3, 0.3, 0.85], 2); // Rotary barrels
-    addBox([-1.75, 1.5, 0.75], [0.35, 0.55, 0.5], 2); // Ammo drum
-
-    // Joint 3: Right Heavy Weapon (Plasma Railgun)
-    addBox([1.4, 1.5, 0.2], [0.35, 0.35, 0.6], 3); // Arm actuator
-    addBox([1.4, 1.5, 0.9], [0.5, 0.6, 1.3], 3); // Railgun chassis
-    addBox([1.4, 1.65, 1.75], [0.12, 0.15, 1.1], 3); // Upper particle rail
-    addBox([1.4, 1.35, 1.75], [0.12, 0.15, 1.1], 3); // Lower particle rail
-
-    const joints: SkeletonJoint[] = [
-      {
-        name: 'Pelvis_Root',
-        parentIndex: -1,
-        inverseBindMatrix: new Float32Array([1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  0, 0, 0, 1]),
-        localMatrix: new Float32Array([1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  0, 0, 0, 1]),
-        worldMatrix: new Float32Array(16),
-        initialTranslation: [0, 0, 0],
-      },
-      {
-        name: 'Torso_Upper',
-        parentIndex: 0,
-        inverseBindMatrix: new Float32Array([1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  0, -1.15, 0, 1]),
-        localMatrix: new Float32Array([1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  0, 1.15, 0, 1]),
-        worldMatrix: new Float32Array(16),
-        initialTranslation: [0, 1.15, 0],
-      },
-      {
-        name: 'Arm_Left',
-        parentIndex: 1,
-        inverseBindMatrix: new Float32Array([1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  1.4, -1.5, -0.2, 1]),
-        localMatrix: new Float32Array([1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  -1.4, 0.35, 0.2, 1]),
-        worldMatrix: new Float32Array(16),
-        initialTranslation: [-1.4, 0.35, 0.2],
-      },
-      {
-        name: 'Arm_Right',
-        parentIndex: 1,
-        inverseBindMatrix: new Float32Array([1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  -1.4, -1.5, -0.2, 1]),
-        localMatrix: new Float32Array([1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  1.4, 0.35, 0.2, 1]),
-        worldMatrix: new Float32Array(16),
-        initialTranslation: [1.4, 0.35, 0.2],
-      },
-    ];
-
-    const times = new Float32Array([0.0, 0.8, 1.6, 2.4, 3.2]);
-    const torsoRotations = new Float32Array([
-      0, 0, 0, 1,
-      0, 0.18, 0, 0.983,
-      0, 0, 0, 1,
-      0, -0.18, 0, 0.983,
-      0, 0, 0, 1,
-    ]);
-    const leftArmRotations = new Float32Array([
-      0, 0, 0, 1,
-      0.15, 0, 0, 0.988,
-      0, 0, 0, 1,
-      -0.12, 0, 0, 0.992,
-      0, 0, 0, 1,
-    ]);
-    const rightArmRotations = new Float32Array([
-      0, 0, 0, 1,
-      -0.15, 0, 0, 0.988,
-      0, 0, 0, 1,
-      0.12, 0, 0, 0.992,
-      0, 0, 0, 1,
-    ]);
-
-    const clip: AnimationClip = {
-      name: 'Mech_Combat_Sentry',
-      duration: 3.2,
-      channels: [
-        { targetNode: 1, path: 'rotation', times, values: torsoRotations, interpolation: 'LINEAR' },
-        { targetNode: 2, path: 'rotation', times, values: leftArmRotations, interpolation: 'LINEAR' },
-        { targetNode: 3, path: 'rotation', times, values: rightArmRotations, interpolation: 'LINEAR' },
-      ],
-    };
-
-    const primitive: ParsedGLBPrimitive = {
-      name: 'Combat_Mech_Rig',
-      positions: new Float32Array(vertices),
-      normals: new Float32Array(normals),
-      uvs: new Float32Array(uvs),
-      indices: new Uint32Array(indices),
-      joints: new Uint32Array(jointsData),
-      weights: new Float32Array(weightsData),
-      boundingRadius: 3.2,
-      material: {
-        baseColor: [0.15, 0.45, 0.85, 1.0], // Industrial cobalt blue
-        emissiveColor: [0.0, 0.0, 0.0, 0.0], // Clean metallic body, no washed out glow
-        roughness: 0.3,
-        metallic: 0.8,
-        ao: 1.0,
-        alphaCutoff: 0.5,
-      },
-    };
-
-    return { primitive, joints, clip };
-  }
-
-  /**
-   * Generates a high-tech Sci-Fi Grid Arena Floor
-   */
-  static createArenaFloor(size = 180, divisions = 30): ParsedGLBPrimitive {
-    const half = size * 0.5;
-    const step = size / divisions;
-    const vertexCount = (divisions + 1) * (divisions + 1);
-    const positions = new Float32Array(vertexCount * 3);
-    const normals = new Float32Array(vertexCount * 3);
-    const uvs = new Float32Array(vertexCount * 2);
-    const indices = new Uint32Array(divisions * divisions * 6);
-
-    let vIdx = 0;
-    for (let z = 0; z <= divisions; z++) {
-      for (let x = 0; x <= divisions; x++) {
-        const px = -half + x * step;
-        const pz = -half + z * step;
-        positions[vIdx * 3 + 0] = px;
-        positions[vIdx * 3 + 1] = 0.0;
-        positions[vIdx * 3 + 2] = pz;
-
-        normals[vIdx * 3 + 0] = 0.0;
-        normals[vIdx * 3 + 1] = 1.0;
-        normals[vIdx * 3 + 2] = 0.0;
-
-        uvs[vIdx * 2 + 0] = x * 0.5;
-        uvs[vIdx * 2 + 1] = z * 0.5;
-        vIdx++;
-      }
-    }
-
-    let iIdx = 0;
-    for (let z = 0; z < divisions; z++) {
-      for (let x = 0; x < divisions; x++) {
-        const row1 = z * (divisions + 1);
-        const row2 = (z + 1) * (divisions + 1);
-        indices[iIdx++] = row1 + x;
-        indices[iIdx++] = row2 + x;
-        indices[iIdx++] = row1 + x + 1;
-
-        indices[iIdx++] = row1 + x + 1;
-        indices[iIdx++] = row2 + x;
-        indices[iIdx++] = row2 + x + 1;
-      }
-    }
-
-    return {
-      name: 'Arena_Battle_Floor',
-      positions,
-      normals,
-      uvs,
-      indices,
-      boundingRadius: half * 1.414,
-      material: {
-        baseColor: [0.12, 0.14, 0.18, 1.0],
-        emissiveColor: [0.0, 0.0, 0.0, 0.0],
-        roughness: 0.35,
-        metallic: 0.6,
-        ao: 1.0,
-        alphaCutoff: 0.5,
-      },
-    };
-  }
-
-  /**
-   * Generates a Morphing Sci-Fi Geometric Core with 2 morph targets
-   */
-  static createMorphingCore(): { primitive: ParsedGLBPrimitive } {
-    const t = (1.0 + Math.sqrt(5.0)) / 2.0;
-
-    let initialVerts = [
-      -1,  t,  0,   1,  t,  0,  -1, -t,  0,   1, -t,  0,
-       0, -1,  t,   0,  1,  t,   0, -1, -t,   0,  1, -t,
-       t,  0, -1,   t,  0,  1,  -t,  0, -1,  -t,  0,  1
-    ];
-
-    let initialIndices = [
-      0, 11, 5,   0, 5, 1,   0, 1, 7,   0, 7, 10,  0, 10, 11,
-      1, 5, 9,    5, 11, 4,  11, 10, 2, 10, 7, 6,   7, 1, 8,
-      3, 9, 4,    3, 4, 2,   3, 2, 6,   3, 6, 8,   3, 8, 9,
-      4, 9, 5,    2, 4, 11,  6, 2, 10,  8, 6, 7,   9, 8, 1
-    ];
-
-    for (let i = 0; i < initialVerts.length; i += 3) {
-      const len = Math.hypot(initialVerts[i], initialVerts[i + 1], initialVerts[i + 2]);
-      initialVerts[i] /= len;
-      initialVerts[i + 1] /= len;
-      initialVerts[i + 2] /= len;
-    }
-
-    const posCount = initialVerts.length / 3;
-    const positions = new Float32Array(initialVerts);
-    const normals = new Float32Array(initialVerts);
-    const uvs = new Float32Array(posCount * 2);
-    for (let i = 0; i < posCount; i++) {
-      uvs[i * 2] = (positions[i * 3] + 1) * 0.5;
-      uvs[i * 2 + 1] = (positions[i * 3 + 1] + 1) * 0.5;
-    }
-
-    const morphDelta0 = new Float32Array(positions.length);
-    for (let i = 0; i < posCount; i++) {
-      const factor = (i % 2 === 0) ? 1.4 : -0.3;
-      morphDelta0[i * 3] = positions[i * 3] * factor;
-      morphDelta0[i * 3 + 1] = positions[i * 3 + 1] * factor;
-      morphDelta0[i * 3 + 2] = positions[i * 3 + 2] * factor;
-    }
-
-    const morphDelta1 = new Float32Array(positions.length);
-    for (let i = 0; i < posCount; i++) {
-      morphDelta1[i * 3] = -positions[i * 3 + 2] * 0.7;
-      morphDelta1[i * 3 + 1] = Math.sin(positions[i * 3] * 4.0) * 0.6;
-      morphDelta1[i * 3 + 2] = positions[i * 3] * 0.7;
-    }
-
-    const morphTargets: MorphTargetData[] = [
-      { name: 'Spike_Expansion', deltaPositions: morphDelta0 },
-      { name: 'Twist_Deformation', deltaPositions: morphDelta1 },
-    ];
-
-    const primitive: ParsedGLBPrimitive = {
-      name: 'Morphing_Quantum_Core',
-      positions,
-      normals,
-      uvs,
-      indices: new Uint32Array(initialIndices),
-      morphTargets,
-      boundingRadius: 2.5,
-      material: {
-        baseColor: [0.95, 0.45, 0.15, 1.0], // Vibrant molten orange
-        emissiveColor: [0.8, 0.3, 0.05, 0.5],
-        roughness: 0.18,
-        metallic: 0.92,
-        ao: 1.0,
-        alphaCutoff: 0.5
-      }
-    };
-
-    return { primitive };
-  }
-
-  /**
-   * Terrain grid for harmonic wave simulation
-   */
-  static createTerrainGrid(resolution = 48, size = 30): ParsedGLBPrimitive {
-    const vertexCount = (resolution + 1) * (resolution + 1);
-    const positions = new Float32Array(vertexCount * 3);
-    const normals = new Float32Array(vertexCount * 3);
-    const uvs = new Float32Array(vertexCount * 2);
-    const indices = new Uint32Array(resolution * resolution * 6);
-
-    const step = size / resolution;
-    const halfSize = size * 0.5;
-
-    let vIdx = 0;
-    for (let z = 0; z <= resolution; z++) {
-      for (let x = 0; x <= resolution; x++) {
-        const px = x * step - halfSize;
-        const pz = z * step - halfSize;
-        const py = Math.sin(px * 0.3) * Math.cos(pz * 0.3) * 0.8;
-
-        positions[vIdx * 3] = px;
-        positions[vIdx * 3 + 1] = py;
-        positions[vIdx * 3 + 2] = pz;
-
-        normals[vIdx * 3] = 0;
-        normals[vIdx * 3 + 1] = 1;
-        normals[vIdx * 3 + 2] = 0;
-
-        uvs[vIdx * 2] = x / resolution;
-        uvs[vIdx * 2 + 1] = z / resolution;
-
-        vIdx++;
-      }
-    }
-
-    let iIdx = 0;
-    for (let z = 0; z < resolution; z++) {
-      for (let x = 0; x < resolution; x++) {
-        const row1 = z * (resolution + 1);
-        const row2 = (z + 1) * (resolution + 1);
-
-        indices[iIdx++] = row1 + x;
-        indices[iIdx++] = row2 + x;
-        indices[iIdx++] = row1 + x + 1;
-
-        indices[iIdx++] = row1 + x + 1;
-        indices[iIdx++] = row2 + x;
-        indices[iIdx++] = row2 + x + 1;
-      }
-    }
-
-    return {
-      name: 'Harmonic_Wave_Grid',
-      positions,
-      normals,
-      uvs,
-      indices,
-      boundingRadius: size * 0.75,
-      material: {
-        baseColor: [0.15, 0.55, 0.75, 1.0],
-        emissiveColor: [0.05, 0.2, 0.4, 0.3],
-        roughness: 0.15,
-        metallic: 0.4,
-        ao: 1.0,
-        alphaCutoff: 0.5
-      }
-    };
-  }
 
   static createCube(size = 1.5): ParsedGLBPrimitive {
     const positions = new Float32Array([
@@ -447,6 +81,99 @@ export class ProceduralModels {
         ao: 1.0,
         alphaCutoff: 0.5
       }
+    };
+  }
+
+  /**
+   * Generates a low-poly reinforced cargo crate mesh centered at [0,0,0] with full side size (default 0.9m)
+   */
+  static createPhysicsCrate(size = 0.9): ParsedGLBPrimitive {
+    const prim = ProceduralModels.createCube(size * 0.5);
+    return {
+      ...prim,
+      name: 'Moveable_Physics_Crate',
+      boundingRadius: size * 0.9,
+      material: {
+        baseColor: [0.76, 0.48, 0.20, 1.0],
+        emissiveColor: [0.06, 0.03, 0.0, 0.2],
+        roughness: 0.62,
+        metallic: 0.18,
+        ao: 1.0,
+        alphaCutoff: 0.5,
+      },
+    };
+  }
+
+  /**
+   * Generates a low-poly industrial drum/barrel mesh centered at [0,0,0]
+   */
+  static createPhysicsBarrel(radius = 0.38, height = 1.05, segments = 12): ParsedGLBPrimitive {
+    const positions: number[] = [];
+    const normals: number[] = [];
+    const uvs: number[] = [];
+    const indices: number[] = [];
+    const halfH = height * 0.5;
+
+    // Side faces
+    for (let i = 0; i <= segments; i++) {
+      const a = (i / segments) * Math.PI * 2;
+      const nx = Math.cos(a);
+      const nz = Math.sin(a);
+      const px = nx * radius;
+      const pz = nz * radius;
+
+      positions.push(px, -halfH, pz, px, halfH, pz);
+      normals.push(nx, 0, nz, nx, 0, nz);
+      uvs.push(i / segments, 0, i / segments, 1);
+    }
+    for (let i = 0; i < segments; i++) {
+      const b0 = i * 2;
+      const t0 = b0 + 1;
+      const b1 = b0 + 2;
+      const t1 = b0 + 3;
+      indices.push(b0, b1, t0, t0, b1, t1);
+    }
+
+    // Top & bottom caps
+    const addCap = (y: number, ny: number, flip: boolean) => {
+      const centerIdx = positions.length / 3;
+      positions.push(0, y, 0);
+      normals.push(0, ny, 0);
+      uvs.push(0.5, 0.5);
+      for (let i = 0; i <= segments; i++) {
+        const a = (i / segments) * Math.PI * 2;
+        positions.push(Math.cos(a) * radius, y, Math.sin(a) * radius);
+        normals.push(0, ny, 0);
+        uvs.push(0.5 + 0.5 * Math.cos(a), 0.5 + 0.5 * Math.sin(a));
+      }
+      for (let i = 0; i < segments; i++) {
+        const c1 = centerIdx + 1 + i;
+        const c2 = centerIdx + 2 + i;
+        if (flip) {
+          indices.push(centerIdx, c1, c2);
+        } else {
+          indices.push(centerIdx, c2, c1);
+        }
+      }
+    };
+    addCap(halfH, 1, false);
+    addCap(-halfH, -1, true);
+
+    return {
+      name: 'Moveable_Physics_Barrel',
+      positions: new Float32Array(positions),
+      normals: new Float32Array(normals),
+      uvs: new Float32Array(uvs),
+      indices: new Uint32Array(indices),
+      boundingRadius: Math.hypot(radius, halfH),
+      material: {
+        baseColor: [0.16, 0.62, 0.82, 1.0],
+        emissiveColor: [0.02, 0.08, 0.14, 0.3],
+        roughness: 0.34,
+        metallic: 0.72,
+        ao: 1.0,
+        alphaCutoff: 0.5,
+      },
     };
   }
 
@@ -890,161 +617,536 @@ export class ProceduralModels {
     return ProceduralModels.combineBoxes(boxes, name);
   }
 
+  private static cachedSkyscraperColliderSpecs: BuildingColliderSpec[] | null = null;
+
   /**
-   * Generates a 10-story skyscraper building with rooms, offices, windows, and furniture
-   * Refined for accessibility with clear corridors and robust floor coverage.
+   * Builds the shared architectural box layout AND matching physics colliders
+   * for the modular 10-story business building (single source of truth).
+   */
+  private static buildSkyscraperBlueprint(): {
+    floors: {
+      floor: number;
+      buildingBoxes: { center: [number, number, number]; size: [number, number, number] }[];
+      metalTrimBoxes: { center: [number, number, number]; size: [number, number, number] }[];
+      interiorAccentBoxes: { center: [number, number, number]; size: [number, number, number] }[];
+      ceilingLightBoxes: { center: [number, number, number]; size: [number, number, number] }[];
+      officeBoxes: { center: [number, number, number]; size: [number, number, number] }[];
+      windowBoxes: { center: [number, number, number]; size: [number, number, number] }[];
+    }[];
+    colliders: BuildingColliderSpec[];
+  } {
+    type BoxSpec = { center: [number, number, number]; size: [number, number, number] };
+    const totalFloors = 10;
+    const floorHeight = 4.0;
+
+    // 11 vertical story buckets: 0..9 interior stories + 10 rooftop slab/parapet/HVAC/helipad
+    const floors = Array.from({ length: totalFloors + 1 }, (_, floor) => ({
+      floor,
+      buildingBoxes: [] as BoxSpec[],
+      metalTrimBoxes: [] as BoxSpec[],
+      interiorAccentBoxes: [] as BoxSpec[],
+      ceilingLightBoxes: [] as BoxSpec[],
+      officeBoxes: [] as BoxSpec[],
+      windowBoxes: [] as BoxSpec[],
+    }));
+    const colliders: BuildingColliderSpec[] = [];
+
+    const addPart = (
+      visualList: BoxSpec[] | null,
+      colliderCategory: BuildingColliderSpec['category'] | null,
+      id: string,
+      name: string,
+      center: [number, number, number],
+      size: [number, number, number]
+    ) => {
+      if (visualList) {
+        visualList.push({ center, size });
+      }
+      if (colliderCategory) {
+        colliders.push({ id, name, center, size, category: colliderCategory });
+      }
+    };
+
+    // 0. Ground Entrance Plaza Apron & Portico Canopy (Floor 0)
+    const f0 = floors[0];
+    addPart(f0.buildingBoxes, 'floor', 'plaza_apron', 'Entrance Plaza Apron', [0, 0.04, 21.8], [6.0, 0.04, 1.8]);
+    addPart(f0.metalTrimBoxes, 'wall', 'portico_canopy', 'Entrance Canopy', [0, 3.85, 22.0], [5.4, 0.14, 1.8]);
+    addPart(f0.metalTrimBoxes, 'wall', 'portico_col_l', 'Portico Pillar L', [-4.8, 1.9, 23.2], [0.22, 1.9, 0.22]);
+    addPart(f0.metalTrimBoxes, 'wall', 'portico_col_r', 'Portico Pillar R', [4.8, 1.9, 23.2], [0.22, 1.9, 0.22]);
+    f0.ceilingLightBoxes.push({ center: [0, 3.69, 22.0], size: [3.8, 0.03, 0.2] });
+
+    // Helper for segmented facade wall with real recessed window bays + mullions
+    const addWindowedFacadeWall = (
+      floorIdx: number,
+      side: 'rear' | 'left' | 'right',
+      fixedCoord: number
+    ) => {
+      const layer = floors[floorIdx];
+      const baseY = floorIdx * floorHeight;
+      const wallY = baseY + 2.0;
+      const isZWall = side === 'rear';
+      const makeCenter = (along: number, y: number): [number, number, number] =>
+        isZWall ? [along, y, fixedCoord] : [fixedCoord, y, along];
+      const makeSize = (halfAlong: number, halfY: number, halfThick: number): [number, number, number] =>
+        isZWall ? [halfAlong, halfY, halfThick] : [halfThick, halfY, halfAlong];
+
+      // Continuous sill & lintel header
+      addPart(
+        layer.buildingBoxes,
+        'wall',
+        `ext_${side}_sill_${floorIdx}`,
+        `F${floorIdx} ${side} Sill`,
+        makeCenter(0, baseY + 0.475),
+        makeSize(20.4, 0.475, 0.4)
+      );
+      addPart(
+        layer.buildingBoxes,
+        'wall',
+        `ext_${side}_lintel_${floorIdx}`,
+        `F${floorIdx} ${side} Lintel`,
+        makeCenter(0, baseY + 3.625),
+        makeSize(20.4, 0.375, 0.4)
+      );
+
+      // 5 vertical structural piers framing 4 window bays at [-15, -5, 5, 15]
+      const piers: { pos: number; halfW: number }[] = [
+        { pos: -19.4, halfW: 1.0 },
+        { pos: -10.0, halfW: 1.6 },
+        { pos: 0.0, halfW: 1.6 },
+        { pos: 10.0, halfW: 1.6 },
+        { pos: 19.4, halfW: 1.0 },
+      ];
+      for (let pi = 0; pi < piers.length; pi++) {
+        const p = piers[pi];
+        addPart(
+          layer.buildingBoxes,
+          'wall',
+          `ext_${side}_pier_${floorIdx}_${pi}`,
+          `F${floorIdx} ${side} Pier ${pi}`,
+          makeCenter(p.pos, baseY + 2.1),
+          makeSize(p.halfW, 1.15, 0.4)
+        );
+        // Exterior vertical curtain fin on intermediate piers
+        if (pi >= 1 && pi <= 3) {
+          const finOffset = fixedCoord < 0 ? fixedCoord - 0.46 : fixedCoord + 0.46;
+          const finCenter: [number, number, number] = isZWall
+            ? [p.pos, wallY, finOffset]
+            : [finOffset, wallY, p.pos];
+          addPart(layer.metalTrimBoxes, null, `fin_${side}_${floorIdx}_${pi}`, '', finCenter, makeSize(0.14, 2.0, 0.08));
+        }
+      }
+
+      // 4 recessed glass curtain bays with dark aluminum frames & center mullions
+      const bayCenters = [-15, -5, 5, 15];
+      for (let bi = 0; bi < bayCenters.length; bi++) {
+        const w = bayCenters[bi];
+        addPart(
+          layer.windowBoxes,
+          'wall',
+          `win_${side}_${floorIdx}_${bi}`,
+          `F${floorIdx} ${side} Glass ${bi}`,
+          makeCenter(w, baseY + 2.1),
+          makeSize(3.4, 1.15, 0.08)
+        );
+        // Frame rails + vertical mullions (flush within bay aperture)
+        layer.metalTrimBoxes.push({ center: makeCenter(w, baseY + 0.99), size: makeSize(3.4, 0.05, 0.14) });
+        layer.metalTrimBoxes.push({ center: makeCenter(w, baseY + 3.21), size: makeSize(3.4, 0.05, 0.14) });
+        layer.metalTrimBoxes.push({ center: makeCenter(w, baseY + 2.1), size: makeSize(0.07, 1.15, 0.14) });
+        layer.metalTrimBoxes.push({ center: makeCenter(w - 3.35, baseY + 2.1), size: makeSize(0.06, 1.15, 0.14) });
+        layer.metalTrimBoxes.push({ center: makeCenter(w + 3.35, baseY + 2.1), size: makeSize(0.06, 1.15, 0.14) });
+      }
+    };
+
+    // 1. Build 10 Floors
+    for (let k = 0; k < totalFloors; k++) {
+      const layer = floors[k];
+      const baseY = k * floorHeight;
+      const wallY = baseY + 2.0;
+
+      // EXTERIOR FACADE WALLS (Rear, Left, Right with recessed windows)
+      addWindowedFacadeWall(k, 'rear', -20);
+      addWindowedFacadeWall(k, 'left', -20);
+      addWindowedFacadeWall(k, 'right', 20);
+
+      // FRONT FACADE WALL (Z = +20, with entrance opening at k=0 and sealed curtain bay at k>=1)
+      // Left wing [-20.4..-4.0] and Right wing [4.0..20.4]
+      for (const sideSign of [-1, 1] as const) {
+        const tag = sideSign < 0 ? 'fl' : 'fr';
+        addPart(
+          layer.buildingBoxes,
+          'wall',
+          `ext_${tag}_sill_${k}`,
+          `F${k} Front Sill`,
+          [sideSign * 12.2, baseY + 0.475, 20],
+          [8.2, 0.475, 0.4]
+        );
+        addPart(
+          layer.buildingBoxes,
+          'wall',
+          `ext_${tag}_lintel_${k}`,
+          `F${k} Front Lintel`,
+          [sideSign * 12.2, baseY + 3.625, 20],
+          [8.2, 0.375, 0.4]
+        );
+        // Piers along wing
+        addPart(
+          layer.buildingBoxes,
+          'wall',
+          `ext_${tag}_pier_outer_${k}`,
+          `F${k} Front Pier Outer`,
+          [sideSign * 19.4, baseY + 2.1, 20],
+          [1.0, 1.15, 0.4]
+        );
+        addPart(
+          layer.buildingBoxes,
+          'wall',
+          `ext_${tag}_pier_mid_${k}`,
+          `F${k} Front Pier Mid`,
+          [sideSign * 10.0, baseY + 2.1, 20],
+          [1.6, 1.15, 0.4]
+        );
+        addPart(
+          layer.buildingBoxes,
+          'wall',
+          `ext_${tag}_pier_door_${k}`,
+          `F${k} Front Pier Door`,
+          [sideSign * 4.8, baseY + 2.1, 20],
+          [0.8, 1.15, 0.4]
+        );
+        layer.metalTrimBoxes.push({ center: [sideSign * 10.0, wallY, 20.46], size: [0.14, 2.0, 0.08] });
+
+        // Outer bay window [+-15.0]
+        addPart(
+          layer.windowBoxes,
+          'wall',
+          `win_${tag}_outer_${k}`,
+          `F${k} Front Glass Outer`,
+          [sideSign * 15.0, baseY + 2.1, 20],
+          [3.4, 1.15, 0.08]
+        );
+        layer.metalTrimBoxes.push({ center: [sideSign * 15.0, baseY + 0.99, 20], size: [3.4, 0.05, 0.14] });
+        layer.metalTrimBoxes.push({ center: [sideSign * 15.0, baseY + 3.21, 20], size: [3.4, 0.05, 0.14] });
+        layer.metalTrimBoxes.push({ center: [sideSign * 15.0, baseY + 2.1, 20], size: [0.07, 1.15, 0.14] });
+
+        // Inner bay window [+-7.0, halfW=1.4]
+        addPart(
+          layer.windowBoxes,
+          'wall',
+          `win_${tag}_inner_${k}`,
+          `F${k} Front Glass Inner`,
+          [sideSign * 7.0, baseY + 2.1, 20],
+          [1.4, 1.15, 0.08]
+        );
+        layer.metalTrimBoxes.push({ center: [sideSign * 7.0, baseY + 0.99, 20], size: [1.4, 0.05, 0.14] });
+        layer.metalTrimBoxes.push({ center: [sideSign * 7.0, baseY + 3.21, 20], size: [1.4, 0.05, 0.14] });
+        layer.metalTrimBoxes.push({ center: [sideSign * 7.0, baseY + 2.1, 20], size: [0.07, 1.15, 0.14] });
+      }
+
+      // Front center header [X = -4..4, Y = 2.4..4.0]
+      addPart(layer.buildingBoxes, 'wall', `wall_arch_${k}`, `F${k} Front Arch`, [0, baseY + 3.2, 20], [4.0, 0.8, 0.4]);
+
+      if (k === 0) {
+        // Ground floor entrance side jambs leaving [-3.85..3.85] clear for sliding doors / walkway
+        addPart(layer.metalTrimBoxes, 'wall', 'ent_jamb_l', 'Entrance Jamb L', [-3.92, baseY + 1.2, 20], [0.08, 1.2, 0.42]);
+        addPart(layer.metalTrimBoxes, 'wall', 'ent_jamb_r', 'Entrance Jamb R', [3.92, baseY + 1.2, 20], [0.08, 1.2, 0.42]);
+      } else {
+        // Upper floors k=1..9: sealed front center curtain bay (no open 8m drop hole!)
+        addPart(layer.buildingBoxes, 'wall', `wall_f_center_sill_${k}`, `F${k} Center Sill`, [0, baseY + 0.475, 20], [4.0, 0.475, 0.4]);
+        addPart(layer.windowBoxes, 'wall', `win_f_center_${k}`, `F${k} Center Glass`, [0, baseY + 1.675, 20], [4.0, 0.725, 0.08]);
+        layer.metalTrimBoxes.push({ center: [0, baseY + 0.99, 20], size: [4.0, 0.05, 0.14] });
+        layer.metalTrimBoxes.push({ center: [0, baseY + 2.36, 20], size: [4.0, 0.05, 0.14] });
+        layer.metalTrimBoxes.push({ center: [-1.5, baseY + 1.675, 20], size: [0.07, 0.725, 0.14] });
+        layer.metalTrimBoxes.push({ center: [1.5, baseY + 1.675, 20], size: [0.07, 0.725, 0.14] });
+      }
+
+      // 4 Exterior Corner Pilasters & Horizontal Spandrel Trim Bands
+      for (const sx of [-1, 1] as const) {
+        for (const sz of [-1, 1] as const) {
+          addPart(
+            layer.metalTrimBoxes,
+            'wall',
+            `corner_pil_${k}_${sx}_${sz}`,
+            `F${k} Corner Pilaster`,
+            [sx * 20.15, wallY, sz * 20.15],
+            [0.45, 2.0, 0.45]
+          );
+        }
+      }
+      if (k > 0) {
+        // Horizontal architectural cornice band around floor line Y = k*4
+        layer.metalTrimBoxes.push({ center: [0, baseY, -20.46], size: [20.55, 0.12, 0.08] });
+        layer.metalTrimBoxes.push({ center: [0, baseY, 20.46], size: [20.55, 0.12, 0.08] });
+        layer.metalTrimBoxes.push({ center: [-20.46, baseY, 0], size: [0.08, 0.12, 20.55] });
+        layer.metalTrimBoxes.push({ center: [20.46, baseY, 0], size: [0.08, 0.12, 20.55] });
+      }
+
+      // CENTRAL CORE PARTITIONS (Housing circulation, 6m doorways at Z=-5 and Z=15)
+      addPart(layer.buildingBoxes, 'wall', `core_bl_${k}`, `F${k} Core BL`, [-5, wallY, -5], [2.0, 2.0, 0.22]);
+      addPart(layer.buildingBoxes, 'wall', `core_br_${k}`, `F${k} Core BR`, [5, wallY, -5], [2.0, 2.0, 0.22]);
+      addPart(layer.buildingBoxes, 'wall', `core_fl_${k}`, `F${k} Core FL`, [-5, wallY, 15], [2.0, 2.0, 0.22]);
+      addPart(layer.buildingBoxes, 'wall', `core_fr_${k}`, `F${k} Core FR`, [5, wallY, 15], [2.0, 2.0, 0.22]);
+      addPart(layer.buildingBoxes, 'wall', `core_ws_${k}`, `F${k} Core W`, [-7, wallY, 10], [0.22, 2.0, 5.22]);
+      addPart(layer.buildingBoxes, 'wall', `core_es_${k}`, `F${k} Core E`, [7, wallY, 5], [0.22, 2.0, 10.22]);
+
+      // Core Doorway Headers & Slim Steel Jambs (leaves 5.76m wide doorways clear)
+      for (const doorZ of [-5, 15]) {
+        const tag = doorZ < 0 ? 'n' : 's';
+        addPart(layer.buildingBoxes, 'wall', `core_hdr_${tag}_${k}`, `F${k} Core Header ${tag}`, [0, baseY + 3.4, doorZ], [3.0, 0.6, 0.22]);
+        addPart(layer.metalTrimBoxes, 'wall', `core_jamb_l_${tag}_${k}`, `F${k} Jamb L`, [-2.96, baseY + 1.4, doorZ], [0.08, 1.4, 0.25]);
+        addPart(layer.metalTrimBoxes, 'wall', `core_jamb_r_${tag}_${k}`, `F${k} Jamb R`, [2.96, baseY + 1.4, doorZ], [0.08, 1.4, 0.25]);
+      }
+
+      // TENANT DIVIDERS
+      addPart(layer.buildingBoxes, 'wall', `div_nw_${k}`, `F${k} Div NW`, [-13, wallY, -10], [7.0, 2.0, 0.22]);
+      addPart(layer.buildingBoxes, 'wall', `div_ne_${k}`, `F${k} Div NE`, [13, wallY, -10], [7.0, 2.0, 0.22]);
+      addPart(layer.buildingBoxes, 'wall', `div_sw_${k}`, `F${k} Div SW`, [-15, wallY, 10], [5.0, 2.0, 0.22]);
+
+      // INTERIOR STRUCTURAL COLUMNS
+      const innerCols: [number, number][] = [[-7.0, -15.0], [7.0, -15.0], [-7.0, 17.5], [7.0, 17.5]];
+      for (let ci = 0; ci < innerCols.length; ci++) {
+        const [cx, cz] = innerCols[ci];
+        addPart(layer.interiorAccentBoxes, 'wall', `int_col_${k}_${ci}`, `F${k} Column ${ci}`, [cx, wallY, cz], [0.32, 2.0, 0.32]);
+        layer.metalTrimBoxes.push({ center: [cx, baseY + 0.08, cz], size: [0.36, 0.08, 0.36] });
+        layer.metalTrimBoxes.push({ center: [cx, baseY + 3.92, cz], size: [0.36, 0.08, 0.36] });
+      }
+
+      // ELEVATOR CALL PANEL BACKING & SHAFT DOORWAY SURROUND
+      addPart(layer.metalTrimBoxes, 'prop', `ele_panel_${k}`, `F${k} Elevator Panel`, [11.24, baseY + 1.5, 9.0], [0.08, 0.55, 0.24]);
+      addPart(layer.buildingBoxes, 'wall', `ele_hdr_${k}`, `F${k} Elevator Header`, [14.0, baseY + 3.45, 12.6], [2.4, 0.55, 0.18]);
+      layer.metalTrimBoxes.push({ center: [14.0, baseY + 3.85, 7.4], size: [2.4, 0.15, 0.15] });
+
+      // OFFICE FURNITURE (Corner Executive Suites + Lounge + Filing Cabinets)
+      const officePositions: [number, number][] = [[-17, -16], [17, -16], [-17, 16], [17, 16]];
+      for (let i = 0; i < officePositions.length; i++) {
+        const [oxp, ozp] = officePositions[i];
+        const deskY = baseY + 0.75;
+        addPart(layer.officeBoxes, 'prop', `desk_${k}_${i}`, `F${k} Desk ${i}`, [oxp, deskY, ozp], [2.0, 0.1, 1.0]);
+        addPart(layer.metalTrimBoxes, 'prop', `desk_leg_l_${k}_${i}`, `F${k} Desk Leg L`, [oxp - 1.75, baseY + 0.325, ozp], [0.22, 0.325, 0.85]);
+        addPart(layer.metalTrimBoxes, 'prop', `desk_leg_r_${k}_${i}`, `F${k} Desk Leg R`, [oxp + 1.75, baseY + 0.325, ozp], [0.22, 0.325, 0.85]);
+        addPart(layer.officeBoxes, 'prop', `chair_${k}_${i}`, `F${k} Chair ${i}`, [oxp, baseY + 0.5, ozp + 1.2], [0.6, 0.1, 0.6]);
+        addPart(layer.interiorAccentBoxes, 'prop', `chair_back_${k}_${i}`, `F${k} Chair Back`, [oxp, baseY + 0.85, ozp + 1.72], [0.55, 0.32, 0.08]);
+        addPart(layer.officeBoxes, 'prop', `mon_${k}_${i}`, `F${k} Monitor`, [oxp, deskY + 0.4, ozp - 0.3], [0.8, 0.45, 0.06]);
+      }
+
+      // Reception counter on Floor 0; waiting bench on Floors 1..9
+      if (k === 0) {
+        addPart(layer.interiorAccentBoxes, 'prop', 'lobby_rec_base', 'Lobby Reception Base', [0, 0.52, 6.0], [1.8, 0.52, 0.55]);
+        addPart(layer.officeBoxes, 'prop', 'lobby_rec_top', 'Lobby Reception Counter', [0, 1.09, 6.0], [1.9, 0.05, 0.65]);
+      } else {
+        addPart(layer.interiorAccentBoxes, 'prop', `atrium_bench_${k}`, `F${k} Atrium Bench`, [0, baseY + 0.25, 5.0], [1.6, 0.25, 0.5]);
+      }
+
+      // North Atrium Worktable + Filing Cabinets
+      addPart(layer.officeBoxes, 'prop', `north_tbl_${k}`, `F${k} North Table`, [0, baseY + 0.38, -14.5], [2.0, 0.38, 0.75]);
+      addPart(layer.metalTrimBoxes, 'prop', `cab_w_${k}`, `F${k} Cabinet W`, [-19.1, baseY + 0.9, -12.0], [0.45, 0.9, 1.1]);
+      addPart(layer.metalTrimBoxes, 'prop', `cab_e_${k}`, `F${k} Cabinet E`, [19.1, baseY + 0.9, -12.0], [0.45, 0.9, 1.1]);
+
+      // STAIRCASE (X=-12, Z=7.0 -> 0.25) + Side Safety Stringers/Curbs
+      const numSteps = 10;
+      const stepRise = floorHeight / numSteps;
+      const startZ = 7.0;
+      for (let i = 0; i < numSteps; i++) {
+        const stepTopY = baseY + (i + 1) * stepRise;
+        const stepZ = startZ - i * 0.75;
+        addPart(
+          layer.buildingBoxes,
+          'stair',
+          `stair_${k}_${i}`,
+          `F${k} Step ${i}`,
+          [-12.0, stepTopY - stepRise * 0.5, stepZ],
+          [2.2, stepRise * 0.5, 0.375]
+        );
+        addPart(
+          layer.metalTrimBoxes,
+          'wall',
+          `stair_rail_l_${k}_${i}`,
+          `F${k} Stair Rail L ${i}`,
+          [-14.25, stepTopY + 0.45, stepZ],
+          [0.07, 0.45, 0.375]
+        );
+        addPart(
+          layer.metalTrimBoxes,
+          'wall',
+          `stair_rail_r_${k}_${i}`,
+          `F${k} Stair Rail R ${i}`,
+          [-9.75, stepTopY + 0.45, stepZ],
+          [0.07, 0.45, 0.375]
+        );
+      }
+
+      // ELEVATOR SHAFT GUIDE COLUMNS per floor k (seamless vertical coverage 0..40, culled per floor)
+      const shaftCols: [number, number][] = [
+        [11.4, 7.4],
+        [16.6, 7.4],
+        [11.4, 12.6],
+        [16.6, 12.6],
+      ];
+      for (let i = 0; i < shaftCols.length; i++) {
+        const [sx, sz] = shaftCols[i];
+        addPart(
+          layer.metalTrimBoxes,
+          'wall',
+          `ele_col_${k}_${i}`,
+          `F${k} Elevator Shaft Column ${i}`,
+          [sx, baseY + 2.0, sz],
+          [0.2, 2.0, 0.2]
+        );
+      }
+
+      // CEILING LINEAR LED LIGHT STRIPS (Y = baseY + 3.88, uncollided high above head)
+      layer.ceilingLightBoxes.push({ center: [0, baseY + 3.88, 1.0], size: [0.2, 0.04, 2.8] });
+      layer.ceilingLightBoxes.push({ center: [0, baseY + 3.88, 10.5], size: [0.2, 0.04, 2.6] });
+      layer.ceilingLightBoxes.push({ center: [14.0, baseY + 3.88, 16.5], size: [2.4, 0.04, 0.2] });
+      layer.ceilingLightBoxes.push({ center: [-14.0, baseY + 3.88, -15.0], size: [2.4, 0.04, 0.2] });
+      layer.ceilingLightBoxes.push({ center: [14.0, baseY + 3.88, -15.0], size: [2.4, 0.04, 0.2] });
+      layer.ceilingLightBoxes.push({ center: [-14.0, baseY + 3.88, 15.5], size: [2.4, 0.04, 0.2] });
+      layer.ceilingLightBoxes.push({ center: [14.0, baseY + 3.88, 15.5], size: [2.4, 0.04, 0.2] });
+    }
+
+    // 2. UPPER FLOOR SLABS (Zero gaps, zero overlaps, clean stair opening X=[-14.2,-9.8], Z=[0,7.5])
+    // Assigned to floor k (for k = 1..10): floor k's floor slab = floor (k-1)'s ceiling!
+    for (let k = 1; k <= totalFloors; k++) {
+      const layer = floors[k];
+      const slabY = k * floorHeight - 0.05;
+      addPart(layer.buildingBoxes, 'floor', `f_slab_${k}_N`, `F${k} Slab North`, [0, slabY, -10.5], [20.0, 0.05, 9.5]);
+      addPart(layer.buildingBoxes, 'floor', `f_slab_${k}_S`, `F${k} Slab South`, [0, slabY, 17.5], [20.0, 0.05, 2.5]);
+      addPart(layer.buildingBoxes, 'floor', `f_slab_${k}_W1`, `F${k} Slab West 1`, [-17.1, slabY, 3.25], [2.9, 0.05, 4.25]);
+      addPart(layer.buildingBoxes, 'floor', `f_slab_${k}_W2`, `F${k} Slab West 2`, [-12.0, slabY, -0.5], [2.2, 0.05, 0.5]);
+      addPart(layer.buildingBoxes, 'floor', `f_slab_${k}_W3`, `F${k} Slab West 3`, [-8.4, slabY, 3.25], [1.4, 0.05, 4.25]);
+      addPart(layer.buildingBoxes, 'floor', `f_slab_${k}_EC`, `F${k} Slab EastCenter`, [6.5, slabY, 3.25], [13.5, 0.05, 4.25]);
+      addPart(layer.buildingBoxes, 'floor', `f_slab_${k}_C2`, `F${k} Slab Center 2`, [0, slabY, 11.25], [20.0, 0.05, 3.75]);
+
+      // Stairwell Side Balustrades on floors 1..9 (keeps Z=7.7 stair entrance clear!)
+      if (k < totalFloors) {
+        addPart(layer.metalTrimBoxes, 'wall', `sw_rail_w_${k}`, `F${k} Stairwell Rail W`, [-14.25, k * floorHeight + 0.55, 3.8], [0.08, 0.55, 3.9]);
+        addPart(layer.metalTrimBoxes, 'wall', `sw_rail_e_${k}`, `F${k} Stairwell Rail E`, [-9.75, k * floorHeight + 0.55, 3.8], [0.08, 0.55, 3.9]);
+      }
+    }
+
+    // 3. ROOFTOP PARAPET, STAIR BULKHEAD & MECHANICAL DETAILS (Floor 10, Y = 40.0+)
+    const roofLayer = floors[totalFloors];
+    const roofY = totalFloors * floorHeight;
+    addPart(roofLayer.buildingBoxes, 'wall', 'roof_para_n', 'Roof Parapet N', [0, roofY + 0.575, -20], [20.4, 0.575, 0.35]);
+    addPart(roofLayer.buildingBoxes, 'wall', 'roof_para_s', 'Roof Parapet S', [0, roofY + 0.575, 20], [20.4, 0.575, 0.35]);
+    addPart(roofLayer.buildingBoxes, 'wall', 'roof_para_w', 'Roof Parapet W', [-20, roofY + 0.575, 0], [0.35, 0.575, 20.4]);
+    addPart(roofLayer.buildingBoxes, 'wall', 'roof_para_e', 'Roof Parapet E', [20, roofY + 0.575, 0], [0.35, 0.575, 20.4]);
+    roofLayer.metalTrimBoxes.push({ center: [0, roofY + 1.18, -20], size: [20.5, 0.05, 0.42] });
+    roofLayer.metalTrimBoxes.push({ center: [0, roofY + 1.18, 20], size: [20.5, 0.05, 0.42] });
+    roofLayer.metalTrimBoxes.push({ center: [-20, roofY + 1.18, 0], size: [0.42, 0.05, 20.5] });
+    roofLayer.metalTrimBoxes.push({ center: [20, roofY + 1.18, 0], size: [0.42, 0.05, 20.5] });
+
+    // Rooftop Stairwell Bulkhead (open doorway at North Z = -1.5)
+    addPart(roofLayer.buildingBoxes, 'wall', 'roof_bh_w', 'Bulkhead West', [-14.4, roofY + 1.6, 3.25], [0.25, 1.6, 4.75]);
+    addPart(roofLayer.buildingBoxes, 'wall', 'roof_bh_e', 'Bulkhead East', [-9.6, roofY + 1.6, 3.25], [0.25, 1.6, 4.75]);
+    addPart(roofLayer.buildingBoxes, 'wall', 'roof_bh_s', 'Bulkhead South', [-12.0, roofY + 1.6, 7.8], [2.4, 1.6, 0.25]);
+    addPart(roofLayer.buildingBoxes, 'wall', 'roof_bh_top', 'Bulkhead Roof', [-12.0, roofY + 3.3, 3.25], [2.65, 0.15, 5.0]);
+
+    // Rooftop HVAC Units, Helipad Pad & Beacon Mast
+    addPart(roofLayer.metalTrimBoxes, 'prop', 'roof_hvac_1', 'Roof HVAC 1', [8.0, roofY + 0.85, -10.0], [2.4, 0.85, 1.9]);
+    addPart(roofLayer.interiorAccentBoxes, 'prop', 'roof_hvac_fan1', 'Roof HVAC Fan 1', [8.0, roofY + 1.78, -10.0], [1.9, 0.08, 1.4]);
+    addPart(roofLayer.metalTrimBoxes, 'prop', 'roof_hvac_2', 'Roof HVAC 2', [8.0, roofY + 0.85, -4.0], [2.4, 0.85, 1.9]);
+    addPart(roofLayer.interiorAccentBoxes, 'prop', 'roof_hvac_fan2', 'Roof HVAC Fan 2', [8.0, roofY + 1.78, -4.0], [1.9, 0.08, 1.4]);
+    addPart(roofLayer.interiorAccentBoxes, 'floor', 'roof_helipad', 'Roof Landing Pad', [0, roofY + 0.03, 10.0], [4.5, 0.03, 4.5]);
+    addPart(roofLayer.metalTrimBoxes, 'wall', 'roof_mast', 'Roof Comms Mast', [17.5, roofY + 3.0, -17.5], [0.16, 3.0, 0.16]);
+    roofLayer.ceilingLightBoxes.push({ center: [17.5, roofY + 6.15, -17.5], size: [0.22, 0.15, 0.22] });
+
+    return {
+      floors,
+      colliders,
+    };
+  }
+
+  /**
+   * Returns exact synchronized static collider specs for a single skyscraper.
+   */
+  static getSkyscraperColliderSpecs(): BuildingColliderSpec[] {
+    if (!ProceduralModels.cachedSkyscraperColliderSpecs) {
+      ProceduralModels.cachedSkyscraperColliderSpecs = ProceduralModels.buildSkyscraperBlueprint().colliders;
+    }
+    return ProceduralModels.cachedSkyscraperColliderSpecs;
+  }
+
+  /**
+   * Generates a 10-story skyscraper building segmented per floor (0..10) for Smart Floor Culling
+   * with rooms, offices, windows, architectural trim, stairs, elevator, and furniture.
    */
   static createSingleBuildingWithStairsAndElevator(): {
-    buildingMesh: ParsedGLBPrimitive;
+    floors: SkyscraperFloorGeometry[];
     groundSlabMesh: ParsedGLBPrimitive;
-    floorButtonsMesh: ParsedGLBPrimitive;
+    floorButtonMesh: ParsedGLBPrimitive;
     doorLeftMesh: ParsedGLBPrimitive;
     doorRightMesh: ParsedGLBPrimitive;
     elevatorMesh: ParsedGLBPrimitive;
     btnUpMesh: ParsedGLBPrimitive;
     btnDownMesh: ParsedGLBPrimitive;
     bannerMesh: ParsedGLBPrimitive;
-    officeMesh: ParsedGLBPrimitive;
-    windowMesh: ParsedGLBPrimitive;
   } {
-    const buildingBoxes: { center: [number, number, number]; size: [number, number, number] }[] = [];
-    const officeBoxes: { center: [number, number, number]; size: [number, number, number] }[] = [];
-    const windowBoxes: { center: [number, number, number]; size: [number, number, number] }[] = [];
+    const bp = ProceduralModels.buildSkyscraperBlueprint();
+    ProceduralModels.cachedSkyscraperColliderSpecs = bp.colliders;
 
     // 1. Massive Ground Slab
     const groundSlabMesh = ProceduralModels.createBoxPrimitive([0, -0.2, 0], [2000, 0.2, 2000], 'Massive_Ground_Slab');
 
-    const totalFloors = 10;
-    const floorHeight = 4.0;
-
-    // 2. Build 10 Floors (Exterior & Inner Walls, Staircases, Windows)
-    for (let k = 0; k < totalFloors; k++) {
-      const wallY = k * floorHeight + 2.0;
-
-      // EXTERIOR ENVELOPE (40x40m)
-      buildingBoxes.push({ center: [0, wallY, -20], size: [20, 2.0, 0.4] });       // Rear
-      buildingBoxes.push({ center: [-20, wallY, 0], size: [0.4, 2.0, 20] });       // Left
-      buildingBoxes.push({ center: [20, wallY, 0], size: [0.4, 2.0, 20] });        // Right
-      buildingBoxes.push({ center: [-12, wallY, 20], size: [8, 2.0, 0.4] });       // Front L
-      buildingBoxes.push({ center: [12, wallY, 20], size: [8, 2.0, 0.4] });        // Front R
-      buildingBoxes.push({ center: [0, k * floorHeight + 3.2, 20], size: [4, 0.8, 0.4] }); // Header
-
-      // CENTRAL CORE PARTITIONS (Housing circulation) - With 3m Doorways
-      // Back/Front Core Walls
-      buildingBoxes.push({ center: [-5, wallY, -5], size: [2, 2.0, 0.2] });  // Back L
-      buildingBoxes.push({ center: [5, wallY, -5], size: [2, 2.0, 0.2] });   // Back R
-      buildingBoxes.push({ center: [-5, wallY, 15], size: [2, 2.0, 0.2] });  // Front L
-      buildingBoxes.push({ center: [5, wallY, 15], size: [2, 2.0, 0.2] });   // Front R
-      
-      // Side Core Walls (Clearing Stair Exit)
-      buildingBoxes.push({ center: [-7, wallY, 10], size: [0.2, 2.0, 5] });  // Core West (Front)
-      buildingBoxes.push({ center: [7, wallY, 5], size: [0.2, 2.0, 10] });   // Core East
-
-      // TENANT DIVIDERS (Moved to corners to clear stair path)
-      buildingBoxes.push({ center: [-13, wallY, -10], size: [7, 2.0, 0.2] }); // Rear West Suite
-      buildingBoxes.push({ center: [13, wallY, -10], size: [7, 2.0, 0.2] });  // Rear East Suite
-      buildingBoxes.push({ center: [-15, wallY, 10], size: [5, 2.0, 0.2] });  // Front West Suite (Near Stairs but recessed)
-
-      // WINDOW PANES
-      for (let w = -15; w <= 15; w += 10) {
-        if (w === 0 && k === 0) continue;
-        windowBoxes.push({ center: [w, wallY, -20], size: [3.5, 1.4, 0.05] }); // Rear
-        windowBoxes.push({ center: [-20, wallY, w], size: [0.05, 1.4, 3.5] }); // Left
-        windowBoxes.push({ center: [20, wallY, w], size: [0.05, 1.4, 3.5] });  // Right
+    // 2. Per-Floor Geometry Primitives (stories 0..9 + rooftop 10)
+    // Note: Names intentionally use "Story_S{k}" rather than "Floor" so shadow pass renders them.
+    const floors: SkyscraperFloorGeometry[] = bp.floors.map((fb) => {
+      const k = fb.floor;
+      const entry: SkyscraperFloorGeometry = { floor: k };
+      if (fb.buildingBoxes.length > 0) {
+        entry.buildingMesh = ProceduralModels.combineBoxes(fb.buildingBoxes, `Skyscraper_S${k}_Building`);
       }
-
-      // OFFICE FURNITURE (Daylight Zones)
-      const officePositions: [number, number][] = [
-        [-17, -16], [17, -16], [-17, 16], [17, 16]
-      ];
-
-      for (const pos of officePositions) {
-        const deskY = k * floorHeight + 0.75;
-        officeBoxes.push({ center: [pos[0], deskY, pos[1]], size: [2.0, 0.1, 1.0] });
-        officeBoxes.push({ center: [pos[0], k * floorHeight + 0.5, pos[1] + 1.2], size: [0.6, 0.1, 0.6] });
-        officeBoxes.push({ center: [pos[0], deskY + 0.4, pos[1] - 0.3], size: [0.8, 0.5, 0.05] });
+      if (fb.metalTrimBoxes.length > 0) {
+        entry.metalTrimMesh = ProceduralModels.combineBoxes(fb.metalTrimBoxes, `Skyscraper_S${k}_MetalTrim`);
       }
-
-      // STAIRCASE (X=-12, Clearing approach)
-      const numSteps = 10;
-      const stepRise = floorHeight / numSteps;
-      const startZ = 7.0;
-
-      for (let i = 0; i < numSteps; i++) {
-        const stepY = k * floorHeight + (i + 1) * stepRise;
-        const stepZ = startZ - i * 0.75;
-        buildingBoxes.push({
-          center: [-12.0, stepY - stepRise * 0.5, stepZ],
-          size: [2.2, stepRise * 0.5, 0.375],
-        });
+      if (fb.interiorAccentBoxes.length > 0) {
+        entry.interiorAccentMesh = ProceduralModels.combineBoxes(fb.interiorAccentBoxes, `Skyscraper_S${k}_InteriorAccent`);
       }
-    }
+      if (fb.ceilingLightBoxes.length > 0) {
+        entry.ceilingLightMesh = ProceduralModels.combineBoxes(fb.ceilingLightBoxes, `Skyscraper_S${k}_CeilingLights`);
+      }
+      if (fb.officeBoxes.length > 0) {
+        entry.officeMesh = ProceduralModels.combineBoxes(fb.officeBoxes, `Skyscraper_S${k}_Office`);
+      }
+      if (fb.windowBoxes.length > 0) {
+        entry.windowMesh = ProceduralModels.combineBoxes(fb.windowBoxes, `Skyscraper_S${k}_Windows`);
+      }
+      return entry;
+    });
 
-    // 3. UPPER FLOOR SLABS (Robust coverage, with Stair Hole)
-    for (let k = 1; k <= totalFloors; k++) {
-      const slabY = k * floorHeight - 0.05;
+    // Single reusable call button primitive (instanced per floor at [11.32, k*4 + 1.6, 9.0])
+    const floorButtonMesh = ProceduralModels.createBoxPrimitive([0, 0, 0], [0.04, 0.12, 0.12], 'Floor_Call_Button');
 
-      // Slab 1: North (Rear)
-      buildingBoxes.push({ center: [0, slabY, -10.5], size: [20.0, 0.05, 9.5] });
-      // Slab 2: South (Front)
-      buildingBoxes.push({ center: [0, slabY, 17.5], size: [20.0, 0.05, 2.5] });
-      
-      // Slab 3: West Wing (Splitting for Stair Hole at X=-12, Z=[0,8])
-      buildingBoxes.push({ center: [-17, slabY, 3.5], size: [3.0, 0.05, 4.5] }); // Perimeter West
-      buildingBoxes.push({ center: [-12, slabY, -0.5], size: [2.2, 0.05, 0.5] }); // Bridge at stair bottom landing
-      buildingBoxes.push({ center: [-8.5, slabY, 3.5], size: [1.5, 0.05, 4.5] }); // Strip between stairs and core
-      
-      // Slab 4: East (Elevator Wing)
-      buildingBoxes.push({ center: [10, slabY, 10.0], size: [10.0, 0.05, 5.0] });
-      // Slab 5: Center
-      buildingBoxes.push({ center: [0, slabY, 3.5], size: [6.0, 0.05, 4.5] });
-      buildingBoxes.push({ center: [0, slabY, 11.25], size: [20.0, 0.05, 3.75] });
-    }
+    // Dynamic Left/Right Door Panels (framed with subtle metal trim look)
+    const doorLeftMesh = ProceduralModels.createBoxPrimitive([0, 0, 0], [1.96, 1.2, 0.15], 'Sliding_Door_Left');
+    const doorRightMesh = ProceduralModels.createBoxPrimitive([0, 0, 0], [1.96, 1.2, 0.15], 'Sliding_Door_Right');
 
-    const buildingMesh = ProceduralModels.combineBoxes(buildingBoxes, 'Physics_Skyscraper_Robust');
-    const officeMesh = ProceduralModels.combineBoxes(officeBoxes, 'Office_Furniture_Collection');
-    const windowMesh = ProceduralModels.combineBoxes(windowBoxes, 'Skyscraper_Windows_Glass');
-
-    // Separate Floor Call Button Primitives - CORRIDOR side
-    const floorButtonBoxes: { center: [number, number, number]; size: [number, number, number] }[] = [];
-    for (let k = 0; k < totalFloors; k++) {
-      floorButtonBoxes.push({ center: [11.28, k * floorHeight + 1.6, 9.0], size: [0.05, 0.12, 0.12] });
-    }
-    const floorButtonsMesh = ProceduralModels.combineBoxes(floorButtonBoxes, 'Floor_Call_Buttons');
-
-    // Dynamic Left/Right Door Panels
-    const doorLeftMesh = ProceduralModels.createBoxPrimitive([0, 0, 0], [2.0, 2.0, 0.15], 'Sliding_Door_Left');
-    const doorRightMesh = ProceduralModels.createBoxPrimitive([0, 0, 0], [2.0, 2.0, 0.15], 'Sliding_Door_Right');
-
-    // Dynamic Enclosed Elevator Cab Mesh - ENLARGED
+    // Dynamic Enclosed Elevator Cab Mesh
     const elevatorCabBoxes: { center: [number, number, number]; size: [number, number, number] }[] = [
       { center: [0, 0, 0], size: [2.4, 0.15, 2.4] }, // Floor
       { center: [0, 1.4, -2.35], size: [2.4, 1.25, 0.08] }, // Rear
       { center: [-2.35, 1.4, 0], size: [0.08, 1.25, 2.4] }, // Left
       { center: [2.35, 1.4, 0], size: [0.08, 1.25, 2.4] }, // Right
       { center: [0, 2.7, 0], size: [2.4, 0.1, 2.4] }, // Roof
-      { center: [-2.25, 1.4, 0.8], size: [0.05, 0.8, 0.3] },   // Panel Base on Left Wall
+      { center: [-2.25, 1.4, 0.8], size: [0.05, 0.8, 0.3] }, // Panel Base on Left Wall
     ];
     const elevatorMesh = ProceduralModels.combineBoxes(elevatorCabBoxes, 'Elevator_Cab_Structure');
 
     const btnUpMesh = ProceduralModels.createBoxPrimitive([0, 0, 0], [0.08, 0.1, 0.1], 'Elevator_Btn_UP');
     const btnDownMesh = ProceduralModels.createBoxPrimitive([0, 0, 0], [0.08, 0.1, 0.1], 'Elevator_Btn_DOWN');
 
-    // 5. "Workers" Banner
+    // "Workers" Banner
     const bannerMesh = ProceduralModels.create3DTextMesh('Workers', 1.0, 0.35, 'Entrance_Banner_Text');
 
     return {
-      buildingMesh,
+      floors,
       groundSlabMesh,
-      floorButtonsMesh,
+      floorButtonMesh,
       doorLeftMesh,
       doorRightMesh,
       elevatorMesh,
       btnUpMesh,
       btnDownMesh,
       bannerMesh,
-      officeMesh,
-      windowMesh,
     };
   }
 
@@ -1485,6 +1587,7 @@ export class ProceduralModels {
 
     const jumpClip = BVHLoader.createJumpClip();
     const idleClip = BVHLoader.createIdleClip();
+    const punchClip = BVHLoader.createPunchClip();
 
     return {
       primitive,
@@ -1492,7 +1595,7 @@ export class ProceduralModels {
       clip,
       jumpClip,
       idleClip,
-      allClips: [clip, jumpClip, idleClip],
+      allClips: [clip, jumpClip, idleClip, punchClip],
     };
   }
 
