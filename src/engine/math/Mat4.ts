@@ -29,6 +29,14 @@ export class Mat4 {
     return out;
   }
 
+  static fromTranslationXYZ(x: number, y: number, z: number, out: Float32Array): Float32Array {
+    out[0] = 1; out[1] = 0; out[2] = 0; out[3] = 0;
+    out[4] = 0; out[5] = 1; out[6] = 0; out[7] = 0;
+    out[8] = 0; out[9] = 0; out[10] = 1; out[11] = 0;
+    out[12] = x; out[13] = y; out[14] = z; out[15] = 1;
+    return out;
+  }
+
   static perspective(fovRad: number, aspect: number, near: number, far: number, out: Float32Array): Float32Array {
     const f = 1.0 / Math.tan(fovRad / 2);
     const nf = 1 / (near - far);
@@ -52,15 +60,24 @@ export class Mat4 {
   }
 
   static lookAt(eye: [number, number, number], target: [number, number, number], up: [number, number, number], out: Float32Array): Float32Array {
-    let z0 = eye[0] - target[0];
-    let z1 = eye[1] - target[1];
-    let z2 = eye[2] - target[2];
-    let len = 1 / Math.hypot(z0, z1, z2);
+    return Mat4.lookAtXYZ(eye[0], eye[1], eye[2], target[0], target[1], target[2], up[0], up[1], up[2], out);
+  }
+
+  static lookAtXYZ(
+    ex: number, ey: number, ez: number,
+    tx: number, ty: number, tz: number,
+    ux: number, uy: number, uz: number,
+    out: Float32Array
+  ): Float32Array {
+    let z0 = ex - tx;
+    let z1 = ey - ty;
+    let z2 = ez - tz;
+    let len = 1 / (Math.hypot(z0, z1, z2) || 1);
     z0 *= len; z1 *= len; z2 *= len;
 
-    let x0 = up[1] * z2 - up[2] * z1;
-    let x1 = up[2] * z0 - up[0] * z2;
-    let x2 = up[0] * z1 - up[1] * z0;
+    let x0 = uy * z2 - uz * z1;
+    let x1 = uz * z0 - ux * z2;
+    let x2 = ux * z1 - uy * z0;
     len = Math.hypot(x0, x1, x2);
     if (!len) {
       x0 = 0; x1 = 0; x2 = 0;
@@ -83,9 +100,9 @@ export class Mat4 {
     out[0] = x0; out[1] = y0; out[2] = z0; out[3] = 0;
     out[4] = x1; out[5] = y1; out[6] = z1; out[7] = 0;
     out[8] = x2; out[9] = y2; out[10] = z2; out[11] = 0;
-    out[12] = -(x0 * eye[0] + x1 * eye[1] + x2 * eye[2]);
-    out[13] = -(y0 * eye[0] + y1 * eye[1] + y2 * eye[2]);
-    out[14] = -(z0 * eye[0] + z1 * eye[1] + z2 * eye[2]);
+    out[12] = -(x0 * ex + x1 * ey + x2 * ez);
+    out[13] = -(y0 * ex + y1 * ey + y2 * ez);
+    out[14] = -(z0 * ex + z1 * ey + z2 * ez);
     out[15] = 1;
     return out;
   }
@@ -123,19 +140,17 @@ export class Mat4 {
     return out;
   }
 
-  static fromRotationTranslationScale(
-    q: [number, number, number, number],
-    v: [number, number, number],
-    s: [number, number, number],
+  static fromTRSValues(
+    tx: number, ty: number, tz: number,
+    qx: number, qy: number, qz: number, qw: number,
+    sx: number, sy: number, sz: number,
     out: Float32Array,
     offset = 0
   ): Float32Array {
-    const x = q[0], y = q[1], z = q[2], w = q[3];
-    const x2 = x + x, y2 = y + y, z2 = z + z;
-    const xx = x * x2, xy = x * y2, xz = x * z2;
-    const yy = y * y2, yz = y * z2, zz = z * z2;
-    const wx = w * x2, wy = w * y2, wz = w * z2;
-    const sx = s[0], sy = s[1], sz = s[2];
+    const x2 = qx + qx, y2 = qy + qy, z2 = qz + qz;
+    const xx = qx * x2, xy = qx * y2, xz = qx * z2;
+    const yy = qy * y2, yz = qy * z2, zz = qz * z2;
+    const wx = qw * x2, wy = qw * y2, wz = qw * z2;
 
     out[offset + 0] = (1 - (yy + zz)) * sx;
     out[offset + 1] = (xy + wz) * sx;
@@ -152,12 +167,28 @@ export class Mat4 {
     out[offset + 10] = (1 - (xx + yy)) * sz;
     out[offset + 11] = 0;
 
-    out[offset + 12] = v[0];
-    out[offset + 13] = v[1];
-    out[offset + 14] = v[2];
+    out[offset + 12] = tx;
+    out[offset + 13] = ty;
+    out[offset + 14] = tz;
     out[offset + 15] = 1;
 
     return out;
+  }
+
+  static fromRotationTranslationScale(
+    q: [number, number, number, number],
+    v: [number, number, number],
+    s: [number, number, number],
+    out: Float32Array,
+    offset = 0
+  ): Float32Array {
+    return Mat4.fromTRSValues(
+      v[0], v[1], v[2],
+      q[0], q[1], q[2], q[3],
+      s[0], s[1], s[2],
+      out,
+      offset
+    );
   }
 
   static fromTranslationRotationScale(
@@ -167,7 +198,13 @@ export class Mat4 {
     out: Float32Array,
     offset = 0
   ): Float32Array {
-    return Mat4.fromRotationTranslationScale(q, v, s, out, offset);
+    return Mat4.fromTRSValues(
+      v[0], v[1], v[2],
+      q[0], q[1], q[2], q[3],
+      s[0], s[1], s[2],
+      out,
+      offset
+    );
   }
 
   static ortho(

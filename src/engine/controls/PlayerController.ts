@@ -60,6 +60,10 @@ export class PlayerController {
   public entityId = -1;
   public extraEntityIds: number[] = [];
 
+  // Vehicle driving state
+  public activeVehicleIndex = -1;
+  public nearbyVehicleIndex = -1;
+
   // Input states
   private keys: Record<string, boolean> = {};
   public joystickVec: [number, number] = [0, 0];
@@ -70,6 +74,14 @@ export class PlayerController {
   private isTouchPointer = false;
   private lastPointerX = 0;
   private lastPointerY = 0;
+
+  // Pre-allocated scratch storage for ZERO per-frame allocations in update()
+  private scratchPlayerMat = Mat4.create();
+  private scratchPunchFwd: [number, number, number] = [0, 0, -1];
+  private scratchDisp: [number, number, number] = [0, 0, 0];
+  private scratchRayDir: [number, number, number] = [0, 0, 1];
+  private scratchRayOrigin: [number, number, number] = [0, 0, 0];
+  private scratchZeroDisp: [number, number, number] = [0, 0, 0];
 
   constructor(engine: DestroyerEngine) {
     this.engine = engine;
@@ -83,22 +95,27 @@ export class PlayerController {
       'keydown',
       (e) => {
         this.keys[e.code] = true;
-        // Shift key toggles or holds running
         if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
           this.isRunning = true;
         }
         if (e.code === 'Space') {
           e.preventDefault();
-          this.jump();
+          if (this.activeVehicleIndex < 0) {
+            this.jump();
+          }
         }
         if (e.code === 'KeyF' && !e.repeat) {
           e.preventDefault();
-          this.punch();
+          if (this.activeVehicleIndex < 0) {
+            this.punch();
+          }
         }
 
-        // 3D Elevator Button interaction via E key or Digit keys
-        if (e.code === 'KeyE') {
-          this.interactWith3DElevatorButton();
+        // E key: Exit car / Enter nearby car / Press elevator button
+        if (e.code === 'KeyE' && !e.repeat) {
+          if (!this.toggleVehicleEntry()) {
+            this.interactWith3DElevatorButton();
+          }
         }
 
         if (e.code.startsWith('Digit')) {
@@ -123,8 +140,94 @@ export class PlayerController {
     });
   }
 
+  public findNearestVehicleIndex(maxRange = 4.4): number {
+    const vehicles = this.engine.vehicles;
+    let bestIdx = -1;
+    let bestDist = maxRange;
+    const px = this.position[0];
+    const py = this.position[1];
+    const pz = this.position[2];
+
+    for (let i = 0; i < vehicles.length; i++) {
+      const v = vehicles[i];
+      if (Math.abs(py - v.position[1]) > 2.6) continue;
+      const d = Math.hypot(px - v.position[0], pz - v.position[2]);
+      if (d < bestDist) {
+        bestDist = d;
+        bestIdx = i;
+      }
+    }
+    return bestIdx;
+  }
+
+  public toggleVehicleEntry(): boolean {
+    const vehicles = this.engine.vehicles;
+    if (this.activeVehicleIndex >= 0) {
+      const car = vehicles[this.activeVehicleIndex];
+      if (car) {
+        // Place driver outside car door (left side first, then right / rear / front fallback)
+        const cosR = Math.cos(car.rotationY);
+        const sinR = Math.sin(car.rotationY);
+        const candX0 = car.position[0] - cosR * 2.25;
+        const candZ0 = car.position[2] + sinR * 2.25;
+        const candX1 = car.position[0] + cosR * 2.25;
+        const candZ1 = car.position[2] - sinR * 2.25;
+
+        let exitX = candX0;
+        let exitZ = candZ0;
+        const exitY = Math.max(0, car.position[1]);
+        if (this.engine.physics) {
+          this.scratchDisp[0] = candX0;
+          this.scratchDisp[1] = exitY;
+          this.scratchDisp[2] = candZ0;
+          const res0 = this.engine.physics.updateCharacterPhysics(this.scratchDisp, this.scratchZeroDisp, 0.4, 1.8);
+          if (Math.hypot(res0.newPos[0] - car.position[0], res0.newPos[2] - car.position[2]) >= 1.55) {
+            exitX = res0.newPos[0];
+            exitZ = res0.newPos[2];
+          } else {
+            this.scratchDisp[0] = candX1;
+            this.scratchDisp[1] = exitY;
+            this.scratchDisp[2] = candZ1;
+            const res1 = this.engine.physics.updateCharacterPhysics(this.scratchDisp, this.scratchZeroDisp, 0.4, 1.8);
+            exitX = res1.newPos[0];
+            exitZ = res1.newPos[2];
+          }
+        }
+
+        this.position[0] = exitX;
+        this.position[1] = exitY;
+        this.position[2] = exitZ;
+        this.velocityY = 0;
+        this.isGrounded = true;
+        this.isJumping = false;
+        this.currentSpeed = 0;
+        car.speed *= 0.25;
+      }
+      this.activeVehicleIndex = -1;
+      this.engine.setPlayerEntitiesVisible(true);
+      return true;
+    }
+
+    const nearIdx = this.findNearestVehicleIndex(4.4);
+    if (nearIdx >= 0) {
+      this.activeVehicleIndex = nearIdx;
+      this.nearbyVehicleIndex = nearIdx;
+      this.isPunching = false;
+      this.isJumping = false;
+      this.currentSpeed = 0;
+      this.velocityY = 0;
+      const car = vehicles[nearIdx];
+      this.position[0] = car.position[0];
+      this.position[1] = car.position[1];
+      this.position[2] = car.position[2];
+      this.engine.setPlayerEntitiesVisible(false);
+      return true;
+    }
+    return false;
+  }
+
   public interactWith3DElevatorButton(): void {
-    if (!this.engine.physics) return;
+    if (!this.engine.physics || this.activeVehicleIndex >= 0) return;
 
     const distToElevator = Math.hypot(this.position[0] - 14.0, this.position[2] - 10.0);
 
@@ -234,7 +337,7 @@ export class PlayerController {
     this.punchImpactTriggered = false;
     this.punchCooldown = 0.44;
     this.lastPunchHitCount = 0;
-    this.lastPunchHitNames = [];
+    this.lastPunchHitNames.length = 0;
     this.energy = Math.max(0, this.energy - this.punchEnergyCost);
     return true;
   }
@@ -298,6 +401,15 @@ export class PlayerController {
 
   public update(deltaSec: number): void {
     if (this.entityId < 0 || this.engine.isDeviceLost) return;
+
+    // If driving a car, run dedicated zero-alloc vehicle simulation & chase camera
+    if (this.activeVehicleIndex >= 0 && this.activeVehicleIndex < this.engine.vehicles.length) {
+      this.updateDriving(deltaSec);
+      return;
+    }
+
+    // Track nearest parked vehicle for HUD "Enter Car [E]" prompt (zero alloc)
+    this.nearbyVehicleIndex = this.findNearestVehicleIndex(4.4);
 
     // Energy regeneration and consumption
     this.energy = Math.min(1.0, this.energy + this.energyRegenRate * deltaSec);
@@ -366,20 +478,22 @@ export class PlayerController {
       if (this.punchTime >= 0.12 && !this.punchImpactTriggered) {
         this.punchImpactTriggered = true;
         if (this.engine.physics) {
-          const punchFwdX = -Math.sin(this.cameraTheta);
-          const punchFwdZ = -Math.cos(this.cameraTheta);
+          this.scratchPunchFwd[0] = -Math.sin(this.cameraTheta);
+          this.scratchPunchFwd[1] = 0;
+          this.scratchPunchFwd[2] = -Math.cos(this.cameraTheta);
           const hitRes = this.engine.physics.punchNearestObjects(
             this.position,
-            [punchFwdX, 0, punchFwdZ],
+            this.scratchPunchFwd,
             2.75,
             13.0
           );
           this.lastPunchHitCount = hitRes.hitCount;
-          this.lastPunchHitNames = hitRes.hitNames;
-          if (hitRes.hitNPCIds && hitRes.hitNPCIds.length > 0) {
-            for (const npcId of hitRes.hitNPCIds) {
-              this.engine.triggerNpcPunchReaction(npcId);
-            }
+          this.lastPunchHitNames.length = 0;
+          for (let h = 0; h < hitRes.hitNames.length; h++) {
+            this.lastPunchHitNames.push(hitRes.hitNames[h]);
+          }
+          for (let n = 0; n < hitRes.hitNPCIds.length; n++) {
+            this.engine.triggerNpcPunchReaction(hitRes.hitNPCIds[n]);
           }
         }
       }
@@ -445,14 +559,19 @@ export class PlayerController {
 
     // 5. Jolt Physics Character Collision Sweep (walls, stairs, doors, elevator)
     if (this.engine.physics) {
+      this.scratchDisp[0] = dispX;
+      this.scratchDisp[1] = dispY;
+      this.scratchDisp[2] = dispZ;
       const physRes = this.engine.physics.updateCharacterPhysics(
         this.position,
-        [dispX, dispY, dispZ],
+        this.scratchDisp,
         0.4,
         1.8
       );
 
-      this.position = physRes.newPos;
+      this.position[0] = physRes.newPos[0];
+      this.position[1] = physRes.newPos[1];
+      this.position[2] = physRes.newPos[2];
       // Preserve airborne state while launching upward so high-FPS frames don't re-ground immediately
       if (this.velocityY > 0.5) {
         this.isGrounded = false;
@@ -490,27 +609,31 @@ export class PlayerController {
       this.landingImpactTimer -= deltaSec;
     }
 
-    // 4. Update Character Entity Matrix
-    const playerMat = Mat4.create();
-    const rotQuat: [number, number, number, number] = [
-      0,
-      Math.sin(this.rotationY * 0.5),
-      0,
-      Math.cos(this.rotationY * 0.5),
-    ];
-    Mat4.fromTranslationRotationScale(this.position, rotQuat, [1, 1, 1], playerMat);
+    // 4. Update Character Entity Matrix (zero allocation)
+    const halfYaw = this.rotationY * 0.5;
+    Mat4.fromTRSValues(
+      this.position[0], this.position[1], this.position[2],
+      0, Math.sin(halfYaw), 0, Math.cos(halfYaw),
+      1, 1, 1,
+      this.scratchPlayerMat
+    );
 
-    this.engine.entityManager.updateEntityMatrix(
+    this.engine.entityManager.updateEntityMatrixXYZ(
       this.entityId,
-      playerMat,
-      this.position,
+      this.scratchPlayerMat,
+      this.position[0],
+      this.position[1],
+      this.position[2],
       2.5
     );
-    for (const extraId of this.extraEntityIds) {
-      this.engine.entityManager.updateEntityMatrix(
-        extraId,
-        playerMat,
-        this.position,
+    const extras = this.extraEntityIds;
+    for (let i = 0; i < extras.length; i++) {
+      this.engine.entityManager.updateEntityMatrixXYZ(
+        extras[i],
+        this.scratchPlayerMat,
+        this.position[0],
+        this.position[1],
+        this.position[2],
         2.5
       );
     }
@@ -542,21 +665,221 @@ export class PlayerController {
       const sinTheta = Math.sin(this.cameraTheta);
       const cosTheta = Math.cos(this.cameraTheta);
 
-      const rayDir: [number, number, number] = [
-        sinPhi * sinTheta,
-        cosPhi,
-        sinPhi * cosTheta,
-      ];
+      this.scratchRayDir[0] = sinPhi * sinTheta;
+      this.scratchRayDir[1] = cosPhi;
+      this.scratchRayDir[2] = sinPhi * cosTheta;
 
-      const rayOrigin: [number, number, number] = [
-        camera.target[0],
-        camera.target[1],
-        camera.target[2],
-      ];
+      this.scratchRayOrigin[0] = camera.target[0];
+      this.scratchRayOrigin[1] = camera.target[1];
+      this.scratchRayOrigin[2] = camera.target[2];
 
-      const occludedDist = this.engine.physics.raycastBoxes(rayOrigin, rayDir, finalRadius);
+      const occludedDist = this.engine.physics.raycastBoxes(this.scratchRayOrigin, this.scratchRayDir, finalRadius);
       if (occludedDist < finalRadius) {
         finalRadius = Math.max(1.1, occludedDist - 0.25);
+      }
+    }
+
+    camera.theta = this.cameraTheta;
+    camera.phi = this.cameraPhi;
+    camera.radius = finalRadius;
+    camera.updatePositionFromSpherical();
+  }
+
+  /**
+   * Zero-allocation driving physics, steering, curb riding, prop ramming & chase camera
+   */
+  private updateDriving(deltaSec: number): void {
+    const car = this.engine.vehicles[this.activeVehicleIndex];
+    if (!car) {
+      this.activeVehicleIndex = -1;
+      this.engine.setPlayerEntitiesVisible(true);
+      return;
+    }
+
+    const dt = Math.min(deltaSec, 0.05);
+    car.impactCooldown = Math.max(0, car.impactCooldown - dt);
+    const tiltDecay = Math.max(0, 1.0 - dt * 9.0);
+    car.tiltX *= tiltDecay;
+    car.tiltZ *= tiltDecay;
+    const knockDecay = Math.max(0, 1.0 - dt * 5.0);
+    car.velX *= knockDecay;
+    car.velZ *= knockDecay;
+    car.angularVelY *= Math.max(0, 1.0 - dt * 6.0);
+    if (Math.abs(car.velX) < 0.03) car.velX = 0;
+    if (Math.abs(car.velZ) < 0.03) car.velZ = 0;
+    if (Math.abs(car.angularVelY) < 0.01) car.angularVelY = 0;
+
+    const abilityRatio = car.maxHealth > 0 ? Math.max(0, car.health / car.maxHealth) : 0;
+    const isWrecked = car.health <= 0;
+
+    const joyRawX = this.joystickVec[0];
+    const joyRawY = this.joystickVec[1];
+    const joyAbsX = Math.abs(joyRawX);
+    const joyAbsY = Math.abs(joyRawY);
+
+    // Throttle / Brake / Reverse (disabled if car ability reached 0% Wrecked)
+    let throttle = 0;
+    if (!isWrecked) {
+      if (this.keys['KeyW'] || this.keys['ArrowUp']) throttle += 1;
+      if (this.keys['KeyS'] || this.keys['ArrowDown']) throttle -= 1;
+      if (joyAbsY > 0.18 && Math.abs(throttle) < 0.01) {
+        const mag = (joyAbsY - 0.18) / 0.82;
+        throttle = joyRawY < 0 ? mag : -mag;
+      }
+    }
+
+    const handbrake = !!this.keys['Space'] || this.jumpRequested;
+    this.jumpRequested = false;
+    this.punchRequested = false;
+
+    const speedScale = 0.55 + 0.45 * abilityRatio;
+    const accelScale = 0.50 + 0.50 * abilityRatio;
+    const maxForward = (this.isRunning ? 38.0 : 28.0) * speedScale;
+    const maxReverse = -11.5 * (0.60 + 0.40 * abilityRatio);
+
+    if (handbrake) {
+      const brakeStep = 48.0 * dt;
+      if (Math.abs(car.speed) <= brakeStep) car.speed = 0;
+      else car.speed -= Math.sign(car.speed) * brakeStep;
+    } else if (throttle > 0.05) {
+      if (car.speed < -0.5) {
+        car.speed = Math.min(0, car.speed + 36.0 * dt);
+      } else {
+        const accel = (this.isRunning ? 26.0 : 19.0) * accelScale;
+        car.speed = Math.min(maxForward, car.speed + accel * throttle * dt);
+      }
+    } else if (throttle < -0.05) {
+      if (car.speed > 0.5) {
+        car.speed = Math.max(0, car.speed - 38.0 * dt);
+      } else {
+        car.speed = Math.max(maxReverse, car.speed + 14.0 * accelScale * throttle * dt);
+      }
+    } else {
+      // Natural aerodynamic & rolling coast decay
+      const drag = Math.max(0, 1.0 - dt * (isWrecked ? 2.4 : 1.45));
+      car.speed *= drag;
+      if (Math.abs(car.speed) < 0.12) car.speed = 0;
+    }
+
+    // Steering (Left increases rotationY => turns screen-left from behind car)
+    let steerInput = 0;
+    if (this.keys['KeyA'] || this.keys['ArrowLeft']) steerInput += 1;
+    if (this.keys['KeyD'] || this.keys['ArrowRight']) steerInput -= 1;
+    if (joyAbsX > 0.18 && Math.abs(steerInput) < 0.01) {
+      steerInput = -Math.sign(joyRawX) * ((joyAbsX - 0.18) / 0.82);
+    }
+
+    car.steerAngle += (steerInput - car.steerAngle) * Math.min(1.0, dt * 10.0);
+    const absSpd = Math.abs(car.speed);
+    if (absSpd > 0.25) {
+      const steerAuth = Math.min(1.0, absSpd / 5.5) * (1.0 - Math.min(0.35, absSpd / 55.0));
+      const reverseFlip = car.speed >= -0.1 ? 1.0 : -1.0;
+      car.rotationY += car.steerAngle * 2.35 * steerAuth * reverseFlip * dt;
+    }
+    car.rotationY += car.angularVelY * dt;
+
+    // Integrate vehicle world displacement with JoltPhysics 2-axle sweep
+    const fwdX = Math.sin(car.rotationY);
+    const fwdZ = Math.cos(car.rotationY);
+    const dispX = (fwdX * car.speed + car.velX) * dt;
+    const dispZ = (fwdZ * car.speed + car.velZ) * dt;
+
+    let nextX = car.position[0] + dispX;
+    let nextY = car.position[1];
+    let nextZ = car.position[2] + dispZ;
+
+    if (this.engine.physics) {
+      const res = this.engine.physics.resolveVehicleMovement(
+        car.position[0],
+        car.position[1],
+        car.position[2],
+        dispX,
+        dispZ,
+        car.rotationY,
+        car.colliderId,
+        car.speed,
+        car
+      );
+      nextX = res.x;
+      nextZ = res.z;
+      nextY = car.position[1] + (res.y - car.position[1]) * Math.min(1.0, dt * 16.0);
+      if (res.collided) {
+        car.speed *= 0.35;
+        car.velX *= 0.35;
+        car.velZ *= 0.35;
+      }
+      this.engine.physics.updateVehicleCollider(car.colliderId, nextX, nextY, nextZ, car.rotationY);
+    }
+
+    // World bounds safety clamp
+    nextX = Math.max(-185, Math.min(250, nextX));
+    nextZ = Math.max(-165, Math.min(205, nextZ));
+
+    car.position[0] = nextX;
+    car.position[1] = nextY;
+    car.position[2] = nextZ;
+
+    // Keep PlayerController & SmartCulling synchronized with car position
+    this.position[0] = nextX;
+    this.position[1] = nextY;
+    this.position[2] = nextZ;
+    this.rotationY = car.rotationY;
+
+    // Update all 6 multi-part vehicle meshes in GPU entity buffer including suspension tilt (zero allocation)
+    const cx = Math.cos(car.tiltX * 0.5), sx = Math.sin(car.tiltX * 0.5);
+    const cy = Math.cos(car.rotationY * 0.5), sy = Math.sin(car.rotationY * 0.5);
+    const cz = Math.cos(car.tiltZ * 0.5), sz = Math.sin(car.tiltZ * 0.5);
+    const qw = cy * cx * cz + sy * sx * sz;
+    const qx = cy * sx * cz + sy * cx * sz;
+    const qy = sy * cx * cz - cy * sx * sz;
+    const qz = cy * cx * sz - sy * sx * cz;
+    Mat4.fromTRSValues(
+      nextX, nextY, nextZ,
+      qx, qy, qz, qw,
+      1, 1, 1,
+      this.scratchPlayerMat
+    );
+    const carEnts = car.entityIds;
+    for (let i = 0; i < carEnts.length; i++) {
+      this.engine.entityManager.updateEntityMatrixXYZ(carEnts[i], this.scratchPlayerMat, nextX, nextY, nextZ, 3.2);
+    }
+
+    // Smooth Chase Camera behind vehicle (keeps orbit override when dragging)
+    if (!this.isPointerDragging) {
+      const desiredTheta = car.rotationY + Math.PI;
+      let diff = desiredTheta - this.cameraTheta;
+      while (diff > Math.PI) diff -= Math.PI * 2;
+      while (diff < -Math.PI) diff += Math.PI * 2;
+      const followRate = Math.abs(car.speed) > 1.2 ? 6.5 : 3.2;
+      this.cameraTheta += diff * Math.min(1.0, dt * followRate);
+      this.cameraPhi += (1.22 - this.cameraPhi) * Math.min(1.0, dt * 4.0);
+    }
+
+    const targetDriveDist = 8.8 + Math.min(2.8, Math.abs(car.speed) * 0.08);
+    this.cameraDistance += (targetDriveDist - this.cameraDistance) * Math.min(1.0, dt * 8.0);
+
+    const camera = this.engine.camera;
+    const lookX = nextX + fwdX * 1.4;
+    const lookY = nextY + 1.45;
+    const lookZ = nextZ + fwdZ * 1.4;
+
+    camera.target[0] += (lookX - camera.target[0]) * Math.min(1.0, dt * 16.0);
+    camera.target[1] += (lookY - camera.target[1]) * Math.min(1.0, dt * 16.0);
+    camera.target[2] += (lookZ - camera.target[2]) * Math.min(1.0, dt * 16.0);
+
+    let finalRadius = this.cameraDistance;
+    if (this.engine.physics) {
+      const sinPhi = Math.sin(this.cameraPhi);
+      const cosPhi = Math.cos(this.cameraPhi);
+      this.scratchRayDir[0] = sinPhi * Math.sin(this.cameraTheta);
+      this.scratchRayDir[1] = cosPhi;
+      this.scratchRayDir[2] = sinPhi * Math.cos(this.cameraTheta);
+      this.scratchRayOrigin[0] = camera.target[0];
+      this.scratchRayOrigin[1] = camera.target[1];
+      this.scratchRayOrigin[2] = camera.target[2];
+      const occluded = this.engine.physics.raycastBoxes(this.scratchRayOrigin, this.scratchRayDir, finalRadius);
+      if (occluded < finalRadius) {
+        finalRadius = Math.max(2.6, occluded - 0.35);
       }
     }
 

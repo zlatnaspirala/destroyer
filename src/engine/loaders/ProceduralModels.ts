@@ -1083,10 +1083,12 @@ export class ProceduralModels {
         addPart(layer.officeBoxes, 'prop', `mon_${k}_${i}`, `F${k} Monitor`, [oxp, deskY + 0.4, ozp - 0.3], [0.8, 0.45, 0.06]);
       }
 
-      // Reception counter on Floor 0; waiting bench on Floors 1..9
+      // Front Reception Desk in bright entrance foyer on Floor 0 (plus rear atrium bench); waiting bench on Floors 1..9
       if (k === 0) {
-        addPart(layer.interiorAccentBoxes, 'prop', 'lobby_rec_base', 'Lobby Reception Base', [0, 0.52, 6.0], [1.8, 0.52, 0.55]);
-        addPart(layer.officeBoxes, 'prop', 'lobby_rec_top', 'Lobby Reception Counter', [0, 1.09, 6.0], [1.9, 0.05, 0.65]);
+        addPart(layer.interiorAccentBoxes, 'prop', 'lobby_rec_base', 'Lobby Reception Base', [-2.5, 0.26, 16.8], [1.25, 0.26, 0.56]);
+        addPart(layer.officeBoxes, 'prop', 'lobby_rec_top', 'Lobby Reception Desk', [-2.5, 0.545, 16.8], [1.35, 0.035, 0.64]);
+        layer.ceilingLightBoxes.push({ center: [-2.5, 3.88, 16.8], size: [1.6, 0.05, 0.45] });
+        addPart(layer.interiorAccentBoxes, 'prop', 'lobby_atrium_lounge', 'Lobby Atrium Counter', [0, 0.52, 6.0], [1.8, 0.52, 0.55]);
       } else {
         addPart(layer.interiorAccentBoxes, 'prop', `atrium_bench_${k}`, `F${k} Atrium Bench`, [0, baseY + 0.25, 5.0], [1.6, 0.25, 0.5]);
       }

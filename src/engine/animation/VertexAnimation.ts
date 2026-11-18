@@ -150,13 +150,20 @@ export class VertexAnimationController {
   }
 
   playClipByName(name: string, loop = true): boolean {
+    // Fast exact-match path (zero string allocation)
+    for (let i = 0; i < this.clips.length; i++) {
+      if (this.clips[i].name === name) {
+        this.playClip(i, loop);
+        return true;
+      }
+    }
     const lowerName = name.toLowerCase();
-    const idx = this.clips.findIndex(
-      (c) => c.name.toLowerCase() === lowerName || c.name.toLowerCase().includes(lowerName)
-    );
-    if (idx >= 0) {
-      this.playClip(idx, loop);
-      return true;
+    for (let i = 0; i < this.clips.length; i++) {
+      const cLower = this.clips[i].name.toLowerCase();
+      if (cLower === lowerName || cLower.includes(lowerName)) {
+        this.playClip(i, loop);
+        return true;
+      }
     }
     return false;
   }
@@ -190,8 +197,21 @@ export class VertexAnimationController {
     if (typeof clipNameOrIndex === 'number') {
       clip = this.clips[clipNameOrIndex];
     } else {
-      const lower = clipNameOrIndex.toLowerCase();
-      clip = this.clips.find((c) => c.name.toLowerCase().includes(lower));
+      for (let i = 0; i < this.clips.length; i++) {
+        if (this.clips[i].name === clipNameOrIndex) {
+          clip = this.clips[i];
+          break;
+        }
+      }
+      if (!clip) {
+        const lower = clipNameOrIndex.toLowerCase();
+        for (let i = 0; i < this.clips.length; i++) {
+          if (this.clips[i].name.toLowerCase().includes(lower)) {
+            clip = this.clips[i];
+            break;
+          }
+        }
+      }
     }
 
     if (clip && clip.duration > 0) {
@@ -226,52 +246,60 @@ export class VertexAnimationController {
 
     this.ensureScratchSize(jointCount);
 
+    const scrT = this.scratchT;
+    const scrR = this.scratchR;
+    const scrS = this.scratchS;
+
     // 1. Initialize per-joint T, R, S from rest bind pose
     for (let i = 0; i < jointCount; i++) {
       const j = this.joints[i];
-      const t = j.initialTranslation || [0, 0, 0];
-      const r = j.initialRotation || [0, 0, 0, 1];
-      const s = j.initialScale || [1, 1, 1];
+      const t = j.initialTranslation;
+      const r = j.initialRotation;
+      const s = j.initialScale;
 
-      this.scratchT[i * 3 + 0] = t[0];
-      this.scratchT[i * 3 + 1] = t[1];
-      this.scratchT[i * 3 + 2] = t[2];
+      const b3 = i * 3;
+      const b4 = i * 4;
+      scrT[b3 + 0] = t ? t[0] : 0;
+      scrT[b3 + 1] = t ? t[1] : 0;
+      scrT[b3 + 2] = t ? t[2] : 0;
 
-      this.scratchR[i * 4 + 0] = r[0];
-      this.scratchR[i * 4 + 1] = r[1];
-      this.scratchR[i * 4 + 2] = r[2];
-      this.scratchR[i * 4 + 3] = r[3];
+      scrR[b4 + 0] = r ? r[0] : 0;
+      scrR[b4 + 1] = r ? r[1] : 0;
+      scrR[b4 + 2] = r ? r[2] : 0;
+      scrR[b4 + 3] = r ? r[3] : 1;
 
-      this.scratchS[i * 3 + 0] = s[0];
-      this.scratchS[i * 3 + 1] = s[1];
-      this.scratchS[i * 3 + 2] = s[2];
+      scrS[b3 + 0] = s ? s[0] : 1;
+      scrS[b3 + 1] = s ? s[1] : 1;
+      scrS[b3 + 2] = s ? s[2] : 1;
     }
 
-    // 2. Sample all animation channels into T / R / S scratch arrays
-    for (const channel of clip.channels) {
+    // 2. Sample all animation channels into T / R / S scratch arrays (zero allocation)
+    const channels = clip.channels;
+    for (let cIdx = 0; cIdx < channels.length; cIdx++) {
+      const channel = channels[cIdx];
       const jIdx = channel.targetNode;
       if (jIdx < 0 || jIdx >= jointCount) continue;
 
       const times = channel.times;
       const values = channel.values;
-      if (times.length === 0) continue;
+      const tLen = times.length;
+      if (tLen === 0) continue;
 
       let idx0 = 0;
       let idx1 = 0;
       let alpha = 0;
 
-      if (times.length === 1 || time <= times[0]) {
+      if (tLen === 1 || time <= times[0]) {
         idx0 = 0;
         idx1 = 0;
         alpha = 0;
-      } else if (time >= times[times.length - 1]) {
-        idx0 = times.length - 1;
-        idx1 = times.length - 1;
+      } else if (time >= times[tLen - 1]) {
+        idx0 = tLen - 1;
+        idx1 = tLen - 1;
         alpha = 0;
       } else {
-        // Binary search for keyframe bracket
         let lo = 0;
-        let hi = times.length - 2;
+        let hi = tLen - 2;
         while (lo <= hi) {
           const mid = (lo + hi) >> 1;
           if (time >= times[mid] && time <= times[mid + 1]) {
@@ -292,38 +320,48 @@ export class VertexAnimationController {
         const b0 = idx0 * 4;
         const b1 = idx1 * 4;
         if (b1 + 3 >= values.length) continue;
-        const q0: [number, number, number, number] = [values[b0], values[b0 + 1], values[b0 + 2], values[b0 + 3]];
-        const q =
-          alpha === 0 || idx0 === idx1
-            ? q0
-            : this.slerp(q0, [values[b1], values[b1 + 1], values[b1 + 2], values[b1 + 3]], alpha);
-        this.scratchR[jIdx * 4 + 0] = q[0];
-        this.scratchR[jIdx * 4 + 1] = q[1];
-        this.scratchR[jIdx * 4 + 2] = q[2];
-        this.scratchR[jIdx * 4 + 3] = q[3];
+        const dst = jIdx * 4;
+        if (alpha === 0 || idx0 === idx1) {
+          scrR[dst + 0] = values[b0 + 0];
+          scrR[dst + 1] = values[b0 + 1];
+          scrR[dst + 2] = values[b0 + 2];
+          scrR[dst + 3] = values[b0 + 3];
+        } else {
+          this.slerpInto(
+            values[b0 + 0], values[b0 + 1], values[b0 + 2], values[b0 + 3],
+            values[b1 + 0], values[b1 + 1], values[b1 + 2], values[b1 + 3],
+            alpha,
+            scrR,
+            dst
+          );
+        }
       } else if (channel.path === 'translation') {
         const b0 = idx0 * 3;
         const b1 = idx1 * 3;
         if (b1 + 2 >= values.length) continue;
-        this.scratchT[jIdx * 3 + 0] = values[b0 + 0] + (values[b1 + 0] - values[b0 + 0]) * alpha;
-        this.scratchT[jIdx * 3 + 1] = values[b0 + 1] + (values[b1 + 1] - values[b0 + 1]) * alpha;
-        this.scratchT[jIdx * 3 + 2] = values[b0 + 2] + (values[b1 + 2] - values[b0 + 2]) * alpha;
+        const dst = jIdx * 3;
+        scrT[dst + 0] = values[b0 + 0] + (values[b1 + 0] - values[b0 + 0]) * alpha;
+        scrT[dst + 1] = values[b0 + 1] + (values[b1 + 1] - values[b0 + 1]) * alpha;
+        scrT[dst + 2] = values[b0 + 2] + (values[b1 + 2] - values[b0 + 2]) * alpha;
       } else if (channel.path === 'scale') {
         const b0 = idx0 * 3;
         const b1 = idx1 * 3;
         if (b1 + 2 >= values.length) continue;
-        this.scratchS[jIdx * 3 + 0] = values[b0 + 0] + (values[b1 + 0] - values[b0 + 0]) * alpha;
-        this.scratchS[jIdx * 3 + 1] = values[b0 + 1] + (values[b1 + 1] - values[b0 + 1]) * alpha;
-        this.scratchS[jIdx * 3 + 2] = values[b0 + 2] + (values[b1 + 2] - values[b0 + 2]) * alpha;
+        const dst = jIdx * 3;
+        scrS[dst + 0] = values[b0 + 0] + (values[b1 + 0] - values[b0 + 0]) * alpha;
+        scrS[dst + 1] = values[b0 + 1] + (values[b1 + 1] - values[b0 + 1]) * alpha;
+        scrS[dst + 2] = values[b0 + 2] + (values[b1 + 2] - values[b0 + 2]) * alpha;
       }
     }
 
-    // 3. Reconstruct local matrices from evaluated T, R, S
+    // 3. Reconstruct local matrices from evaluated T, R, S (zero array allocation)
     for (let i = 0; i < jointCount; i++) {
-      Mat4.fromTranslationRotationScale(
-        [this.scratchT[i * 3], this.scratchT[i * 3 + 1], this.scratchT[i * 3 + 2]],
-        [this.scratchR[i * 4], this.scratchR[i * 4 + 1], this.scratchR[i * 4 + 2], this.scratchR[i * 4 + 3]],
-        [this.scratchS[i * 3], this.scratchS[i * 3 + 1], this.scratchS[i * 3 + 2]],
+      const b3 = i * 3;
+      const b4 = i * 4;
+      Mat4.fromTRSValues(
+        scrT[b3 + 0], scrT[b3 + 1], scrT[b3 + 2],
+        scrR[b4 + 0], scrR[b4 + 1], scrR[b4 + 2], scrR[b4 + 3],
+        scrS[b3 + 0], scrS[b3 + 1], scrS[b3 + 2],
         this.joints[i].localMatrix
       );
     }
@@ -342,13 +380,14 @@ export class VertexAnimationController {
     }
   }
 
-  private slerp(
-    a: [number, number, number, number],
-    b: [number, number, number, number],
-    t: number
-  ): [number, number, number, number] {
-    let cosHalfTheta = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
-    let bx = b[0], by = b[1], bz = b[2], bw = b[3];
+  private slerpInto(
+    ax: number, ay: number, az: number, aw: number,
+    bx: number, by: number, bz: number, bw: number,
+    t: number,
+    out: Float32Array,
+    outOffset: number
+  ): void {
+    let cosHalfTheta = ax * bx + ay * by + az * bz + aw * bw;
 
     if (cosHalfTheta < 0) {
       bx = -bx; by = -by; bz = -bz; bw = -bw;
@@ -356,29 +395,40 @@ export class VertexAnimationController {
     }
 
     if (Math.abs(cosHalfTheta) >= 1.0) {
-      return [a[0], a[1], a[2], a[3]];
+      out[outOffset + 0] = ax;
+      out[outOffset + 1] = ay;
+      out[outOffset + 2] = az;
+      out[outOffset + 3] = aw;
+      return;
     }
 
     const halfTheta = Math.acos(cosHalfTheta);
     const sinHalfTheta = Math.sqrt(1.0 - cosHalfTheta * cosHalfTheta);
 
     if (Math.abs(sinHalfTheta) < 0.001) {
-      const rx = a[0] * 0.5 + bx * 0.5;
-      const ry = a[1] * 0.5 + by * 0.5;
-      const rz = a[2] * 0.5 + bz * 0.5;
-      const rw = a[3] * 0.5 + bw * 0.5;
-      const len = Math.hypot(rx, ry, rz, rw) || 1;
-      return [rx / len, ry / len, rz / len, rw / len];
+      const rx = ax * 0.5 + bx * 0.5;
+      const ry = ay * 0.5 + by * 0.5;
+      const rz = az * 0.5 + bz * 0.5;
+      const rw = aw * 0.5 + bw * 0.5;
+      const invLen = 1.0 / (Math.hypot(rx, ry, rz, rw) || 1);
+      out[outOffset + 0] = rx * invLen;
+      out[outOffset + 1] = ry * invLen;
+      out[outOffset + 2] = rz * invLen;
+      out[outOffset + 3] = rw * invLen;
+      return;
     }
 
     const ratioA = Math.sin((1 - t) * halfTheta) / sinHalfTheta;
     const ratioB = Math.sin(t * halfTheta) / sinHalfTheta;
 
-    const rx = a[0] * ratioA + bx * ratioB;
-    const ry = a[1] * ratioA + by * ratioB;
-    const rz = a[2] * ratioA + bz * ratioB;
-    const rw = a[3] * ratioA + bw * ratioB;
-    const len = Math.hypot(rx, ry, rz, rw) || 1;
-    return [rx / len, ry / len, rz / len, rw / len];
+    const rx = ax * ratioA + bx * ratioB;
+    const ry = ay * ratioA + by * ratioB;
+    const rz = az * ratioA + bz * ratioB;
+    const rw = aw * ratioA + bw * ratioB;
+    const invLen = 1.0 / (Math.hypot(rx, ry, rz, rw) || 1);
+    out[outOffset + 0] = rx * invLen;
+    out[outOffset + 1] = ry * invLen;
+    out[outOffset + 2] = rz * invLen;
+    out[outOffset + 3] = rw * invLen;
   }
 }

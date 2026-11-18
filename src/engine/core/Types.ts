@@ -127,6 +127,31 @@ export interface EngineStats {
   smartCullMinFloor: number;
   smartCullMaxFloor: number;
   smartCulledCount: number;
+  isDriving: boolean;
+  activeVehicleName: string;
+  vehicleSpeedKmh: number;
+  activeVehicleHealth: number;
+  nearbyVehicleName: string;
+  nearbyVehicleHealth: number;
+}
+
+export interface DriveableVehicle {
+  id: string;
+  name: string;
+  position: [number, number, number];
+  rotationY: number;
+  speed: number;
+  velX: number;
+  velZ: number;
+  angularVelY: number;
+  tiltX: number;
+  tiltZ: number;
+  steerAngle: number;
+  health: number;
+  maxHealth: number;
+  impactCooldown: number;
+  entityIds: number[];
+  colliderId: string;
 }
 
 export interface DestroyerConfig {

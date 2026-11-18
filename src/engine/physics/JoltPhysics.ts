@@ -7,7 +7,8 @@
  * - Proximity Triggers (Automatic opening doors)
  */
 
-import { ProceduralModels } from '../loaders/ProceduralModels';
+import { BuildingColliderSpec, ProceduralModels } from '../loaders/ProceduralModels';
+import type { DriveableVehicle } from '../core/Types';
 
 export interface BoxCollider {
   id: string;
@@ -58,6 +59,7 @@ export interface CharacterCapsule {
 export class JoltPhysics {
   public static readonly maxStepHeight = 0.55; // Auto stair-step climb height
   public colliders: Map<string, BoxCollider> = new Map();
+  private colliderList: BoxCollider[] = [];
 
   // Dynamic state
   public elevatorY = 0.15; // Elevator platform top Y
@@ -71,21 +73,69 @@ export class JoltPhysics {
   public doorLeftId = 'door_left';
   public doorRightId = 'door_right';
 
-  // Dynamic Moveable Props (crates, barrels, mid-level convex shapes)
+  // Dynamic Moveable Props & Driveable Vehicles
   public moveableObjects: MoveableObject[] = [];
   private propColliderLookup: Map<string, MoveableObject> = new Map();
+  public vehicles: DriveableVehicle[] = [];
+  private vehicleColliderLookup: Map<string, DriveableVehicle> = new Map();
   public npcPunchTargets: NPCPunchTarget[] = [];
+
+  // Pre-allocated scratch buffers for ZERO per-frame heap allocations
+  private scratchDynamicResult = { elevatorDeltaY: 0 };
+  private scratchPunchNames: string[] = [];
+  private scratchPunchNPCIds: string[] = [];
+  private scratchPunchResult = {
+    hitCount: 0,
+    hitNames: this.scratchPunchNames,
+    hitNPCIds: this.scratchPunchNPCIds,
+  };
+  private scratchNearby: BoxCollider[] = [];
+  private scratchHitCollidersA: BoxCollider[] = [];
+  private scratchHitCollidersB: BoxCollider[] = [];
+  private scratchResolveA = { x: 0, z: 0, blocked: false, hitColliders: this.scratchHitCollidersA };
+  private scratchResolveB = { x: 0, z: 0, blocked: false, hitColliders: this.scratchHitCollidersB };
+  private scratchCharPos: [number, number, number] = [0, 0, 0];
+  private scratchCharResult = {
+    newPos: this.scratchCharPos,
+    isGrounded: false,
+    hitCeiling: false,
+    standingOnElevator: false,
+  };
+  private scratchVehicleResult = {
+    x: 0,
+    y: 0,
+    z: 0,
+    collided: false,
+  };
 
   constructor() {
     this.setupDefaultBuildingPhysics();
   }
 
   public addBoxCollider(collider: BoxCollider): void {
+    const existed = this.colliders.has(collider.id);
     this.colliders.set(collider.id, collider);
+    if (existed) {
+      for (let i = 0; i < this.colliderList.length; i++) {
+        if (this.colliderList[i].id === collider.id) {
+          this.colliderList[i] = collider;
+          return;
+        }
+      }
+    }
+    this.colliderList.push(collider);
   }
 
   public removeBoxCollider(id: string): void {
-    this.colliders.delete(id);
+    if (!this.colliders.delete(id)) return;
+    for (let i = 0; i < this.colliderList.length; i++) {
+      if (this.colliderList[i].id === id) {
+        const last = this.colliderList.length - 1;
+        if (i !== last) this.colliderList[i] = this.colliderList[last];
+        this.colliderList.pop();
+        return;
+      }
+    }
   }
 
   public registerNPCPunchTarget(target: NPCPunchTarget): void {
@@ -139,11 +189,19 @@ export class JoltPhysics {
     return obj;
   }
 
+  public registerVehicle(vehicle: DriveableVehicle): void {
+    this.vehicles.push(vehicle);
+    this.vehicleColliderLookup.set(vehicle.colliderId, vehicle);
+  }
+
   public clear(): void {
     this.colliders.clear();
-    this.moveableObjects = [];
+    this.colliderList.length = 0;
+    this.moveableObjects.length = 0;
     this.propColliderLookup.clear();
-    this.npcPunchTargets = [];
+    this.vehicles.length = 0;
+    this.vehicleColliderLookup.clear();
+    this.npcPunchTargets.length = 0;
   }
 
   public setElevatorTargetFloor(floor: number): void {
@@ -251,6 +309,19 @@ export class JoltPhysics {
     this.addSkyscraperPhysics([60, 0, 0]);
   }
 
+  public addCityColliders(specs: BuildingColliderSpec[]): void {
+    for (let i = 0; i < specs.length; i++) {
+      const spec = specs[i];
+      this.addBoxCollider({
+        id: spec.id,
+        name: spec.name,
+        center: [spec.center[0], spec.center[1], spec.center[2]],
+        size: [spec.size[0], spec.size[1], spec.size[2]],
+        category: spec.category,
+      });
+    }
+  }
+
   /**
    * Update dynamic physics objects (Moving Elevator & Automatic Door)
    */
@@ -309,7 +380,8 @@ export class JoltPhysics {
     const eleRoof = this.colliders.get('elevator_roof');
     if (eleRoof) eleRoof.center[1] = this.elevatorY + 2.7;
 
-    return { elevatorDeltaY };
+    this.scratchDynamicResult.elevatorDeltaY = elevatorDeltaY;
+    return this.scratchDynamicResult;
   }
 
   /**
@@ -325,8 +397,10 @@ export class JoltPhysics {
     const fx = forwardDir[0] / fLen;
     const fz = forwardDir[2] / fLen;
 
-    const hitNames: string[] = [];
-    const hitNPCIds: string[] = [];
+    const hitNames = this.scratchPunchNames;
+    const hitNPCIds = this.scratchPunchNPCIds;
+    hitNames.length = 0;
+    hitNPCIds.length = 0;
     const fistY = playerPos[1] + 1.15;
 
     for (let i = 0; i < this.moveableObjects.length; i++) {
@@ -393,7 +467,46 @@ export class JoltPhysics {
       }
     }
 
-    return { hitCount: hitNames.length, hitNames, hitNPCIds };
+    // Check driveable cars in oriented box space (every punch deals a little damage + suspension rock)
+    for (let i = 0; i < this.vehicles.length; i++) {
+      const car = this.vehicles[i];
+      const dx = playerPos[0] - car.position[0];
+      const dz = playerPos[2] - car.position[2];
+      const dy = car.position[1] + 0.65 - fistY;
+      if (Math.abs(dy) > 1.75) continue;
+
+      const cosR = Math.cos(car.rotationY);
+      const sinR = Math.sin(car.rotationY);
+      const localX = dx * cosR - dz * sinR;
+      const localZ = dx * sinR + dz * cosR;
+      const clampedX = Math.max(-1.02, Math.min(1.02, localX));
+      const clampedZ = Math.max(-2.22, Math.min(2.22, localZ));
+      const surfaceDist = Math.hypot(localX - clampedX, localZ - clampedZ);
+      if (surfaceDist > 1.85) continue;
+
+      const closestWorldX = car.position[0] + clampedX * cosR + clampedZ * sinR;
+      const closestWorldZ = car.position[2] - clampedX * sinR + clampedZ * cosR;
+      const toCarX = closestWorldX - playerPos[0];
+      const toCarZ = closestWorldZ - playerPos[2];
+      const toLen = Math.hypot(toCarX, toCarZ);
+      const dotFwd = toLen > 0.001 ? (toCarX * fx + toCarZ * fz) / toLen : 1.0;
+
+      if (dotFwd > 0.08 || surfaceDist < 0.75) {
+        // Every punch deals 8% damage to the car + rocks its body slightly
+        car.health = Math.max(0, car.health - 8);
+        car.velX += fx * 2.4;
+        car.velZ += fz * 2.4;
+        const armX = closestWorldX - car.position[0];
+        const armZ = closestWorldZ - car.position[2];
+        car.angularVelY += (armZ * fx - armX * fz) * 0.25;
+        car.tiltX = -fz * 0.075;
+        car.tiltZ = fx * 0.075;
+        hitNames.push(`${car.name} (${car.health}%)`);
+      }
+    }
+
+    this.scratchPunchResult.hitCount = hitNames.length;
+    return this.scratchPunchResult;
   }
 
   /**
@@ -430,7 +543,10 @@ export class JoltPhysics {
 
       let grounded = false;
 
-      for (const col of this.colliders.values()) {
+      const cols = this.colliderList;
+      const colLen = cols.length;
+      for (let cIdx = 0; cIdx < colLen; cIdx++) {
+        const col = cols[cIdx];
         if (col.isTrigger || col.id === obj.colliderId) continue;
 
         const cx = col.center[0];
@@ -552,8 +668,11 @@ export class JoltPhysics {
     maxDist: number
   ): number {
     let closestT = maxDist;
+    const cols = this.colliderList;
+    const colLen = cols.length;
 
-    for (const collider of this.colliders.values()) {
+    for (let cIdx = 0; cIdx < colLen; cIdx++) {
+      const collider = cols[cIdx];
       if (collider.isTrigger) continue;
 
       const c = collider.center;
@@ -623,12 +742,14 @@ export class JoltPhysics {
     z: number,
     capsuleRadius: number,
     capsuleHeight: number,
-    nearby: BoxCollider[]
+    nearby: BoxCollider[],
+    outRes: { x: number; z: number; blocked: boolean; hitColliders: BoxCollider[] }
   ): { x: number; z: number; blocked: boolean; hitColliders: BoxCollider[] } {
     let px = x;
     let pz = z;
     let blocked = false;
-    const hitColliders: BoxCollider[] = [];
+    const hitColliders = outRes.hitColliders;
+    hitColliders.length = 0;
 
     for (let iter = 0; iter < 8; iter++) {
       let hit = false;
@@ -720,7 +841,10 @@ export class JoltPhysics {
       pz += bestNz * push;
     }
 
-    return { x: px, z: pz, blocked, hitColliders };
+    outRes.x = px;
+    outRes.z = pz;
+    outRes.blocked = blocked;
+    return outRes;
   }
 
   /**
@@ -786,8 +910,12 @@ export class JoltPhysics {
     const minSweepZ = Math.min(pz, pz + vz) - padXZ;
     const maxSweepZ = Math.max(pz, pz + vz) + padXZ;
 
-    const nearby: BoxCollider[] = [];
-    for (const col of this.colliders.values()) {
+    const nearby = this.scratchNearby;
+    nearby.length = 0;
+    const cols = this.colliderList;
+    const colLen = cols.length;
+    for (let cIdx = 0; cIdx < colLen; cIdx++) {
+      const col = cols[cIdx];
       if (col.isTrigger) continue;
       const c = col.center;
       const s = col.size;
@@ -815,7 +943,7 @@ export class JoltPhysics {
       const targetX = px + stepVx;
       const targetZ = pz + stepVz;
 
-      const resolved = this.resolveHorizontal(targetX, py, targetZ, capsuleRadius, capsuleHeight, nearby);
+      const resolved = this.resolveHorizontal(targetX, py, targetZ, capsuleRadius, capsuleHeight, nearby, this.scratchResolveA);
 
       // Check for smooth stair / low-curb auto-step if blocked horizontally while walking/settling (not jumping up)
       if (resolved.blocked && vy <= 0.05) {
@@ -833,7 +961,7 @@ export class JoltPhysics {
         }
 
         if (bestStepY > py && !this.hasVerticalCeilingOverlap(targetX, bestStepY, targetZ, capsuleRadius, capsuleHeight, nearby)) {
-          const steppedRes = this.resolveHorizontal(targetX, bestStepY, targetZ, capsuleRadius, capsuleHeight, nearby);
+          const steppedRes = this.resolveHorizontal(targetX, bestStepY, targetZ, capsuleRadius, capsuleHeight, nearby, this.scratchResolveB);
           const normalProgress = Math.hypot(resolved.x - px, resolved.z - pz);
           const steppedProgress = Math.hypot(steppedRes.x - px, steppedRes.z - pz);
           if (steppedProgress > normalProgress + 0.002) {
@@ -950,7 +1078,7 @@ export class JoltPhysics {
     }
 
     // 4. Final Hard Horizontal Safety Pass (Guarantees 0 penetration at frame end)
-    const finalResolved = this.resolveHorizontal(px, py, pz, capsuleRadius, capsuleHeight, nearby);
+    const finalResolved = this.resolveHorizontal(px, py, pz, capsuleRadius, capsuleHeight, nearby, this.scratchResolveA);
     px = finalResolved.x;
     pz = finalResolved.z;
 
@@ -960,12 +1088,311 @@ export class JoltPhysics {
       isGrounded = true;
     }
 
-    return {
-      newPos: [px, py, pz],
-      isGrounded,
-      hitCeiling,
-      standingOnElevator,
-    };
+    this.scratchCharPos[0] = px;
+    this.scratchCharPos[1] = py;
+    this.scratchCharPos[2] = pz;
+    this.scratchCharResult.isGrounded = isGrounded;
+    this.scratchCharResult.hitCeiling = hitCeiling;
+    this.scratchCharResult.standingOnElevator = standingOnElevator;
+    return this.scratchCharResult;
+  }
+
+  /**
+   * Synchronizes a parked/driven vehicle's AABB collider bounds with its world position & yaw (zero alloc).
+   */
+  public updateVehicleCollider(colliderId: string, x: number, y: number, z: number, rotationY: number): void {
+    const col = this.colliders.get(colliderId);
+    if (!col) return;
+    const absCos = Math.abs(Math.cos(rotationY));
+    const absSin = Math.abs(Math.sin(rotationY));
+    col.center[0] = x;
+    col.center[1] = y + 0.65;
+    col.center[2] = z;
+    col.size[0] = absCos * 1.02 + absSin * 2.22;
+    col.size[1] = 0.65;
+    col.size[2] = absSin * 1.02 + absCos * 2.22;
+  }
+
+  /**
+   * Simulates coasting knockback velocity, tire friction, tilt recovery, and chain collisions
+   * for all non-driven cars (zero heap allocation). Returns true if any parked car moved/tilted.
+   */
+  public updateNonDrivenVehicles(dt: number, activeVehicleIndex: number): boolean {
+    if (this.vehicles.length === 0 || dt <= 0) return false;
+    const clampedDt = Math.min(dt, 0.05);
+    const tiltDecay = Math.max(0, 1.0 - clampedDt * 9.0);
+    const linFriction = Math.max(0, 1.0 - clampedDt * 4.2);
+    const angFriction = Math.max(0, 1.0 - clampedDt * 5.0);
+    let anyDirty = false;
+
+    for (let i = 0; i < this.vehicles.length; i++) {
+      if (i === activeVehicleIndex) continue;
+      const car = this.vehicles[i];
+      if (car.impactCooldown > 0) {
+        car.impactCooldown = Math.max(0, car.impactCooldown - clampedDt);
+      }
+
+      const hasTilt = Math.abs(car.tiltX) > 0.001 || Math.abs(car.tiltZ) > 0.001;
+      const hasVel = Math.abs(car.velX) > 0.04 || Math.abs(car.velZ) > 0.04 || Math.abs(car.angularVelY) > 0.01;
+      if (!hasTilt && !hasVel) {
+        car.velX = 0;
+        car.velZ = 0;
+        car.angularVelY = 0;
+        car.tiltX = 0;
+        car.tiltZ = 0;
+        continue;
+      }
+
+      anyDirty = true;
+      car.tiltX *= tiltDecay;
+      car.tiltZ *= tiltDecay;
+
+      if (hasVel) {
+        car.rotationY += car.angularVelY * clampedDt;
+        const dispX = car.velX * clampedDt;
+        const dispZ = car.velZ * clampedDt;
+        const speedScalar = Math.hypot(car.velX, car.velZ);
+        const res = this.resolveVehicleMovement(
+          car.position[0],
+          car.position[1],
+          car.position[2],
+          dispX,
+          dispZ,
+          car.rotationY,
+          car.colliderId,
+          speedScalar,
+          car
+        );
+        car.position[0] = Math.max(-185, Math.min(250, res.x));
+        car.position[1] = car.position[1] + (res.y - car.position[1]) * Math.min(1.0, clampedDt * 16.0);
+        car.position[2] = Math.max(-165, Math.min(205, res.z));
+        if (res.collided) {
+          car.velX *= 0.35;
+          car.velZ *= 0.35;
+        }
+        car.velX *= linFriction;
+        car.velZ *= linFriction;
+        car.angularVelY *= angFriction;
+        this.updateVehicleCollider(car.colliderId, car.position[0], car.position[1], car.position[2], car.rotationY);
+      }
+    }
+
+    return anyDirty;
+  }
+
+  /**
+   * Two-axle swept vehicle collision solver supporting car-to-car collisions,
+   * crash damage, curb climbing, and moveable prop ramming (zero alloc).
+   */
+  public resolveVehicleMovement(
+    curX: number,
+    curY: number,
+    curZ: number,
+    dispX: number,
+    dispZ: number,
+    rotationY: number,
+    ignoreColliderId: string,
+    vehicleSpeed: number,
+    selfVehicle: DriveableVehicle | null = null
+  ): { x: number; y: number; z: number; collided: boolean } {
+    const fwdX = Math.sin(rotationY);
+    const fwdZ = Math.cos(rotationY);
+    const axleOffset = 1.05;
+    const axleRadius = 0.96;
+
+    const totalDist = Math.hypot(dispX, dispZ);
+    const subSteps = Math.max(1, Math.min(8, Math.ceil(totalDist / 0.28)));
+    const stepX = dispX / subSteps;
+    const stepZ = dispZ / subSteps;
+
+    let px = curX;
+    let pz = curZ;
+    let collided = false;
+    let hitWallHard = false;
+    let targetGroundY = 0.06;
+
+    const pad = 4.0 + totalDist;
+    const minBX = Math.min(curX, curX + dispX) - pad;
+    const maxBX = Math.max(curX, curX + dispX) + pad;
+    const minBZ = Math.min(curZ, curZ + dispZ) - pad;
+    const maxBZ = Math.max(curZ, curZ + dispZ) + pad;
+
+    const nearby = this.scratchNearby;
+    nearby.length = 0;
+    const cols = this.colliderList;
+    for (let i = 0; i < cols.length; i++) {
+      const col = cols[i];
+      if (col.isTrigger || col.id === ignoreColliderId || col.id === 'ground_slab') continue;
+      const c = col.center;
+      const s = col.size;
+      if (c[0] + s[0] < minBX || c[0] - s[0] > maxBX || c[2] + s[2] < minBZ || c[2] - s[2] > maxBZ) continue;
+      if (c[1] - s[1] > curY + 1.85) continue;
+      nearby.push(col);
+    }
+
+    for (let step = 0; step < subSteps; step++) {
+      px += stepX;
+      pz += stepZ;
+      targetGroundY = 0.06;
+
+      for (let iter = 0; iter < 3; iter++) {
+        for (let i = 0; i < nearby.length; i++) {
+          const col = nearby[i];
+          const c = col.center;
+          const s = col.size;
+          const boxTop = c[1] + s[1];
+          const boxBottom = c[1] - s[1];
+
+          const otherCar = this.vehicleColliderLookup.get(col.id);
+
+          // Low sidewalk/apron floors (<= 0.25m): smoothly drive over them instead of blocking
+          if (!otherCar && col.category === 'floor' && boxTop <= 0.25) {
+            if (
+              px + 0.9 >= c[0] - s[0] &&
+              px - 0.9 <= c[0] + s[0] &&
+              pz + 0.9 >= c[2] - s[2] &&
+              pz - 0.9 <= c[2] + s[2]
+            ) {
+              if (boxTop > targetGroundY) targetGroundY = boxTop;
+            }
+            continue;
+          }
+
+          if (boxTop <= curY + 0.24 || boxBottom >= curY + 1.55) continue;
+
+          const minX = c[0] - s[0];
+          const maxX = c[0] + s[0];
+          const minZ = c[2] - s[2];
+          const maxZ = c[2] + s[2];
+
+          // Resolve against front and rear axle spheres so long sedan frame never tunnels corners
+          for (let a = -1; a <= 1; a += 2) {
+            const ax = px + fwdX * axleOffset * a;
+            const az = pz + fwdZ * axleOffset * a;
+            const cx = Math.max(minX, Math.min(ax, maxX));
+            const cz = Math.max(minZ, Math.min(az, maxZ));
+            const dx = ax - cx;
+            const dz = az - cz;
+            const distSq = dx * dx + dz * dz;
+
+            if (distSq < axleRadius * axleRadius) {
+              if (col.category === 'prop') {
+                const propObj = this.propColliderLookup.get(col.id);
+                if (propObj) {
+                  const invMass = 1.0 / Math.max(0.4, propObj.mass);
+                  const speedMag = Math.max(6.5, Math.abs(vehicleSpeed) * 1.15);
+                  const pushDirX = Math.abs(vehicleSpeed) > 0.5 ? fwdX * Math.sign(vehicleSpeed) : (px >= c[0] ? -1 : 1);
+                  const pushDirZ = Math.abs(vehicleSpeed) > 0.5 ? fwdZ * Math.sign(vehicleSpeed) : (pz >= c[2] ? -1 : 1);
+                  propObj.velocity[0] = pushDirX * speedMag * Math.min(1.4, invMass) - dx * 2.5;
+                  propObj.velocity[2] = pushDirZ * speedMag * Math.min(1.4, invMass) - dz * 2.5;
+                  propObj.velocity[1] = Math.max(propObj.velocity[1], 3.2 + Math.abs(vehicleSpeed) * 0.14);
+                  propObj.angularVelY += (a > 0 ? 5.5 : -5.5) * invMass;
+                }
+                continue;
+              }
+
+              collided = true;
+              let pushNx = 0;
+              let pushNz = 0;
+              let pushAmount = 0;
+
+              if (distSq > 1e-7) {
+                const dist = Math.sqrt(distSq);
+                pushNx = dx / dist;
+                pushNz = dz / dist;
+                pushAmount = axleRadius - dist + 0.004;
+              } else {
+                const dL = ax - minX;
+                const dR = maxX - ax;
+                const dB = az - minZ;
+                const dF = maxZ - az;
+                let best = dL;
+                pushNx = -1;
+                pushNz = 0;
+                if (dR < best) { best = dR; pushNx = 1; pushNz = 0; }
+                if (dB < best) { best = dB; pushNx = 0; pushNz = -1; }
+                if (dF < best) { best = dF; pushNx = 0; pushNz = 1; }
+                pushAmount = Math.max(0, best) + axleRadius + 0.004;
+              }
+
+              if (otherCar) {
+                // Car-to-car dynamic split separation + momentum transfer + mutual crash damage
+                px += pushNx * pushAmount * 0.65;
+                pz += pushNz * pushAmount * 0.65;
+                otherCar.position[0] -= pushNx * pushAmount * 0.35;
+                otherCar.position[2] -= pushNz * pushAmount * 0.35;
+                this.updateVehicleCollider(
+                  otherCar.colliderId,
+                  otherCar.position[0],
+                  otherCar.position[1],
+                  otherCar.position[2],
+                  otherCar.rotationY
+                );
+
+                const selfVx = selfVehicle
+                  ? fwdX * vehicleSpeed + selfVehicle.velX
+                  : fwdX * vehicleSpeed;
+                const selfVz = selfVehicle
+                  ? fwdZ * vehicleSpeed + selfVehicle.velZ
+                  : fwdZ * vehicleSpeed;
+                const relVx = selfVx - otherCar.velX;
+                const relVz = selfVz - otherCar.velZ;
+                // Closing speed along normal toward other car (-pushN)
+                const closingSpeed = -(relVx * pushNx + relVz * pushNz);
+
+                if (closingSpeed > 1.2) {
+                  const impulse = Math.max(4.0, closingSpeed * 0.72);
+                  otherCar.velX -= pushNx * impulse;
+                  otherCar.velZ -= pushNz * impulse;
+
+                  // Torque spin based on impact arm vs other car center
+                  const armX = cx - otherCar.position[0];
+                  const armZ = cz - otherCar.position[2];
+                  otherCar.angularVelY += (armZ * (-pushNx) - armX * (-pushNz)) * Math.min(0.45, closingSpeed * 0.028);
+                  otherCar.tiltX = pushNz * Math.min(0.11, closingSpeed * 0.005);
+                  otherCar.tiltZ = -pushNx * Math.min(0.11, closingSpeed * 0.005);
+
+                  if (selfVehicle) {
+                    selfVehicle.tiltX = -pushNz * Math.min(0.09, closingSpeed * 0.004);
+                    selfVehicle.tiltZ = pushNx * Math.min(0.09, closingSpeed * 0.004);
+                  }
+
+                  if (closingSpeed > 3.5) {
+                    const dmg = Math.max(4, Math.min(26, Math.round(3 + closingSpeed * 0.75)));
+                    if (selfVehicle && selfVehicle.impactCooldown <= 0) {
+                      selfVehicle.health = Math.max(0, selfVehicle.health - dmg);
+                      selfVehicle.impactCooldown = 0.35;
+                    }
+                    if (otherCar.impactCooldown <= 0) {
+                      otherCar.health = Math.max(0, otherCar.health - dmg);
+                      otherCar.impactCooldown = 0.35;
+                    }
+                  }
+                }
+              } else {
+                hitWallHard = true;
+                px += pushNx * pushAmount;
+                pz += pushNz * pushAmount;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    if (hitWallHard && selfVehicle && selfVehicle.impactCooldown <= 0 && Math.abs(vehicleSpeed) > 10.0) {
+      const wallDmg = Math.max(3, Math.min(18, Math.round((Math.abs(vehicleSpeed) - 8.5) * 0.65)));
+      selfVehicle.health = Math.max(0, selfVehicle.health - wallDmg);
+      selfVehicle.impactCooldown = 0.40;
+      selfVehicle.tiltX = -fwdZ * 0.08;
+      selfVehicle.tiltZ = fwdX * 0.08;
+    }
+
+    this.scratchVehicleResult.x = px;
+    this.scratchVehicleResult.y = targetGroundY;
+    this.scratchVehicleResult.z = pz;
+    this.scratchVehicleResult.collided = collided;
+    return this.scratchVehicleResult;
   }
 }
 

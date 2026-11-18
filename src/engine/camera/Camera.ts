@@ -96,34 +96,32 @@ export class Camera {
 
     if (this.mode === 'FPS' || this.mode === 'FLY') {
       const speed = this.moveSpeed * deltaTimeSeconds;
-      const forward: [number, number, number] = [
-        Math.sin(this.yaw) * Math.cos(this.pitch),
-        this.mode === 'FLY' ? Math.sin(this.pitch) : 0,
-        Math.cos(this.yaw) * Math.cos(this.pitch),
-      ];
-      const right: [number, number, number] = [
-        Math.cos(this.yaw),
-        0,
-        -Math.sin(this.yaw),
-      ];
+      const cosPitch = Math.cos(this.pitch);
+      const sinYaw = Math.sin(this.yaw);
+      const cosYaw = Math.cos(this.yaw);
+      const fwdX = sinYaw * cosPitch;
+      const fwdY = this.mode === 'FLY' ? Math.sin(this.pitch) : 0;
+      const fwdZ = cosYaw * cosPitch;
+      const rightX = cosYaw;
+      const rightZ = -sinYaw;
 
       if (this.keysPressed['KeyW']) {
-        this.position[0] += forward[0] * speed;
-        this.position[1] += forward[1] * speed;
-        this.position[2] += forward[2] * speed;
+        this.position[0] += fwdX * speed;
+        this.position[1] += fwdY * speed;
+        this.position[2] += fwdZ * speed;
       }
       if (this.keysPressed['KeyS']) {
-        this.position[0] -= forward[0] * speed;
-        this.position[1] -= forward[1] * speed;
-        this.position[2] -= forward[2] * speed;
+        this.position[0] -= fwdX * speed;
+        this.position[1] -= fwdY * speed;
+        this.position[2] -= fwdZ * speed;
       }
       if (this.keysPressed['KeyD']) {
-        this.position[0] += right[0] * speed;
-        this.position[2] += right[2] * speed;
+        this.position[0] += rightX * speed;
+        this.position[2] += rightZ * speed;
       }
       if (this.keysPressed['KeyA']) {
-        this.position[0] -= right[0] * speed;
-        this.position[2] -= right[2] * speed;
+        this.position[0] -= rightX * speed;
+        this.position[2] -= rightZ * speed;
       }
       if (this.keysPressed['KeyE'] || this.keysPressed['Space']) {
         this.position[1] += speed;
@@ -132,9 +130,9 @@ export class Camera {
         this.position[1] -= speed;
       }
 
-      this.target[0] = this.position[0] + forward[0];
-      this.target[1] = this.position[1] + (this.mode === 'FLY' ? forward[1] : Math.sin(this.pitch));
-      this.target[2] = this.position[2] + forward[2];
+      this.target[0] = this.position[0] + fwdX;
+      this.target[1] = this.position[1] + (this.mode === 'FLY' ? fwdY : Math.sin(this.pitch));
+      this.target[2] = this.position[2] + fwdZ;
     }
 
     this.updateMatrices();

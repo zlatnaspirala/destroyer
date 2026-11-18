@@ -77,13 +77,9 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
     return;
   }
 
-  // sphereCenter.xyz is stored in world space by FlatEntityManager
+  // sphereCenter.xyz and sphereCenter.w are stored in world space by FlatEntityManager
   let worldCenter = entity.sphereCenter.xyz;
-  let maxScale = max(
-    length(entity.worldMatrix[0].xyz),
-    max(length(entity.worldMatrix[1].xyz), length(entity.worldMatrix[2].xyz))
-  );
-  let worldRadius = entity.sphereCenter.w * maxScale;
+  let worldRadius = entity.sphereCenter.w;
 
   var isVisible = true;
   if (camera.cullingEnabled == 1u) {
@@ -172,11 +168,7 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
 
     if (isActive) {
       let worldCenter = entity.sphereCenter.xyz;
-      let maxScale = max(
-        length(entity.worldMatrix[0].xyz),
-        max(length(entity.worldMatrix[1].xyz), length(entity.worldMatrix[2].xyz))
-      );
-      let worldRadius = entity.sphereCenter.w * maxScale;
+      let worldRadius = entity.sphereCenter.w;
 
       if (camera.cullingEnabled == 1u) {
         isVisible = isSphereInFrustum(worldCenter, worldRadius) && isWithinCullDistance(worldCenter, worldRadius);

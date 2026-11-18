@@ -280,34 +280,33 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
   var emissive = mat.emissiveColor.rgb * clamp(mat.emissiveColor.a, 0.0, 4.0);
 
   let isSkinnedVertex = (in.skinWeightDebug.x + in.skinWeightDebug.y + in.skinWeightDebug.z) > 0.01;
-  let isFloor = !isSkinnedVertex && in.worldPos.y < 0.25 && abs(N.y) > 0.65;
+  let isGroundGrid = !isSkinnedVertex && (mat.flags & 4u) != 0u && abs(N.y) > 0.65;
+  let isAsphaltRoad = !isSkinnedVertex && (mat.flags & 8u) != 0u && abs(N.y) > 0.65;
 
-  if (isFloor) {
-    // 1. High-Tech Hexagonal & Modular Grid Arena Floor
-    let floorCoord = in.worldPos.xz * 0.4;
+  if (isGroundGrid) {
+    // 1. Urban Ground & Subtle Modular District Grid
+    let floorCoord = in.worldPos.xz * 0.25;
     let distToCam = length(camera.camPos.xyz - in.worldPos);
-    let fade = clamp(1.0 - distToCam / 90.0, 0.0, 1.0);
+    let fade = clamp(1.0 - distToCam / 140.0, 0.0, 1.0);
 
-    // Subtle panel tiles
     let tileF = fract(floorCoord);
     let tileEdge = min(min(tileF.x, 1.0 - tileF.x), min(tileF.y, 1.0 - tileF.y));
-    let isGroove = smoothstep(0.06, 0.01, tileEdge) * fade;
+    let isGroove = smoothstep(0.05, 0.01, tileEdge) * fade;
 
-    // Dark titanium floor with subtle tone differences
     let tileId = floor(floorCoord);
     let tileHash = fract(sin(tileId.x * 37.1 + tileId.y * 53.7) * 43758.5453);
-    let tileTint = mix(vec3<f32>(0.11, 0.13, 0.17), vec3<f32>(0.16, 0.18, 0.23), tileHash * 0.4);
+    let tileTint = mix(vec3<f32>(0.15, 0.17, 0.16), vec3<f32>(0.19, 0.21, 0.19), tileHash * 0.45);
 
-    albedo = mix(tileTint, vec3<f32>(0.04, 0.05, 0.07), isGroove);
-    roughness = mix(0.24, 0.55, isGroove);
-    metallic = 0.85;
-
-    // Cybernetic tactical neon line grid (accent every 4 units)
-    let majorCoord = in.worldPos.xz * 0.1;
-    let majorF = abs(fract(majorCoord - 0.5) - 0.5);
-    let majorLine = min(majorF.x, majorF.y);
-    let majorNeon = smoothstep(0.035, 0.008, majorLine) * fade;
-    emissive += vec3<f32>(0.06, 0.28, 0.55) * majorNeon * 1.8;
+    albedo = mix(tileTint, vec3<f32>(0.10, 0.12, 0.12), isGroove * 0.6);
+    roughness = 0.88;
+    metallic = 0.05;
+  } else if (isAsphaltRoad) {
+    // 1b. Crisp Granular Urban Asphalt Street Surface
+    let roadGrain = fract(sin(floor(in.worldPos.x * 18.0) * 12.9898 + floor(in.worldPos.z * 18.0) * 78.233) * 43758.5453);
+    let speckle = (roadGrain - 0.5) * 0.03;
+    albedo = clamp(mat.baseColor.rgb + vec3<f32>(speckle), vec3<f32>(0.03), vec3<f32>(0.25));
+    roughness = clamp(mat.roughness + speckle * 0.4, 0.75, 0.96);
+    metallic = 0.02;
   } else if ((mat.flags & 1u) != 0u && in.skinWeightDebug.x > 0.01) {
     // 2. Skinned Combat Mech Custom High-Detail PBR Finish
     let j = in.primaryJoint;
@@ -368,7 +367,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
   // Directional Light with soft PCF shadow
   let shadow = calculateShadow(in.worldPos, N);
-  let shadowFactor = mix(0.15, 1.0, shadow); // Ambient bounce inside shadow, avoiding flat blackness
+  let shadowFactor = mix(0.28, 1.0, shadow); // Soft indoor bounce so interior NPC & lobby remain crisp
 
   // Calibrated Direct Sunlight Radiance with Cast Shadows
   let lightIntensity = clamp(engine.lightColor.a, 0.1, 4.0);

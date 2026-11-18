@@ -12,12 +12,15 @@ import { Camera } from './camera/Camera';
 import { PlayerController } from './controls/PlayerController';
 import { DeviceManager } from './core/Device';
 import { FlatEntityManager } from './core/FlatEntityManager';
-import { DestroyerConfig, EngineStats, FlatMaterial } from './core/Types';
+import { DestroyerConfig, DriveableVehicle, EngineStats, FlatMaterial } from './core/Types';
 import { GLBLoader, GLBTextureImage, ParsedGLBPrimitive } from './loaders/GLBLoader';
+import { CityBuilder } from './loaders/CityBuilder';
 import { ProceduralModels } from './loaders/ProceduralModels';
 import { Mat4 } from './math/Mat4';
 import { IndirectRenderer } from './render/IndirectRenderer';
 import { FBXLoader } from './loaders/FBXLoader';
+
+export type { DriveableVehicle };
 
 export const isMobileBrowser = (): boolean => {
   if (typeof navigator === 'undefined') return false;
@@ -79,6 +82,12 @@ export class DestroyerEngine {
     smartCullMinFloor: 0,
     smartCullMaxFloor: 10,
     smartCulledCount: 0,
+    isDriving: false,
+    activeVehicleName: '',
+    vehicleSpeedKmh: 0,
+    activeVehicleHealth: 100,
+    nearbyVehicleName: '',
+    nearbyVehicleHealth: 100,
   };
 
   private currentCanvas: HTMLCanvasElement | null = null;
@@ -91,6 +100,8 @@ export class DestroyerEngine {
   private groundSlabEntityId = -1;
   private playerEntityIds: number[] = [];
   private npcEntityIds: number[] = [];
+  private cityEntityIds: number[] = [];
+  public vehicles: DriveableVehicle[] = [];
 
   private customPlayerGLB: { buffer: ArrayBuffer; name: string } | null = null;
   private customNpcGLB: { buffer: ArrayBuffer; name: string } | null = null;
@@ -100,14 +111,14 @@ export class DestroyerEngine {
   private playerJumpClipName: string | null = 'BVH_Jump_Mocap';
   private playerPunchClipName: string | null = 'BVH_Punch_Mocap';
 
-  // Sitting Desk Office Worker NPC state
+  // Sitting Desk Office Worker NPC state (placed at Floor 0 Front Reception Desk)
   private npcJointOffset = 0;
   private npcHasSkinning = false;
   private npcIdleClipName: string | null = null;
   private npcHitClipName: string | null = null;
   private npcHitTimer = 0;
   private npcHitDuration = 0.9;
-  private npcBasePos: [number, number, number] = [0, 1.14, 6.08];
+  private npcBasePos: [number, number, number] = [-2.5, 0.45, 16.82];
   public activeNpcSourceLabel = 'Procedural Sitting Worker';
 
   // Moveable prop mesh/material caches (primitives + mid-level convex)
@@ -128,6 +139,7 @@ export class DestroyerEngine {
   private sharedAtlasMatRefs: { matId: number; globalTexIdx: number }[] = [];
 
   private tempPropMat = Mat4.create();
+  private tempDynamicMat = Mat4.create();
   private userLockedClip = false;
   public activePlayerSourceLabel = 'Procedural Humanoid';
 
@@ -267,10 +279,19 @@ export class DestroyerEngine {
     this.renderer.resize(width, height);
   }
 
+  public setPlayerEntitiesVisible(visible: boolean): void {
+    const ids = this.playerEntityIds;
+    for (let i = 0; i < ids.length; i++) {
+      this.entityManager.setEntityVisible(ids[i], visible);
+    }
+  }
+
   private loop = (currentTime: number) => {
     if (!this.isRunning || this.isDeviceLost) return;
 
     try {
+      const workStart = performance.now();
+
       // Ensure canvas dimensions match DOM layout
       if (this.currentCanvas) {
         const clientW = this.currentCanvas.clientWidth;
@@ -295,65 +316,64 @@ export class DestroyerEngine {
       this.frameCount++;
       if (currentTime - this.lastFpsUpdate >= 500) {
         this.currentFps = Math.round((this.frameCount * 1000) / (currentTime - this.lastFpsUpdate));
-        this.currentFrameTime = deltaMs;
         this.frameCount = 0;
         this.lastFpsUpdate = currentTime;
       }
 
-      // Update dynamic physics objects (automatic sliding door, elevator, moveable props)
+      // Update dynamic physics objects (automatic sliding door, elevator, moveable props) - zero alloc
       if (this.physics) {
-        const { elevatorDeltaY } = this.physics.updateDynamicPhysics(deltaSec, this.playerController.position);
+        const physDyn = this.physics.updateDynamicPhysics(deltaSec, this.playerController.position);
+        const elevatorDeltaY = physDyn.elevatorDeltaY;
+        const dynMat = this.tempDynamicMat;
 
         // Update Left Sliding Door Matrix
         if (this.doorLeftEntityId >= 0) {
-          const leftDoorMat = Mat4.create();
           const doorX = -2.0 - this.physics.doorOpenFactor * 3.5;
-          Mat4.fromTranslation([doorX, 1.2, 20.0], leftDoorMat);
-          this.entityManager.updateEntityMatrix(this.doorLeftEntityId, leftDoorMat, [doorX, 1.2, 20.0], 4.0);
+          Mat4.fromTranslationXYZ(doorX, 1.2, 20.0, dynMat);
+          this.entityManager.updateEntityMatrixXYZ(this.doorLeftEntityId, dynMat, doorX, 1.2, 20.0, 4.0);
         }
 
         // Update Right Sliding Door Matrix
         if (this.doorRightEntityId >= 0) {
-          const rightDoorMat = Mat4.create();
           const doorX = 2.0 + this.physics.doorOpenFactor * 3.5;
-          Mat4.fromTranslation([doorX, 1.2, 20.0], rightDoorMat);
-          this.entityManager.updateEntityMatrix(this.doorRightEntityId, rightDoorMat, [doorX, 1.2, 20.0], 4.0);
+          Mat4.fromTranslationXYZ(doorX, 1.2, 20.0, dynMat);
+          this.entityManager.updateEntityMatrixXYZ(this.doorRightEntityId, dynMat, doorX, 1.2, 20.0, 4.0);
         }
 
         // Update Moving Elevator Platform Matrix
+        const eleY = this.physics.elevatorY;
         if (this.elevatorEntityId >= 0) {
-          const eleMat = Mat4.create();
-          Mat4.fromTranslation([14.0, this.physics.elevatorY, 10.0], eleMat);
-          this.entityManager.updateEntityMatrix(this.elevatorEntityId, eleMat, [14.0, this.physics.elevatorY, 10.0], 5.0);
+          Mat4.fromTranslationXYZ(14.0, eleY, 10.0, dynMat);
+          this.entityManager.updateEntityMatrixXYZ(this.elevatorEntityId, dynMat, 14.0, eleY, 10.0, 5.0);
         }
 
         // Update Elevator Cab Buttons
         if (this.elevatorBtnUpEntityId >= 0) {
-          const btnUpMat = Mat4.create();
-          const btnUpPos: [number, number, number] = [14.0 - 1.98, this.physics.elevatorY + 1.7, 10.0 + 0.8];
-          Mat4.fromTranslation(btnUpPos, btnUpMat);
-          this.entityManager.updateEntityMatrix(this.elevatorBtnUpEntityId, btnUpMat, btnUpPos, 1.0);
+          Mat4.fromTranslationXYZ(12.02, eleY + 1.7, 10.8, dynMat);
+          this.entityManager.updateEntityMatrixXYZ(this.elevatorBtnUpEntityId, dynMat, 12.02, eleY + 1.7, 10.8, 1.0);
         }
 
         if (this.elevatorBtnDownEntityId >= 0) {
-          const btnDownMat = Mat4.create();
-          const btnDownPos: [number, number, number] = [14.0 - 1.98, this.physics.elevatorY + 1.3, 10.0 + 0.8];
-          Mat4.fromTranslation(btnDownPos, btnDownMat);
-          this.entityManager.updateEntityMatrix(this.elevatorBtnDownEntityId, btnDownMat, btnDownPos, 1.0);
+          Mat4.fromTranslationXYZ(12.02, eleY + 1.3, 10.8, dynMat);
+          this.entityManager.updateEntityMatrixXYZ(this.elevatorBtnDownEntityId, dynMat, 12.02, eleY + 1.3, 10.8, 1.0);
         }
 
-        // If player is standing on elevator platform, ride elevator
-        const playerOnElevator =
-          Math.hypot(this.playerController.position[0] - 14.0, this.playerController.position[2] - 10.0) < 2.1 &&
-          Math.abs(this.playerController.position[1] - (this.physics.elevatorY + 0.15)) < 0.35;
-        if (playerOnElevator && elevatorDeltaY !== 0) {
-          this.playerController.position[1] += elevatorDeltaY;
+        // If player is standing on elevator platform, ride elevator (only on foot)
+        if (this.playerController.activeVehicleIndex < 0) {
+          const pPos = this.playerController.position;
+          const playerOnElevator =
+            Math.hypot(pPos[0] - 14.0, pPos[2] - 10.0) < 2.1 &&
+            Math.abs(pPos[1] - (eleY + 0.15)) < 0.35;
+          if (playerOnElevator && elevatorDeltaY !== 0) {
+            pPos[1] += elevatorDeltaY;
+          }
         }
 
-        // Update moveable crates & barrels physics and sync entity matrices
+        // Update moveable crates & barrels physics and sync entity matrices (zero alloc)
         this.physics.updateMoveableObjects(deltaSec);
-        for (let i = 0; i < this.physics.moveableObjects.length; i++) {
-          const obj = this.physics.moveableObjects[i];
+        const moveObjs = this.physics.moveableObjects;
+        for (let i = 0; i < moveObjs.length; i++) {
+          const obj = moveObjs[i];
           if (obj.entityId < 0) continue;
           const cx = Math.cos(obj.tiltX * 0.5), sx = Math.sin(obj.tiltX * 0.5);
           const cy = Math.cos(obj.rotationY * 0.5), sy = Math.sin(obj.rotationY * 0.5);
@@ -362,12 +382,37 @@ export class DestroyerEngine {
           const qx = cy * sx * cz + sy * cx * sz;
           const qy = sy * cx * cz - cy * sx * sz;
           const qz = cy * cx * sz - sy * sx * cz;
-          Mat4.fromTranslationRotationScale(obj.position, [qx, qy, qz, qw], [1, 1, 1], this.tempPropMat);
+          const op = obj.position;
+          Mat4.fromTRSValues(op[0], op[1], op[2], qx, qy, qz, qw, 1, 1, 1, this.tempPropMat);
           const rad = Math.max(1.2, Math.hypot(obj.halfExtents[0], obj.halfExtents[1], obj.halfExtents[2]) + 0.3);
-          this.entityManager.updateEntityMatrix(obj.entityId, this.tempPropMat, obj.position, rad);
+          this.entityManager.updateEntityMatrixXYZ(obj.entityId, this.tempPropMat, op[0], op[1], op[2], rad);
           if (obj.extraEntityIds) {
-            for (let ex = 0; ex < obj.extraEntityIds.length; ex++) {
-              this.entityManager.updateEntityMatrix(obj.extraEntityIds[ex], this.tempPropMat, obj.position, rad);
+            const extras = obj.extraEntityIds;
+            for (let ex = 0; ex < extras.length; ex++) {
+              this.entityManager.updateEntityMatrixXYZ(extras[ex], this.tempPropMat, op[0], op[1], op[2], rad);
+            }
+          }
+        }
+
+        // Update non-driven parked/coasting cars (knockback, spin, tilt wobble & chain collisions) - zero alloc
+        const anyParkedMoved = this.physics.updateNonDrivenVehicles(deltaSec, this.playerController.activeVehicleIndex);
+        if (anyParkedMoved) {
+          const activeVehIdx = this.playerController.activeVehicleIndex;
+          for (let vIdx = 0; vIdx < this.vehicles.length; vIdx++) {
+            if (vIdx === activeVehIdx) continue;
+            const car = this.vehicles[vIdx];
+            const cx = Math.cos(car.tiltX * 0.5), sx = Math.sin(car.tiltX * 0.5);
+            const cy = Math.cos(car.rotationY * 0.5), sy = Math.sin(car.rotationY * 0.5);
+            const cz = Math.cos(car.tiltZ * 0.5), sz = Math.sin(car.tiltZ * 0.5);
+            const qw = cy * cx * cz + sy * sx * sz;
+            const qx = cy * sx * cz + sy * cx * sz;
+            const qy = sy * cx * cz - cy * sx * sz;
+            const qz = cy * cx * sz - sy * sx * cz;
+            const cp = car.position;
+            Mat4.fromTRSValues(cp[0], cp[1], cp[2], qx, qy, qz, qw, 1, 1, 1, this.tempPropMat);
+            const carEnts = car.entityIds;
+            for (let eIdx = 0; eIdx < carEnts.length; eIdx++) {
+              this.entityManager.updateEntityMatrixXYZ(carEnts[eIdx], this.tempPropMat, cp[0], cp[1], cp[2], 3.2);
             }
           }
         }
@@ -376,11 +421,13 @@ export class DestroyerEngine {
       // Camera update
       this.camera.update(deltaSec);
 
-      // Player controller update (3rd Person controls & camera follow)
+      // Player / Vehicle controller update
       this.playerController.update(deltaSec);
 
-      // Vertex animation update (supports both procedural 5-bone rig and custom GLB Mixamo rigs)
-      if (this.userLockedClip) {
+      // Vertex animation update (skipped when inside a car to save CPU skinning work)
+      if (this.playerController.activeVehicleIndex >= 0) {
+        // Player character hidden inside vehicle
+      } else if (this.userLockedClip) {
         this.animController.update(deltaSec);
       } else if (!this.isCustomPlayerRig) {
         if (this.playerController.isPunching) {
@@ -428,8 +475,10 @@ export class DestroyerEngine {
         }
       }
 
-      // Independent Sitting Desk Woman NPC Animation Evaluation (writes at npcJointOffset)
+      // Independent Sitting Desk Woman NPC Animation Evaluation (writes at npcJointOffset, zero alloc)
       if (this.npcHasSkinning && this.npcAnimController.joints.length > 0) {
+        const bx = this.npcBasePos[0], by = this.npcBasePos[1], bz = this.npcBasePos[2];
+        const npcIds = this.npcEntityIds;
         if (this.npcHitTimer > 0 && this.npcHitClipName) {
           const hitPlaybackRate = this.npcHitDuration > 3.0 ? 1.35 : 1.0;
           const prevRemaining = this.npcHitTimer;
@@ -441,19 +490,15 @@ export class DestroyerEngine {
             this.entityManager.jointMatrices,
             this.npcJointOffset
           );
-          // Subtle physical flinch wobble only during initial punch impact (first 0.55s)
-          if (this.npcEntityIds.length > 0) {
+          if (npcIds.length > 0) {
             const impactWindow = Math.min(0.55, this.npcHitDuration);
             const flinch =
               elapsed < impactWindow
                 ? Math.sin((elapsed / Math.max(0.05, impactWindow)) * Math.PI) * 0.08
                 : 0;
-            Mat4.fromTranslation(
-              [this.npcBasePos[0], this.npcBasePos[1], this.npcBasePos[2] - flinch],
-              this.tempPropMat
-            );
-            for (const eid of this.npcEntityIds) {
-              this.entityManager.updateEntityMatrix(eid, this.tempPropMat, this.npcBasePos, 2.0);
+            Mat4.fromTranslationXYZ(bx, by, bz - flinch, this.tempPropMat);
+            for (let nIdx = 0; nIdx < npcIds.length; nIdx++) {
+              this.entityManager.updateEntityMatrixXYZ(npcIds[nIdx], this.tempPropMat, bx, by + 0.7, bz - flinch, 2.0);
             }
           }
         } else {
@@ -463,7 +508,6 @@ export class DestroyerEngine {
             }
             this.npcAnimController.update(deltaSec, this.entityManager.jointMatrices, this.npcJointOffset);
           } else if (this.npcHitClipName) {
-            // Single-clip getting-punched GLB: frame 0 holds the calm seated pose cleanly
             this.npcAnimController.evaluateClipAtTime(
               this.npcHitClipName,
               0,
@@ -471,10 +515,10 @@ export class DestroyerEngine {
               this.npcJointOffset
             );
           }
-          if (this.npcEntityIds.length > 0) {
-            Mat4.fromTranslation(this.npcBasePos, this.tempPropMat);
-            for (const eid of this.npcEntityIds) {
-              this.entityManager.updateEntityMatrix(eid, this.tempPropMat, this.npcBasePos, 2.0);
+          if (npcIds.length > 0) {
+            Mat4.fromTranslationXYZ(bx, by, bz, this.tempPropMat);
+            for (let nIdx = 0; nIdx < npcIds.length; nIdx++) {
+              this.entityManager.updateEntityMatrixXYZ(npcIds[nIdx], this.tempPropMat, bx, by + 0.7, bz, 2.0);
             }
           }
         }
@@ -483,26 +527,52 @@ export class DestroyerEngine {
       // Update Smart Floor/Interior Culling before uploading entity flags to GPU
       this.updateSmartCulling();
 
-      // Upload dynamic entities & joint matrices to GPU
+      // Upload dynamic entities & joint matrices to GPU and execute culled render
       if (!this.deviceManager.isDeviceLost) {
         const device = this.deviceManager.getDevice();
         this.entityManager.uploadToGPU(device);
 
-        // Render pass
         const timeSec = currentTime * 0.001;
         this.renderer.render(timeSec, this.stats);
       }
 
-      // Update telemetry stats
+      const workMs = performance.now() - workStart;
+      this.currentFrameTime += (workMs - this.currentFrameTime) * 0.2;
+
+      // Update telemetry stats (zero allocation)
       this.stats.fps = this.currentFps;
-      this.stats.frameTimeMs = Number(this.currentFrameTime.toFixed(1));
-      this.stats.totalInstances = this.entityManager.activeEntityCount;
-      const activeVisibleCount = this.entityManager.getVisibleFlagEntityCount();
-      this.stats.visibleInstances = activeVisibleCount;
-      this.stats.culledInstances = Math.max(0, this.stats.totalInstances - activeVisibleCount);
+      this.stats.frameTimeMs = Math.round(this.currentFrameTime * 10) * 0.1;
+      const totalEnt = this.entityManager.activeEntityCount;
+      this.stats.totalInstances = totalEnt;
+      const renderedCount = this.entityManager.lastCulledVisibleCount;
+      this.stats.visibleInstances = renderedCount;
+      this.stats.culledInstances = Math.max(0, totalEnt - renderedCount);
       this.stats.totalVertices = this.entityManager.getTotalVertices();
       this.stats.totalTriangles = this.entityManager.getTotalTriangles();
-      this.stats.indirectDrawCommands = this.entityManager.meshCount;
+      const vIdx = this.playerController.activeVehicleIndex;
+      const nIdx = this.playerController.nearbyVehicleIndex;
+      if (vIdx >= 0 && vIdx < this.vehicles.length) {
+        const car = this.vehicles[vIdx];
+        this.stats.isDriving = true;
+        this.stats.activeVehicleName = car.name;
+        this.stats.vehicleSpeedKmh = Math.round(Math.abs(car.speed) * 3.6);
+        this.stats.activeVehicleHealth = Math.round(car.health);
+        this.stats.nearbyVehicleName = '';
+        this.stats.nearbyVehicleHealth = 100;
+      } else {
+        this.stats.isDriving = false;
+        this.stats.activeVehicleName = '';
+        this.stats.vehicleSpeedKmh = 0;
+        this.stats.activeVehicleHealth = 100;
+        if (nIdx >= 0 && nIdx < this.vehicles.length) {
+          const nearCar = this.vehicles[nIdx];
+          this.stats.nearbyVehicleName = nearCar.name;
+          this.stats.nearbyVehicleHealth = Math.round(nearCar.health);
+        } else {
+          this.stats.nearbyVehicleName = '';
+          this.stats.nearbyVehicleHealth = 100;
+        }
+      }
     } catch (err) {
       console.warn('Loop frame error:', err);
     }
@@ -540,7 +610,7 @@ export class DestroyerEngine {
     this.renderer.uploadGeometry(combinedVerts, combinedIndices);
   }
 
-  private async tryFetchGLB(url: string, allowCache = false): Promise<ArrayBuffer | null> {
+  private async tryFetchGLB(url: string, allowCache = true): Promise<ArrayBuffer | null> {
     try {
       const res = await fetch(url, { cache: allowCache ? 'default' : 'no-store' });
       if (!res.ok) return null;
@@ -597,12 +667,25 @@ export class DestroyerEngine {
       return;
     }
 
+    const cols = Math.ceil(Math.sqrt(this.sharedAtlasImages.length));
+    const tileSize = isMobileBrowser() ? (cols <= 2 ? 256 : 192) : (cols <= 4 ? 512 : 256);
+
     const decoded: { globalIdx: number; bitmap: ImageBitmap }[] = [];
     for (const tex of this.sharedAtlasImages) {
       try {
         const copy = new Uint8Array(tex.bytes);
         const blob = new Blob([copy], { type: tex.mimeType || 'image/png' });
-        const bitmap = await createImageBitmap(blob);
+        let bitmap: ImageBitmap;
+        try {
+          // Decode directly at target tile size so 4K PNGs never exhaust mobile memory
+          bitmap = await createImageBitmap(blob, {
+            resizeWidth: tileSize,
+            resizeHeight: tileSize,
+            resizeQuality: 'medium',
+          });
+        } catch {
+          bitmap = await createImageBitmap(blob);
+        }
         decoded.push({ globalIdx: tex.index, bitmap });
       } catch (err) {
         console.warn('[GLB Texture Decode] Skipping image', tex.index, err);
@@ -611,11 +694,16 @@ export class DestroyerEngine {
 
     if (decoded.length === 0) {
       this.renderer.clearDiffuseAtlas();
+      for (const ref of this.sharedAtlasMatRefs) {
+        const mat = this.entityManager.getMaterial(ref.matId);
+        if (mat) {
+          mat.flags = (mat.flags ?? 0) & ~2;
+          this.entityManager.updateMaterial(ref.matId, mat);
+        }
+      }
       return;
     }
 
-    const cols = Math.ceil(Math.sqrt(decoded.length));
-    const tileSize = isMobileBrowser() ? (cols <= 2 ? 256 : 192) : (cols <= 4 ? 512 : 256);
     const atlasSize = cols * tileSize;
 
     const canvas = document.createElement('canvas');
@@ -630,7 +718,7 @@ export class DestroyerEngine {
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, atlasSize, atlasSize);
 
-    const newRects: [number, number, number][] = new Array(this.sharedAtlasImages.length);
+    const newRects: ([number, number, number] | undefined)[] = new Array(this.sharedAtlasImages.length);
     for (let i = 0; i < decoded.length; i++) {
       const col = i % cols;
       const row = Math.floor(i / cols);
@@ -649,13 +737,16 @@ export class DestroyerEngine {
     const imgData = ctx.getImageData(0, 0, atlasSize, atlasSize);
     this.renderer.setDiffuseAtlas(new Uint8Array(imgData.data.buffer), atlasSize, atlasSize);
 
-    // Refresh existing material atlas UVs whenever the shared atlas grows
+    // Refresh existing material atlas UVs whenever the shared atlas grows, or fall back to baseColor if tile decode failed
     for (const ref of this.sharedAtlasMatRefs) {
       const mat = this.entityManager.getMaterial(ref.matId);
       const rect = newRects[ref.globalTexIdx];
       if (mat && rect) {
         mat.atlasRect = rect;
         mat.flags = 2;
+        this.entityManager.updateMaterial(ref.matId, mat);
+      } else if (mat) {
+        mat.flags = (mat.flags ?? 0) & ~2;
         this.entityManager.updateMaterial(ref.matId, mat);
       }
     }
@@ -874,10 +965,11 @@ export class DestroyerEngine {
         '/assets/animations/worker-woman-1/worker-woman-1.glb',
         '/assets/worker-woman-1.glb',
         '/worker-woman-1.glb',
+        'https://raw.githubusercontent.com/zlatnaspirala/destroyer/main/src/assets/animations/worker-woman-1/worker-woman-1.glb',
       ];
       for (const candidate of candidatePaths) {
         if (!candidate) continue;
-        const buf = await this.tryFetchGLB(candidate);
+        const buf = await this.tryFetchGLB(candidate, true);
         if (buf) {
           glbBuffer = buf;
           glbName = candidate.split('/').pop()?.split('?')[0] || 'worker-woman-1.glb';
@@ -888,7 +980,7 @@ export class DestroyerEngine {
 
     if (glbBuffer) {
       try {
-        const parsed = GLBLoader.parse(glbBuffer, { normalizeToHeight: 1.70 });
+        const parsed = GLBLoader.parse(glbBuffer, { normalizeToHeight: 1.30 });
         if (parsed.primitives.length > 0) {
           let finalClips = [...parsed.clips];
           if (parsed.hasSkinning && MixamoAnimations.isMixamoSkeleton(parsed.joints) && finalClips.length === 0) {
@@ -995,15 +1087,21 @@ export class DestroyerEngine {
     this.groundSlabEntityId = -1;
     this.playerEntityIds = [];
     this.npcEntityIds = [];
+    this.cityEntityIds = [];
+    this.vehicles = [];
+    this.playerController.activeVehicleIndex = -1;
+    this.playerController.nearbyVehicleIndex = -1;
     this.npcHitTimer = 0;
 
     const device = this.deviceManager.getDevice();
 
-    // Single 10-story business building with opening door, interior stairs, elevator, seated desk NPC & convex props
+    // Whole city around the 10-story business buildings: streets, small houses, living houses & gas stations
     {
       this.physics.setupDefaultBuildingPhysics();
 
       const buildingData = ProceduralModels.createSingleBuildingWithStairsAndElevator();
+      const cityData = CityBuilder.buildWholeCity();
+      this.physics.addCityColliders(cityData.colliders);
       const [resolvedPlayer, resolvedNpc] = await Promise.all([
         this.resolveAnarchyPlayer(),
         this.resolveOfficeWorkerNPC(),
@@ -1041,6 +1139,16 @@ export class DestroyerEngine {
         this.playerJumpClipName = 'BVH_Jump_Mocap';
         this.playerPunchClipName = 'BVH_Punch_Mocap';
       }
+
+      const groundGridMatId = this.entityManager.registerMaterial({
+        baseColor: [0.16, 0.18, 0.17, 1.0], // Urban Ground District Terrain
+        emissiveColor: [0, 0, 0, 0],
+        roughness: 0.88,
+        metallic: 0.05,
+        ao: 1.0,
+        alphaCutoff: 0.5,
+        flags: 4,
+      });
 
       const concreteMatId = this.entityManager.registerMaterial({
         baseColor: [0.24, 0.28, 0.35, 1.0], // Dark Slate Concrete
@@ -1327,6 +1435,18 @@ export class DestroyerEngine {
       const binMeshId = queueMesh(binPrim, 'Moveable_Convex_OfficeBin', binPrim.boundingRadius || 0.6);
       this.anarchyBinMeshId = binMeshId;
 
+      const cityMatMap = new Map<string, number>();
+      for (const mDef of cityData.materials) {
+        cityMatMap.set(mDef.key, this.entityManager.registerMaterial(mDef.material));
+      }
+      const cityMeshMap = new Map<string, number>();
+      for (const meshDef of cityData.meshes) {
+        cityMeshMap.set(
+          meshDef.key,
+          queueMesh(meshDef.prim, `City_${meshDef.key}`, meshDef.boundingRadius)
+        );
+      }
+
       this.loadedGeometryPrims = pendingMeshes.map((m) => m.prim);
       this.uploadGeometries(this.loadedGeometryPrims);
 
@@ -1354,12 +1474,110 @@ export class DestroyerEngine {
       Mat4.fromTranslation([0, 0, 0], groundMat);
       this.groundSlabEntityId = this.entityManager.addEntity({
         meshId: groundMeshId,
-        materialId: concreteMatId,
+        materialId: groundGridMatId,
         worldMatrix: groundMat,
         sphereCenter: [0, 0, 0, 5000.0],
         flags: 1,
         name: 'Massive_Ground_Slab',
       });
+
+      // Spawn Whole City Entities (streets, sidewalks, streetlamps, mid-rises, small houses, living houses, gas stations)
+      const cityRotMat = Mat4.create();
+      for (const pl of cityData.placements) {
+        const meshId = cityMeshMap.get(pl.meshKey);
+        if (meshId === undefined) continue;
+        const matId = pl.materialKey ? (cityMatMap.get(pl.materialKey) ?? concreteMatId) : concreteMatId;
+        const halfAngle = pl.rotationY * 0.5;
+        Mat4.fromTranslationRotationScale(
+          pl.position,
+          [0, Math.sin(halfAngle), 0, Math.cos(halfAngle)],
+          pl.scale ?? [1, 1, 1],
+          cityRotMat
+        );
+        const cEntId = this.entityManager.addEntity({
+          meshId,
+          materialId: matId,
+          worldMatrix: cityRotMat,
+          sphereCenter: [pl.position[0], pl.position[1], pl.position[2], pl.sphereRadius],
+          flags: 1,
+          name: pl.name,
+        });
+        if (cEntId >= 0) {
+          this.cityEntityIds.push(cEntId);
+        }
+      }
+
+      // Spawn Driveable Cars with multi-part meshes & live vehicle colliders
+      const carPartDefs: { meshKey: string; matKey?: string; suffix: string }[] = [
+        { meshKey: 'car_body', suffix: 'Body' },
+        { meshKey: 'car_glass', matKey: 'car_glass_tint', suffix: 'Glass' },
+        { meshKey: 'car_tires', matKey: 'car_rubber_tire', suffix: 'Tires' },
+        { meshKey: 'car_rims', matKey: 'car_chrome_alloy', suffix: 'Rims' },
+        { meshKey: 'car_headlights', matKey: 'car_headlight', suffix: 'Headlights' },
+        { meshKey: 'car_taillights', matKey: 'car_taillight', suffix: 'Taillights' },
+      ];
+      for (const carSpec of cityData.cars) {
+        const halfAngle = carSpec.rotationY * 0.5;
+        Mat4.fromTranslationRotationScale(
+          carSpec.position,
+          [0, Math.sin(halfAngle), 0, Math.cos(halfAngle)],
+          [1, 1, 1],
+          cityRotMat
+        );
+        const entIds: number[] = [];
+        for (const part of carPartDefs) {
+          const meshId = cityMeshMap.get(part.meshKey);
+          if (meshId === undefined) continue;
+          const matId = cityMatMap.get(part.matKey ?? carSpec.paintMat) ?? concreteMatId;
+          const entId = this.entityManager.addEntity({
+            meshId,
+            materialId: matId,
+            worldMatrix: cityRotMat,
+            sphereCenter: [carSpec.position[0], carSpec.position[1], carSpec.position[2], 3.2],
+            flags: 1,
+            name: `${carSpec.name}_${part.suffix}`,
+          });
+          if (entId >= 0) {
+            entIds.push(entId);
+            this.cityEntityIds.push(entId);
+          }
+        }
+        const colliderId = `veh_col_${carSpec.id}`;
+        this.physics.addBoxCollider({
+          id: colliderId,
+          name: carSpec.name,
+          center: [carSpec.position[0], carSpec.position[1] + 0.65, carSpec.position[2]],
+          size: [2.22, 0.65, 1.02],
+          category: 'floor',
+        });
+        this.physics.updateVehicleCollider(
+          colliderId,
+          carSpec.position[0],
+          carSpec.position[1],
+          carSpec.position[2],
+          carSpec.rotationY
+        );
+        const vehicle: DriveableVehicle = {
+          id: carSpec.id,
+          name: carSpec.name,
+          position: [...carSpec.position],
+          rotationY: carSpec.rotationY,
+          speed: 0,
+          velX: 0,
+          velZ: 0,
+          angularVelY: 0,
+          tiltX: 0,
+          tiltZ: 0,
+          steerAngle: 0,
+          health: 100,
+          maxHealth: 100,
+          impactCooldown: 0,
+          entityIds: entIds,
+          colliderId,
+        };
+        this.vehicles.push(vehicle);
+        this.physics.registerVehicle(vehicle);
+      }
 
       // Buildings (Main at [0,0,0], Secondary at [60,0,0]) partitioned per floor (0..10)
       const offsets: [number, number, number][] = [[0, 0, 0], [60, 0, 0]];
@@ -1374,7 +1592,12 @@ export class DestroyerEngine {
 
         for (const fl of floorMeshSpecs) {
           const list = floorMap.get(fl.floor)!;
-          const localCenter: [number, number, number, number] = [0, fl.floor * 4.0 + 2.0, 0, 32.0];
+          const worldFloorCenter: [number, number, number, number] = [
+            off[0],
+            fl.floor * 4.0 + 2.0,
+            off[2],
+            30.0,
+          ];
 
           if (fl.buildingMeshId >= 0) {
             list.push(
@@ -1382,7 +1605,7 @@ export class DestroyerEngine {
                 meshId: fl.buildingMeshId,
                 materialId: concreteMatId,
                 worldMatrix: mat,
-                sphereCenter: localCenter,
+                sphereCenter: worldFloorCenter,
                 flags: 1,
                 name: `${nameSuffix}_F${fl.floor}_Building`,
               })
@@ -1394,7 +1617,7 @@ export class DestroyerEngine {
                 meshId: fl.metalTrimMeshId,
                 materialId: metalTrimMatId,
                 worldMatrix: mat,
-                sphereCenter: localCenter,
+                sphereCenter: worldFloorCenter,
                 flags: 1,
                 name: `${nameSuffix}_F${fl.floor}_MetalTrim`,
               })
@@ -1406,7 +1629,7 @@ export class DestroyerEngine {
                 meshId: fl.interiorAccentMeshId,
                 materialId: interiorAccentMatId,
                 worldMatrix: mat,
-                sphereCenter: localCenter,
+                sphereCenter: worldFloorCenter,
                 flags: 1,
                 name: `${nameSuffix}_F${fl.floor}_InteriorAccent`,
               })
@@ -1418,7 +1641,7 @@ export class DestroyerEngine {
                 meshId: fl.ceilingLightMeshId,
                 materialId: ceilingLightMatId,
                 worldMatrix: mat,
-                sphereCenter: localCenter,
+                sphereCenter: worldFloorCenter,
                 flags: 1,
                 name: `${nameSuffix}_F${fl.floor}_CeilingLights`,
               })
@@ -1430,7 +1653,7 @@ export class DestroyerEngine {
                 meshId: fl.windowMeshId,
                 materialId: glassMatId,
                 worldMatrix: mat,
-                sphereCenter: localCenter,
+                sphereCenter: worldFloorCenter,
                 flags: 1,
                 name: `${nameSuffix}_F${fl.floor}_Windows`,
               })
@@ -1442,7 +1665,7 @@ export class DestroyerEngine {
                 meshId: fl.officeMeshId,
                 materialId: furnitureMatId,
                 worldMatrix: mat,
-                sphereCenter: localCenter,
+                sphereCenter: worldFloorCenter,
                 flags: 1,
                 name: `${nameSuffix}_F${fl.floor}_Office`,
               })
@@ -1457,7 +1680,7 @@ export class DestroyerEngine {
           meshId: bannerMeshId,
           materialId: textMatId,
           worldMatrix: bannerMat,
-          sphereCenter: [0, 0, 0, 12.0],
+          sphereCenter: [off[0], 4.4, off[2] + 20.25, 10.0],
           flags: 1,
           name: `${nameSuffix}_Banner`,
         });
@@ -1466,12 +1689,13 @@ export class DestroyerEngine {
         if (buildingIndex === 0) {
           for (let k = 0; k < 10; k++) {
             const btnMat = Mat4.create();
-            Mat4.fromTranslation([11.32, k * 4.0 + 1.6, 9.0], btnMat);
+            const btnY = k * 4.0 + 1.6;
+            Mat4.fromTranslation([11.32, btnY, 9.0], btnMat);
             const btnId = this.entityManager.addEntity({
               meshId: floorButtonMeshId,
               materialId: btnDownMatId,
               worldMatrix: btnMat,
-              sphereCenter: [0, 0, 0, 0.5],
+              sphereCenter: [11.32, btnY, 9.0, 0.5],
               flags: 1,
               name: `Floor_Call_Button_F${k}`,
             });
@@ -1486,7 +1710,7 @@ export class DestroyerEngine {
               meshId: floorLabelMeshIds[k],
               materialId: textMatId,
               worldMatrix: labelMat,
-              sphereCenter: [0, 0, 0, 8.0],
+              sphereCenter: [labelPos[0], labelPos[1], labelPos[2], 6.0],
               flags: 1,
               name: `3D_Label_Main_Floor_${k}`,
             });
@@ -1596,7 +1820,7 @@ export class DestroyerEngine {
           meshId: npcMeshIds[pIdx],
           materialId: npcPrimMatIds[pIdx] ?? defaultNpcMatId,
           worldMatrix: npcMat,
-          sphereCenter: [0, 0.7, 0, 1.8],
+          sphereCenter: [this.npcBasePos[0], this.npcBasePos[1] + 0.7, this.npcBasePos[2], 1.8],
           flags: 1,
           animOffset: this.npcJointOffset,
           name: pIdx === 0 ? 'Worker_Woman_Desk_NPC' : `Worker_Woman_Part_${pIdx}`,
@@ -1611,20 +1835,20 @@ export class DestroyerEngine {
         mainFloor0Entry.entityIds.push(...npcIds);
       }
 
-      // Register Desk Woman collider + punch target in JoltPhysics (seated on Floor 0 Lobby Reception Desk)
+      // Register Desk Woman collider + punch target in JoltPhysics (seated on Floor 0 Front Reception Desk)
       this.physics.addBoxCollider({
         id: 'worker_woman_desk_collider',
         name: 'Worker Woman (Desk NPC)',
-        center: [this.npcBasePos[0], this.npcBasePos[1] + 0.62, this.npcBasePos[2]],
-        size: [0.42, 0.62, 0.42],
+        center: [this.npcBasePos[0], this.npcBasePos[1] + 0.55, this.npcBasePos[2]],
+        size: [0.45, 0.55, 0.45],
         category: 'wall',
       });
       this.physics.registerNPCPunchTarget({
         id: 'office_worker_woman',
         name: 'Office Worker (Desk)',
         position: [...this.npcBasePos],
-        radius: 0.72,
-        height: 1.28,
+        radius: 0.90,
+        height: 1.45,
       });
 
       // Moveable Punchable Primitives & Mid-Level Convex Props in courtyard & ground lobby
@@ -1650,6 +1874,7 @@ export class DestroyerEngine {
         { kind: 'bin', name: 'Lobby_Convex_Bin_01', pos: [-2.3, 0.36, 6.2], mass: 0.65, restitution: 0.42 },
         { kind: 'bin', name: 'Lobby_Convex_Bin_02', pos: [2.3, 0.36, 6.2], mass: 0.65, restitution: 0.42 },
         { kind: 'barrel', name: 'Lobby_Barrel_01', pos: [-4.2, 0.525, 9.6], mass: 1.25, restitution: 0.42 },
+        ...cityData.propSpawns,
       ];
 
       for (let i = 0; i < propSpawns.length; i++) {
@@ -1741,6 +1966,9 @@ export class DestroyerEngine {
       for (let i = 0; i < totalCount; i++) {
         this.entityManager.setEntityVisible(i, true);
       }
+      if (this.playerController.activeVehicleIndex >= 0) {
+        this.setPlayerEntitiesVisible(false);
+      }
       this.stats.smartCullingEnabled = false;
       this.stats.smartCullMode = 'EXTERIOR';
       this.stats.smartCullBuilding = -1;
@@ -1751,10 +1979,11 @@ export class DestroyerEngine {
       return;
     }
 
-    const [px, py, pz] = this.playerController.position;
+    const pPos = this.playerController.position;
+    const px = pPos[0], py = pPos[1], pz = pPos[2];
     let activeBuilding: -1 | 0 | 1 = -1;
 
-    if (py >= -0.5 && py < 43.8 && Math.abs(pz) <= 19.6) {
+    if (this.playerController.activeVehicleIndex < 0 && py >= -0.5 && py < 43.8 && Math.abs(pz) <= 19.6) {
       if (Math.abs(px) <= 19.6) {
         activeBuilding = 0;
       } else if (Math.abs(px - 60.0) <= 19.6) {
@@ -1765,6 +1994,9 @@ export class DestroyerEngine {
     if (activeBuilding === -1) {
       for (let i = 0; i < totalCount; i++) {
         this.entityManager.setEntityVisible(i, true);
+      }
+      if (this.playerController.activeVehicleIndex >= 0) {
+        this.setPlayerEntitiesVisible(false);
       }
       this.stats.smartCullingEnabled = true;
       this.stats.smartCullMode = 'EXTERIOR';
@@ -1786,6 +2018,11 @@ export class DestroyerEngine {
 
     for (let i = 0; i < this.playerEntityIds.length; i++) {
       this.entityManager.setEntityVisible(this.playerEntityIds[i], true);
+    }
+
+    // Cull exterior city blocks while player is inside a multi-story skyscraper
+    for (let i = 0; i < this.cityEntityIds.length; i++) {
+      this.entityManager.setEntityVisible(this.cityEntityIds[i], false);
     }
 
     for (let i = 0; i < this.buildingFloorEntities.length; i++) {
@@ -1821,10 +2058,12 @@ export class DestroyerEngine {
     if (this.elevatorBtnUpEntityId >= 0) this.entityManager.setEntityVisible(this.elevatorBtnUpEntityId, elevatorInBand);
     if (this.elevatorBtnDownEntityId >= 0) this.entityManager.setEntityVisible(this.elevatorBtnDownEntityId, elevatorInBand);
 
-    for (let i = 0; i < this.physics.moveableObjects.length; i++) {
-      const obj = this.physics.moveableObjects[i];
+    const moveObjs = this.physics.moveableObjects;
+    for (let i = 0; i < moveObjs.length; i++) {
+      const obj = moveObjs[i];
       if (obj.entityId < 0) continue;
-      const [ox, oy, oz] = obj.position;
+      const op = obj.position;
+      const ox = op[0], oy = op[1], oz = op[2];
       const inMainFootprint = Math.abs(ox) <= 20.6 && Math.abs(oz) <= 20.6;
       const inSecFootprint = Math.abs(ox - 60.0) <= 20.6 && Math.abs(oz) <= 20.6;
       let propVisible = false;
@@ -1837,8 +2076,9 @@ export class DestroyerEngine {
       }
       this.entityManager.setEntityVisible(obj.entityId, propVisible);
       if (obj.extraEntityIds) {
-        for (let ex = 0; ex < obj.extraEntityIds.length; ex++) {
-          this.entityManager.setEntityVisible(obj.extraEntityIds[ex], propVisible);
+        const extras = obj.extraEntityIds;
+        for (let ex = 0; ex < extras.length; ex++) {
+          this.entityManager.setEntityVisible(extras[ex], propVisible);
         }
       }
     }

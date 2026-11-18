@@ -74,13 +74,27 @@ export class FlatEntityManager {
   private gpuJointMatricesBuffer: GPUBuffer | null = null;
 
   // Cached visible indices and mesh instance counts to eliminate per-frame allocations
-  private meshCountsCache = new Uint32Array(128);
-  private indicesCache = new Uint32Array(128 * 10000);
+  private meshCountsCache = new Uint32Array(256);
+  private meshFirstInstanceCache = new Uint32Array(256);
+  private meshWriteCursorCache = new Uint32Array(256);
+  private meshIsFloorCache = new Uint8Array(256);
+  private survivorsCache: Uint32Array;
+  private survivorMeshCache: Uint16Array;
+  private indicesCache: Uint32Array;
+
+  public lastCulledVisibleCount = 0;
+  public lastCulledShadowCasterCount = 0;
+  private cachedTotalVertices = 0;
+  private cachedTotalTriangles = 0;
 
   constructor(maxEntities = 50000, maxMaterials = 256, maxJoints = 2048) {
     this.maxEntities = maxEntities;
     this.maxMaterials = maxMaterials;
     this.maxJoints = maxJoints;
+
+    this.survivorsCache = new Uint32Array(maxEntities);
+    this.survivorMeshCache = new Uint16Array(maxEntities);
+    this.indicesCache = new Uint32Array(Math.max(maxEntities, 65536));
 
     this.entityBufferRaw = new ArrayBuffer(maxEntities * FlatEntityManager.ENTITY_STRIDE_FLOATS * 4);
     this.entityFloatView = new Float32Array(this.entityBufferRaw);
@@ -94,7 +108,7 @@ export class FlatEntityManager {
     this.materialFloatView = new Float32Array(this.materialBufferRaw);
     this.materialUintView = new Uint32Array(this.materialBufferRaw);
 
-    this.indirectCommandsData = new Uint32Array(128 * DRAW_INDEXED_INDIRECT_STRIDE_U32);
+    this.indirectCommandsData = new Uint32Array(256 * DRAW_INDEXED_INDIRECT_STRIDE_U32);
     this.jointMatrices = new Float32Array(maxJoints * 16);
 
     // Initialize joint matrices to identity
@@ -142,7 +156,7 @@ export class FlatEntityManager {
     });
 
     this.gpuVisibleIndicesBuffer = device.createBuffer({
-      size: Math.max(128 * 10000 * 4, this.maxEntities * 4, 1024),
+      size: Math.max(192 * 10000 * 4, this.maxEntities * 4, 1024),
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
 
@@ -182,55 +196,159 @@ export class FlatEntityManager {
     }
   }
 
-  populateDirectVisibleIndices(device: GPUDevice): void {
-    if (!this.gpuVisibleIndicesBuffer || !this.gpuIndirectArgsBuffer || this.meshRegistry.length === 0) return;
-
+  /**
+   * Zero-allocation CPU camera-frustum & distance culling pass.
+   * Packs surviving entity indices contiguously per mesh so only rendered bytes upload to GPU.
+   */
+  populateFrustumCulledVisibleIndices(
+    device: GPUDevice | null,
+    frustumPlanes: Float32Array,
+    camPos: [number, number, number],
+    cullDistance: number,
+    cullingEnabled: boolean
+  ): number {
     const numMeshes = this.meshRegistry.length;
-    if (this.meshCountsCache.length < numMeshes) {
-      this.meshCountsCache = new Uint32Array(Math.max(numMeshes, 128));
-    }
-    this.meshCountsCache.fill(0);
-
-    const maxSlotsPerMesh = 10000;
-    const totalSlots = numMeshes * maxSlotsPerMesh;
-    if (this.indicesCache.length < totalSlots) {
-      this.indicesCache = new Uint32Array(totalSlots);
+    if (numMeshes === 0) {
+      this.lastCulledVisibleCount = 0;
+      this.lastCulledShadowCasterCount = 0;
+      return 0;
     }
 
-    for (let i = 0; i < this.activeEntityCount; i++) {
-      const eOffset = i * FlatEntityManager.ENTITY_STRIDE_FLOATS;
-      const flags = this.entityUintView[eOffset + 22];
-      if ((flags & 1) !== 0) {
-        const meshId = this.entityUintView[eOffset + 20];
-        if (meshId < numMeshes) {
-          const slot = this.meshCountsCache[meshId];
-          if (slot < maxSlotsPerMesh) {
-            this.meshCountsCache[meshId] = slot + 1;
-            this.indicesCache[meshId * maxSlotsPerMesh + slot] = i;
-          }
+    const counts = this.meshCountsCache;
+    for (let i = 0; i < numMeshes; i++) {
+      counts[i] = 0;
+    }
+
+    const activeCount = this.activeEntityCount;
+    const fView = this.entityFloatView;
+    const uView = this.entityUintView;
+    const isFloorArr = this.meshIsFloorCache;
+    const survivors = this.survivorsCache;
+    const survivorMeshes = this.survivorMeshCache;
+    const stride = FlatEntityManager.ENTITY_STRIDE_FLOATS;
+
+    const p0x = frustumPlanes[0],  p0y = frustumPlanes[1],  p0z = frustumPlanes[2],  p0w = frustumPlanes[3];
+    const p1x = frustumPlanes[4],  p1y = frustumPlanes[5],  p1z = frustumPlanes[6],  p1w = frustumPlanes[7];
+    const p2x = frustumPlanes[8],  p2y = frustumPlanes[9],  p2z = frustumPlanes[10], p2w = frustumPlanes[11];
+    const p3x = frustumPlanes[12], p3y = frustumPlanes[13], p3z = frustumPlanes[14], p3w = frustumPlanes[15];
+    const p4x = frustumPlanes[16], p4y = frustumPlanes[17], p4z = frustumPlanes[18], p4w = frustumPlanes[19];
+    const p5x = frustumPlanes[20], p5y = frustumPlanes[21], p5z = frustumPlanes[22], p5w = frustumPlanes[23];
+
+    const camX = camPos[0], camY = camPos[1], camZ = camPos[2];
+    const useDistCull = cullDistance > 0;
+
+    let survivorCount = 0;
+    let shadowCasterCount = 0;
+
+    for (let i = 0; i < activeCount; i++) {
+      const eOffset = i * stride;
+      if ((uView[eOffset + 22] & 1) === 0) continue;
+
+      const meshId = uView[eOffset + 20];
+      if (meshId >= numMeshes) continue;
+
+      const rad = fView[eOffset + 19];
+
+      if (cullingEnabled && rad < 1000.0) {
+        const cx = fView[eOffset + 16];
+        const cy = fView[eOffset + 17];
+        const cz = fView[eOffset + 18];
+
+        if (useDistCull) {
+          const dx = cx - camX;
+          const dy = cy - camY;
+          const dz = cz - camZ;
+          const maxD = cullDistance + rad;
+          if (dx * dx + dy * dy + dz * dz > maxD * maxD) continue;
         }
+
+        const negR = -(rad + 0.5);
+        if (
+          p0x * cx + p0y * cy + p0z * cz + p0w < negR ||
+          p1x * cx + p1y * cy + p1z * cz + p1w < negR ||
+          p2x * cx + p2y * cy + p2z * cz + p2w < negR ||
+          p3x * cx + p3y * cy + p3z * cz + p3w < negR ||
+          p4x * cx + p4y * cy + p4z * cz + p4w < negR ||
+          p5x * cx + p5y * cy + p5z * cz + p5w < negR
+        ) {
+          continue;
+        }
+      }
+
+      counts[meshId]++;
+      survivors[survivorCount] = i;
+      survivorMeshes[survivorCount] = meshId;
+      survivorCount++;
+
+      if (rad < 1000.0 && isFloorArr[meshId] === 0) {
+        shadowCasterCount++;
       }
     }
 
-    for (let i = 0; i < numMeshes; i++) {
-      const cmdOffset = i * DRAW_INDEXED_INDIRECT_STRIDE_U32;
-      this.indirectCommandsData[cmdOffset + 1] = this.meshCountsCache[i];
+    // Prefix sum compact firstInstance offsets for each mesh
+    const firstInst = this.meshFirstInstanceCache;
+    const cursors = this.meshWriteCursorCache;
+    let cursor = 0;
+    for (let m = 0; m < numMeshes; m++) {
+      firstInst[m] = cursor;
+      cursors[m] = cursor;
+      cursor += counts[m];
+      const cmdOffset = m * DRAW_INDEXED_INDIRECT_STRIDE_U32;
+      this.indirectCommandsData[cmdOffset + 1] = counts[m];
+      this.indirectCommandsData[cmdOffset + 4] = firstInst[m];
     }
 
-    const cmdBytes = numMeshes * DRAW_INDEXED_INDIRECT_STRIDE_BYTES;
-    device.queue.writeBuffer(this.gpuIndirectArgsBuffer, 0, this.indirectCommandsData.buffer, 0, cmdBytes);
-    device.queue.writeBuffer(
-      this.gpuVisibleIndicesBuffer,
+    // Scatter surviving entity indices contiguously into indicesCache
+    const idxCache = this.indicesCache;
+    for (let s = 0; s < survivorCount; s++) {
+      const mId = survivorMeshes[s];
+      const dst = cursors[mId];
+      cursors[mId] = dst + 1;
+      idxCache[dst] = survivors[s];
+    }
+
+    this.lastCulledVisibleCount = survivorCount;
+    this.lastCulledShadowCasterCount = shadowCasterCount;
+
+    if (device && this.gpuVisibleIndicesBuffer && cursor > 0) {
+      const uploadBytes = Math.min(cursor * 4, this.gpuVisibleIndicesBuffer.size);
+      device.queue.writeBuffer(
+        this.gpuVisibleIndicesBuffer,
+        0,
+        idxCache.buffer,
+        0,
+        uploadBytes
+      );
+    }
+
+    return survivorCount;
+  }
+
+  private static readonly ZERO_VEC3: [number, number, number] = [0, 0, 0];
+
+  populateDirectVisibleIndices(device: GPUDevice): void {
+    this.populateFrustumCulledVisibleIndices(
+      device,
+      this.entityFloatView,
+      FlatEntityManager.ZERO_VEC3,
       0,
-      this.indicesCache.buffer,
-      0,
-      Math.min(totalSlots * 4, this.gpuVisibleIndicesBuffer.size)
+      false
     );
   }
 
   getMeshEntityCount(meshId: number): number {
     if (meshId < 0 || meshId >= this.meshCountsCache.length) return 0;
     return this.meshCountsCache[meshId];
+  }
+
+  getMeshFirstInstance(meshId: number): number {
+    if (meshId < 0 || meshId >= this.meshFirstInstanceCache.length) return 0;
+    return this.meshFirstInstanceCache[meshId];
+  }
+
+  isFloorMesh(meshId: number): boolean {
+    if (meshId < 0 || meshId >= this.meshIsFloorCache.length) return false;
+    return this.meshIsFloorCache[meshId] !== 0;
   }
 
   getEntityBuffer(): GPUBuffer {
@@ -254,11 +372,11 @@ export class FlatEntityManager {
   }
 
   getTotalVertices(): number {
-    return this.meshRegistry.reduce((acc, m) => acc + m.vertexCount, 0);
+    return this.cachedTotalVertices;
   }
 
   getTotalTriangles(): number {
-    return this.meshRegistry.reduce((acc, m) => acc + Math.floor(m.indexCount / 3), 0);
+    return this.cachedTotalTriangles;
   }
 
   getMesh(id: number): MeshMetadata | undefined {
@@ -286,6 +404,47 @@ export class FlatEntityManager {
       this.meshRegistry.push(mesh);
     }
 
+    if (id >= this.meshCountsCache.length) {
+      const nextCap = Math.max(id + 64, this.meshCountsCache.length * 2);
+      const nextCounts = new Uint32Array(nextCap);
+      nextCounts.set(this.meshCountsCache);
+      this.meshCountsCache = nextCounts;
+
+      const nextFirst = new Uint32Array(nextCap);
+      nextFirst.set(this.meshFirstInstanceCache);
+      this.meshFirstInstanceCache = nextFirst;
+
+      const nextCursor = new Uint32Array(nextCap);
+      nextCursor.set(this.meshWriteCursorCache);
+      this.meshWriteCursorCache = nextCursor;
+
+      const nextFloor = new Uint8Array(nextCap);
+      nextFloor.set(this.meshIsFloorCache);
+      this.meshIsFloorCache = nextFloor;
+    }
+
+    const lowerName = mesh.name.toLowerCase();
+    this.meshIsFloorCache[id] =
+      lowerName.includes('floor') ||
+      lowerName.includes('ground') ||
+      lowerName.includes('city_road') ||
+      lowerName.includes('city_sidewalk') ||
+      lowerName.includes('city_stripe') ||
+      lowerName.includes('city_lane') ||
+      lowerName.includes('city_crosswalk') ||
+      mesh.boundingRadius >= 1000.0
+        ? 1
+        : 0;
+
+    let totVerts = 0;
+    let totTris = 0;
+    for (let i = 0; i < this.meshRegistry.length; i++) {
+      totVerts += this.meshRegistry[i].vertexCount;
+      totTris += Math.floor(this.meshRegistry[i].indexCount / 3);
+    }
+    this.cachedTotalVertices = totVerts;
+    this.cachedTotalTriangles = totTris;
+
     const cmdOffset = id * DRAW_INDEXED_INDIRECT_STRIDE_U32;
     if (cmdOffset + DRAW_INDEXED_INDIRECT_STRIDE_U32 > this.indirectCommandsData.length) {
       const newCmds = new Uint32Array(this.indirectCommandsData.length * 2);
@@ -294,7 +453,7 @@ export class FlatEntityManager {
     }
 
     this.indirectCommandsData[cmdOffset + 0] = mesh.indexCount;
-    this.indirectCommandsData[cmdOffset + 1] = 0; // instance count (populated by compute culling)
+    this.indirectCommandsData[cmdOffset + 1] = 0; // instance count (populated by culling)
     this.indirectCommandsData[cmdOffset + 2] = mesh.firstIndex;
     this.indirectCommandsData[cmdOffset + 3] = mesh.baseVertex;
     this.indirectCommandsData[cmdOffset + 4] = id * 10000;
@@ -435,18 +594,30 @@ export class FlatEntityManager {
   }
 
   updateEntityMatrix(id: number, worldMatrix: Float32Array, centerPos?: [number, number, number], boundingRadius = 2.5): void {
-    if (id < 0 || id >= this.nextEntityId) return;
-    const eOffset = id * FlatEntityManager.ENTITY_STRIDE_FLOATS;
-    for (let i = 0; i < 16; i++) {
-      this.entityFloatView[eOffset + i] = worldMatrix[i];
-    }
     const posX = centerPos ? centerPos[0] : worldMatrix[12];
     const posY = centerPos ? centerPos[1] : worldMatrix[13];
     const posZ = centerPos ? centerPos[2] : worldMatrix[14];
-    this.entityFloatView[eOffset + 16] = posX;
-    this.entityFloatView[eOffset + 17] = posY;
-    this.entityFloatView[eOffset + 18] = posZ;
-    this.entityFloatView[eOffset + 19] = boundingRadius;
+    this.updateEntityMatrixXYZ(id, worldMatrix, posX, posY, posZ, boundingRadius);
+  }
+
+  updateEntityMatrixXYZ(
+    id: number,
+    worldMatrix: Float32Array,
+    posX: number,
+    posY: number,
+    posZ: number,
+    boundingRadius = 2.5
+  ): void {
+    if (id < 0 || id >= this.nextEntityId) return;
+    const eOffset = id * FlatEntityManager.ENTITY_STRIDE_FLOATS;
+    const fView = this.entityFloatView;
+    for (let i = 0; i < 16; i++) {
+      fView[eOffset + i] = worldMatrix[i];
+    }
+    fView[eOffset + 16] = posX;
+    fView[eOffset + 17] = posY;
+    fView[eOffset + 18] = posZ;
+    fView[eOffset + 19] = boundingRadius;
   }
 
   deleteSingleEntity(id: number): void {
@@ -529,7 +700,14 @@ export class FlatEntityManager {
     this.totalJointsCount = 0;
     this.entityRecords = [];
     this.lightRecords = [];
+    this.cachedTotalVertices = 0;
+    this.cachedTotalTriangles = 0;
+    this.lastCulledVisibleCount = 0;
+    this.lastCulledShadowCasterCount = 0;
     this.entityUintView.fill(0);
     this.indirectCommandsData.fill(0);
+    this.meshCountsCache.fill(0);
+    this.meshFirstInstanceCache.fill(0);
+    this.meshIsFloorCache.fill(0);
   }
 }

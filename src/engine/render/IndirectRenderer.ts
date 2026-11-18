@@ -84,11 +84,48 @@ export class IndirectRenderer {
   private width = 800;
   private height = 600;
 
-  // Zero-garbage pre-allocated uniform buffers
+  // Cached texture views so render() never allocates descriptor wrappers per frame
+  private shadowDepthView: GPUTextureView | null = null;
+  private depthTextureView: GPUTextureView | null = null;
+
+  // Zero-garbage pre-allocated uniform buffers & typed array views
   private camUniformsData = new Float32Array(96);
+  private camUniformsU32 = new Uint32Array(this.camUniformsData.buffer);
   private engineParamsData = new Float32Array(24);
+  private engineParamsU32 = new Uint32Array(this.engineParamsData.buffer);
   private lightViewMatrix = new Float32Array(16);
   private lightProjMatrix = new Float32Array(16);
+
+  // Pre-allocated WebGPU pass descriptors & submission array for ZERO allocations in render()
+  private submitCommandBuffers: GPUCommandBuffer[] = new Array(1);
+  private shadowColorAttachments: GPURenderPassColorAttachment[] = [];
+  private shadowDepthAttachment: GPURenderPassDepthStencilAttachment = {
+    view: null as unknown as GPUTextureView,
+    depthClearValue: 1.0,
+    depthLoadOp: 'clear',
+    depthStoreOp: 'store',
+  };
+  private shadowPassDesc: GPURenderPassDescriptor = {
+    colorAttachments: this.shadowColorAttachments,
+    depthStencilAttachment: this.shadowDepthAttachment,
+  };
+  private mainColorAttachment: GPURenderPassColorAttachment = {
+    view: null as unknown as GPUTextureView,
+    clearValue: { r: 0.04, g: 0.045, b: 0.065, a: 1.0 },
+    loadOp: 'clear',
+    storeOp: 'store',
+  };
+  private mainColorAttachments: GPURenderPassColorAttachment[] = [this.mainColorAttachment];
+  private mainDepthAttachment: GPURenderPassDepthStencilAttachment = {
+    view: null as unknown as GPUTextureView,
+    depthClearValue: 1.0,
+    depthLoadOp: 'clear',
+    depthStoreOp: 'store',
+  };
+  private mainRenderPassDesc: GPURenderPassDescriptor = {
+    colorAttachments: this.mainColorAttachments,
+    depthStencilAttachment: this.mainDepthAttachment,
+  };
 
   constructor(
     deviceManager: DeviceManager,
@@ -317,6 +354,8 @@ export class IndirectRenderer {
       format: 'depth24plus',
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
     });
+    this.shadowDepthView = this.shadowDepthTexture.createView();
+    this.shadowDepthAttachment.view = this.shadowDepthView;
 
     this.shadowSampler = this.device.createSampler({
       compare: 'less',
@@ -356,6 +395,7 @@ export class IndirectRenderer {
     if (this.depthTexture) {
       try { this.depthTexture.destroy(); } catch { /* ignore */ }
       this.depthTexture = null;
+      this.depthTextureView = null;
     }
 
     try {
@@ -366,6 +406,8 @@ export class IndirectRenderer {
         format: 'depth24plus',
         usage: GPUTextureUsage.RENDER_ATTACHMENT,
       });
+      this.depthTextureView = this.depthTexture.createView();
+      this.mainDepthAttachment.view = this.depthTextureView;
 
       this.camera.setAspect(clampedW / clampedH);
     } catch (err) {
@@ -471,10 +513,8 @@ export class IndirectRenderer {
 
     if (
       !this.renderPipeline ||
-      !this.cullingPipeline ||
       !this.shadowPipeline ||
       !this.renderBindGroup ||
-      !this.cullingBindGroup ||
       !this.vertexBuffer ||
       !this.indexBuffer
     ) {
@@ -487,6 +527,7 @@ export class IndirectRenderer {
 
       if (
         !this.depthTexture ||
+        !this.depthTextureView ||
         this.depthTexture.width !== currentTexture.width ||
         this.depthTexture.height !== currentTexture.height
       ) {
@@ -495,43 +536,68 @@ export class IndirectRenderer {
 
       if (
         !this.depthTexture ||
+        !this.depthTextureView ||
         this.depthTexture.width !== currentTexture.width ||
         this.depthTexture.height !== currentTexture.height
       ) {
         return;
       }
 
-      // 1. Calculate Directional Light View-Projection Matrix
+      // 1. CPU Camera-Look Frustum & Distance Culling (zero allocation, compact visible buffer)
+      const cullStart = performance.now();
+      const planes = this.camera.isFrustumFrozen ? this.camera.frozenFrustumPlanes : this.camera.frustumPlanes;
+      this.entityManager.populateFrustumCulledVisibleIndices(
+        this.device,
+        planes,
+        this.camera.position,
+        this.cullDistance,
+        this.cullingEnabled
+      );
+      const cullEnd = performance.now();
+
+      const renderStart = cullEnd;
+
+      // 2. Calculate Directional Light View-Projection Matrix (follows camera target, snapped to texel grid)
       const lx = this.lightDir[0], ly = this.lightDir[1], lz = this.lightDir[2];
       const len = Math.hypot(lx, ly, lz) || 1;
       const ndx = lx / len, ndy = ly / len, ndz = lz / len;
 
-      const lightDist = 80;
-      const lightEye: [number, number, number] = [-ndx * lightDist, -ndy * lightDist, -ndz * lightDist];
-      const lightTarget: [number, number, number] = [0, 0, 0];
-      const lightUp: [number, number, number] = [0, 1, 0];
+      const shadowSnap = 2.0;
+      const focX = Math.round(this.camera.target[0] / shadowSnap) * shadowSnap;
+      const focZ = Math.round(this.camera.target[2] / shadowSnap) * shadowSnap;
+      const lightDist = 90;
 
-      Mat4.lookAt(lightEye, lightTarget, lightUp, this.lightViewMatrix);
+      Mat4.lookAtXYZ(
+        focX - ndx * lightDist,
+        -ndy * lightDist,
+        focZ - ndz * lightDist,
+        focX,
+        0,
+        focZ,
+        0,
+        1,
+        0,
+        this.lightViewMatrix
+      );
 
       const orthoSpan = 70;
-      Mat4.ortho(-orthoSpan, orthoSpan, -orthoSpan, orthoSpan, 1.0, 180.0, this.lightProjMatrix);
+      Mat4.ortho(-orthoSpan, orthoSpan, -orthoSpan, orthoSpan, 1.0, 200.0, this.lightProjMatrix);
       Mat4.multiply(this.lightProjMatrix, this.lightViewMatrix, this.lightViewProjMatrix);
 
-      // 2. Update Camera Uniforms (96 floats = 384 bytes)
-      this.camUniformsData.set(this.camera.viewProjMatrix, 0);     // 0..15: viewProj
-      this.camUniformsData.set(this.camera.viewMatrix, 16);         // 16..31: view
-      this.camUniformsData.set(this.camera.projMatrix, 32);         // 32..47: proj
-      this.camUniformsData.set(this.lightViewProjMatrix, 48);       // 48..63: lightViewProj
+      // 3. Update Camera Uniforms (96 floats = 384 bytes, zero allocation)
+      this.camUniformsData.set(this.camera.viewProjMatrix, 0);
+      this.camUniformsData.set(this.camera.viewMatrix, 16);
+      this.camUniformsData.set(this.camera.projMatrix, 32);
+      this.camUniformsData.set(this.lightViewProjMatrix, 48);
       this.camUniformsData[64] = this.camera.position[0];
       this.camUniformsData[65] = this.camera.position[1];
       this.camUniformsData[66] = this.camera.position[2];
       this.camUniformsData[67] = 1.0;
-      this.camUniformsData.set(this.camera.frustumPlanes, 68);      // 68..91: frustumPlanes
-      const u32Cam = new Uint32Array(this.camUniformsData.buffer);
-      u32Cam[92] = this.cullingEnabled ? 1 : 0;
-      u32Cam[93] = this.entityManager.activeEntityCount;
+      this.camUniformsData.set(planes, 68);
+      this.camUniformsU32[92] = this.cullingEnabled ? 1 : 0;
+      this.camUniformsU32[93] = this.entityManager.activeEntityCount;
       this.camUniformsData[94] = this.cullDistance;
-      u32Cam[95] = 0;
+      this.camUniformsU32[95] = 0;
 
       this.device.queue.writeBuffer(
         this.cameraUniformBuffer!,
@@ -541,10 +607,9 @@ export class IndirectRenderer {
         384
       );
 
-      // 3. Update Engine Params (24 floats = 96 bytes)
+      // 4. Update Engine Params (24 floats = 96 bytes, zero allocation)
       this.engineParamsData[0] = timeSeconds;
-      const u32View = new Uint32Array(this.engineParamsData.buffer);
-      u32View[1] = this.debugMode;
+      this.engineParamsU32[1] = this.debugMode;
       this.engineParamsData[2] = this.waveFactor;
       this.engineParamsData[3] = this.morphWeights[0];
       this.engineParamsData[4] = this.morphWeights[1];
@@ -573,121 +638,62 @@ export class IndirectRenderer {
         96
       );
 
-      // 4. Indirect instances setup
       const meshCount = this.entityManager.meshCount;
-      if (this.cullingEnabled) {
-        for (let i = 0; i < meshCount; i++) {
-          this.entityManager.indirectCommandsData[i * 5 + 1] = 0;
-        }
-        if (meshCount > 0) {
-          this.device.queue.writeBuffer(
-            this.entityManager.getIndirectArgsBuffer(),
-            0,
-            this.entityManager.indirectCommandsData.buffer as ArrayBuffer,
-            0,
-            meshCount * 20
-          );
-        }
-      } else {
-        // Bulletproof direct CPU instance assignment (prevents black screen on compute glitch)
-        this.entityManager.populateDirectVisibleIndices(this.device);
-      }
-
       const commandEncoder = this.device.createCommandEncoder();
 
-      // 5. GPU Compute Culling Pass
-      const activeEntities = this.entityManager.activeEntityCount;
-      if (this.cullingEnabled && activeEntities > 0) {
-        const computePass = commandEncoder.beginComputePass();
-        computePass.setPipeline(this.cullingPipeline);
-        computePass.setBindGroup(0, this.cullingBindGroup);
-        const workgroups = Math.min(1024, Math.ceil(activeEntities / 64));
-        computePass.dispatchWorkgroups(Math.max(1, workgroups));
-        computePass.end();
-      }
+      // 5. Real-Time Directional Shadow Map Pass (skip all draws when 0 shadow casters visible!)
+      if (this.shadowDepthTexture && this.shadowDepthView && this.shadowBindGroup) {
+        const shadowPass = commandEncoder.beginRenderPass(this.shadowPassDesc);
+        if (this.entityManager.lastCulledShadowCasterCount > 0) {
+          shadowPass.setPipeline(this.shadowPipeline);
+          shadowPass.setBindGroup(0, this.shadowBindGroup);
+          shadowPass.setVertexBuffer(0, this.vertexBuffer);
+          shadowPass.setIndexBuffer(this.indexBuffer, 'uint32');
 
-      // 6. Real-Time Directional Shadow Map Pass
-      if (this.shadowDepthTexture && this.shadowBindGroup) {
-        const shadowPass = commandEncoder.beginRenderPass({
-          colorAttachments: [],
-          depthStencilAttachment: {
-            view: this.shadowDepthTexture.createView(),
-            depthClearValue: 1.0,
-            depthLoadOp: 'clear',
-            depthStoreOp: 'store',
-          },
-        });
-        shadowPass.setPipeline(this.shadowPipeline);
-        shadowPass.setBindGroup(0, this.shadowBindGroup);
-        shadowPass.setVertexBuffer(0, this.vertexBuffer);
-        shadowPass.setIndexBuffer(this.indexBuffer, 'uint32');
-
-        if (this.cullingEnabled) {
           for (let i = 0; i < meshCount; i++) {
-            const mesh = this.entityManager.getMesh(i);
-            if (mesh && mesh.name.toLowerCase().includes('floor')) {
-              continue;
-            }
-            const indirectOffset = i * DRAW_INDEXED_INDIRECT_STRIDE_BYTES;
-            shadowPass.drawIndexedIndirect(this.entityManager.getIndirectArgsBuffer(), indirectOffset);
-          }
-        } else {
-          for (let i = 0; i < meshCount; i++) {
-            const mesh = this.entityManager.getMesh(i);
-            if (mesh && mesh.name.toLowerCase().includes('floor')) {
-              continue;
-            }
             const count = this.entityManager.getMeshEntityCount(i);
-            if (mesh && count > 0) {
-              shadowPass.drawIndexed(mesh.indexCount, count, mesh.firstIndex, mesh.baseVertex, i * 10000);
+            if (count === 0 || this.entityManager.isFloorMesh(i)) continue;
+            const mesh = this.entityManager.getMesh(i);
+            if (mesh) {
+              const firstInst = this.entityManager.getMeshFirstInstance(i);
+              shadowPass.drawIndexed(mesh.indexCount, count, mesh.firstIndex, mesh.baseVertex, firstInst);
             }
           }
         }
         shadowPass.end();
       }
 
-      // 7. Main PBR Render Pass directly to swapchain
-      const renderPass = commandEncoder.beginRenderPass({
-        colorAttachments: [
-          {
-            view: currentTexture.createView(),
-            clearValue: { r: 0.04, g: 0.045, b: 0.065, a: 1.0 },
-            loadOp: 'clear',
-            storeOp: 'store',
-          },
-        ],
-        depthStencilAttachment: {
-          view: this.depthTexture.createView(),
-          depthClearValue: 1.0,
-          depthLoadOp: 'clear',
-          depthStoreOp: 'store',
-        },
-      });
+      // 6. Main PBR Render Pass directly to swapchain (only draws meshes with visible instances > 0)
+      this.mainColorAttachment.view = currentTexture.createView();
+      const renderPass = commandEncoder.beginRenderPass(this.mainRenderPassDesc);
 
       renderPass.setPipeline(this.renderPipeline);
       renderPass.setBindGroup(0, this.renderBindGroup);
       renderPass.setVertexBuffer(0, this.vertexBuffer);
       renderPass.setIndexBuffer(this.indexBuffer, 'uint32');
 
-      if (this.cullingEnabled) {
-        for (let i = 0; i < meshCount; i++) {
-          const indirectOffset = i * DRAW_INDEXED_INDIRECT_STRIDE_BYTES;
-          renderPass.drawIndexedIndirect(this.entityManager.getIndirectArgsBuffer(), indirectOffset);
-        }
-      } else {
-        // Direct draw pass - rock-solid on mobile Android Vulkan drivers
-        for (let i = 0; i < meshCount; i++) {
-          const mesh = this.entityManager.getMesh(i);
-          const count = this.entityManager.getMeshEntityCount(i);
-          if (mesh && count > 0) {
-            renderPass.drawIndexed(mesh.indexCount, count, mesh.firstIndex, mesh.baseVertex, i * 10000);
-          }
+      let issuedDrawCalls = 0;
+      for (let i = 0; i < meshCount; i++) {
+        const count = this.entityManager.getMeshEntityCount(i);
+        if (count === 0) continue;
+        const mesh = this.entityManager.getMesh(i);
+        if (mesh) {
+          const firstInst = this.entityManager.getMeshFirstInstance(i);
+          renderPass.drawIndexed(mesh.indexCount, count, mesh.firstIndex, mesh.baseVertex, firstInst);
+          issuedDrawCalls++;
         }
       }
 
       renderPass.end();
 
-      this.device.queue.submit([commandEncoder.finish()]);
+      this.submitCommandBuffers[0] = commandEncoder.finish();
+      this.device.queue.submit(this.submitCommandBuffers);
+      this.submitCommandBuffers[0] = null as unknown as GPUCommandBuffer;
+
+      const renderEnd = performance.now();
+      stats.gpuCullTimeMs = Math.round((cullEnd - cullStart) * 100) * 0.01;
+      stats.gpuRenderTimeMs = Math.round((renderEnd - renderStart) * 100) * 0.01;
+      stats.indirectDrawCommands = issuedDrawCalls;
     } catch (err: any) {
       if (err?.message?.includes('lost') || this.deviceManager.isDeviceLost) {
         console.warn('Render skipped due to device loss:', err);

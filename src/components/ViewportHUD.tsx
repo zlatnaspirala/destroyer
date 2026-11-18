@@ -2,6 +2,7 @@ import React, { useState, useRef } from 'react';
 import {
   Activity,
   Camera as CameraIcon,
+  Car,
   ChevronDown,
   ChevronUp,
   Cpu,
@@ -22,6 +23,7 @@ interface ViewportHUDProps {
   onJoystickMove?: (x: number, y: number) => void;
   onJumpRequested?: () => void;
   onPunchRequested?: () => void;
+  onToggleVehicleEntry?: () => void;
   isRunning?: boolean;
   onToggleRunning?: () => void;
   onLoadBVH?: (bvhText: string, name: string) => void;
@@ -30,6 +32,7 @@ interface ViewportHUDProps {
   availableAnimations?: string[];
   activeAnimationName?: string;
   activePlayerSource?: string;
+  activeNpcSource?: string;
   elevatorTargetFloor?: number;
   onSelectElevatorFloor?: (floor: number) => void;
 }
@@ -41,6 +44,7 @@ export const ViewportHUD: React.FC<ViewportHUDProps> = ({
   onJoystickMove,
   onJumpRequested,
   onPunchRequested,
+  onToggleVehicleEntry,
   isRunning = false,
   onToggleRunning,
   onLoadBVH,
@@ -49,6 +53,7 @@ export const ViewportHUD: React.FC<ViewportHUDProps> = ({
   availableAnimations = [],
   activeAnimationName = '',
   activePlayerSource = 'Procedural Humanoid',
+  activeNpcSource = 'Procedural Sitting Worker',
   elevatorTargetFloor = 0,
   onSelectElevatorFloor,
 }) => {
@@ -278,6 +283,18 @@ export const ViewportHUD: React.FC<ViewportHUDProps> = ({
                     : stats.smartCullMode === 'INTERIOR'
                     ? `F${stats.smartCullFloor} [${stats.smartCullMinFloor}-${stats.smartCullMaxFloor}]`
                     : 'EXTERIOR'}
+                </span>
+              </div>
+
+              <div className="flex justify-between items-center text-zinc-400 pt-0.5 border-t border-zinc-800/60">
+                <span>Desk NPC</span>
+                <span
+                  className={`truncate max-w-[115px] text-[9px] font-semibold ${
+                    activeNpcSource.startsWith('GLB:') ? 'text-emerald-300' : 'text-zinc-400'
+                  }`}
+                  title={activeNpcSource}
+                >
+                  {activeNpcSource.replace(/^GLB:\s*/, '')}
                 </span>
               </div>
 
@@ -518,11 +535,62 @@ export const ViewportHUD: React.FC<ViewportHUDProps> = ({
         </div>
       </div>
 
-      {/* 3D In-World Elevator Interaction Hint */}
-      <div className="absolute bottom-16 left-1/2 -translate-x-1/2 z-20 pointer-events-none flex items-center gap-2 bg-amber-950/80 border border-amber-500/60 rounded-full px-4 py-1.5 shadow-2xl text-xs font-mono text-amber-200 backdrop-blur-md">
-        <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
-        <span><strong className="text-white bg-amber-500/30 px-1.5 py-0.5 rounded border border-amber-400/50">E</strong> or <strong className="text-white bg-amber-500/30 px-1.5 py-0.5 rounded border border-amber-400/50">0-9</strong>: Press 3D Scene Elevator Buttons</span>
-      </div>
+      {/* 3D In-World Vehicle / Elevator Interaction Hint */}
+      {stats.isDriving ? (
+        <div className="absolute bottom-14 left-1/2 -translate-x-1/2 z-20 pointer-events-auto flex items-center gap-3 bg-zinc-950/90 border border-emerald-500/60 rounded-full px-4 py-1.5 shadow-2xl text-xs font-mono text-zinc-100 backdrop-blur-md">
+          <Car className="w-4 h-4 text-emerald-400 shrink-0" />
+          <span className="font-bold text-emerald-300">{stats.vehicleSpeedKmh} KM/H</span>
+          <span className="text-zinc-600">|</span>
+          <span
+            className={`px-2 py-0.5 rounded font-bold text-[11px] border ${
+              stats.activeVehicleHealth >= 65
+                ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                : stats.activeVehicleHealth >= 25
+                ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                : 'bg-rose-500/25 text-rose-300 border-rose-500/50'
+            }`}
+          >
+            {stats.activeVehicleHealth <= 0 ? 'WRECKED 0%' : `ABILITY ${stats.activeVehicleHealth}%`}
+          </span>
+          <span className="text-zinc-500 hidden sm:inline">|</span>
+          <span className="text-zinc-300 hidden sm:inline">{stats.activeVehicleName}</span>
+          <button
+            type="button"
+            onClick={() => onToggleVehicleEntry && onToggleVehicleEntry()}
+            className="px-2 py-0.5 rounded bg-rose-500/25 hover:bg-rose-500/40 border border-rose-400/60 text-rose-200 font-bold text-[11px] active:scale-95 transition-all"
+          >
+            EXIT CAR [E]
+          </button>
+        </div>
+      ) : stats.nearbyVehicleName ? (
+        <div className="absolute bottom-14 left-1/2 -translate-x-1/2 z-20 pointer-events-auto flex items-center gap-2.5 bg-emerald-950/90 border border-emerald-400/70 rounded-full px-4 py-1.5 shadow-2xl text-xs font-mono text-emerald-100 backdrop-blur-md">
+          <Car className="w-4 h-4 text-emerald-400 animate-pulse shrink-0" />
+          <span className="hidden sm:inline text-emerald-200">{stats.nearbyVehicleName}</span>
+          <span
+            className={`px-2 py-0.5 rounded font-bold text-[11px] border ${
+              stats.nearbyVehicleHealth >= 65
+                ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                : stats.nearbyVehicleHealth >= 25
+                ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                : 'bg-rose-500/25 text-rose-300 border-rose-500/50'
+            }`}
+          >
+            {stats.nearbyVehicleHealth <= 0 ? 'WRECKED 0%' : `${stats.nearbyVehicleHealth}%`}
+          </span>
+          <button
+            type="button"
+            onClick={() => onToggleVehicleEntry && onToggleVehicleEntry()}
+            className="px-2.5 py-0.5 rounded bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-bold text-[11px] active:scale-95 transition-all shadow"
+          >
+            ENTER CAR [E]
+          </button>
+        </div>
+      ) : (
+        <div className="absolute bottom-16 left-1/2 -translate-x-1/2 z-20 pointer-events-none flex items-center gap-2 bg-amber-950/80 border border-amber-500/60 rounded-full px-4 py-1.5 shadow-2xl text-xs font-mono text-amber-200 backdrop-blur-md">
+          <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+          <span><strong className="text-white bg-amber-500/30 px-1.5 py-0.5 rounded border border-amber-400/50">E</strong> or <strong className="text-white bg-amber-500/30 px-1.5 py-0.5 rounded border border-amber-400/50">0-9</strong>: Press 3D Scene Elevator Buttons</span>
+        </div>
+      )}
 
       {/* Toast Notification for BVH Loading */}
       {bvhNotification && (
@@ -561,7 +629,7 @@ export const ViewportHUD: React.FC<ViewportHUDProps> = ({
         onPointerDown={(e) => e.stopPropagation()}
         className={`absolute bottom-6 right-6 z-30 pointer-events-auto select-none items-center gap-3 ${isCoarsePointer ? 'flex' : 'flex md:hidden'}`}
       >
-        {/* Mobile Run Toggle Button (Multi-touch immediate touchstart) */}
+        {/* Mobile Run / Boost Toggle Button (Multi-touch immediate touchstart) */}
         <button
           type="button"
           onTouchStart={(e) => {
@@ -585,33 +653,49 @@ export const ViewportHUD: React.FC<ViewportHUDProps> = ({
               : 'bg-zinc-950/80 border-zinc-700 text-zinc-300 backdrop-blur-md'
           }`}
         >
-          {isRunning ? 'RUN' : 'WALK'}
+          {stats.isDriving ? (isRunning ? 'TURBO' : 'CRUISE') : isRunning ? 'RUN' : 'WALK'}
         </button>
 
-        {/* Mobile Punch Button (Multi-touch immediate touchstart) */}
-        <button
-          type="button"
-          onTouchStart={(e) => {
-            e.stopPropagation();
-            triggerPunchImmediate();
-          }}
-          onPointerDown={(e) => {
-            if (e.pointerType === 'touch') return;
-            e.preventDefault();
-            e.stopPropagation();
-            triggerPunchImmediate();
-          }}
-          onClick={() => {
-            if (performance.now() - lastPunchTriggerRef.current > 400) {
+        {/* Mobile Punch Button (Hidden when driving; replaced by Exit Car) */}
+        {stats.isDriving ? (
+          <button
+            type="button"
+            onTouchStart={(e) => {
+              e.stopPropagation();
+              if (onToggleVehicleEntry) onToggleVehicleEntry();
+            }}
+            onClick={() => {
+              if (onToggleVehicleEntry) onToggleVehicleEntry();
+            }}
+            className="touch-none select-none w-14 h-14 rounded-full border-2 border-rose-400 bg-rose-500/85 text-white active:scale-90 font-bold text-[11px] uppercase shadow-2xl shadow-rose-500/50 backdrop-blur-md flex items-center justify-center transition-all"
+          >
+            EXIT
+          </button>
+        ) : (
+          <button
+            type="button"
+            onTouchStart={(e) => {
+              e.stopPropagation();
               triggerPunchImmediate();
-            }
-          }}
-          className="touch-none select-none w-14 h-14 rounded-full border-2 border-orange-400 bg-orange-500/85 text-zinc-950 active:scale-90 font-bold text-xs uppercase shadow-2xl shadow-orange-500/50 backdrop-blur-md flex items-center justify-center transition-all"
-        >
-          PUNCH
-        </button>
+            }}
+            onPointerDown={(e) => {
+              if (e.pointerType === 'touch') return;
+              e.preventDefault();
+              e.stopPropagation();
+              triggerPunchImmediate();
+            }}
+            onClick={() => {
+              if (performance.now() - lastPunchTriggerRef.current > 400) {
+                triggerPunchImmediate();
+              }
+            }}
+            className="touch-none select-none w-14 h-14 rounded-full border-2 border-orange-400 bg-orange-500/85 text-zinc-950 active:scale-90 font-bold text-xs uppercase shadow-2xl shadow-orange-500/50 backdrop-blur-md flex items-center justify-center transition-all"
+          >
+            PUNCH
+          </button>
+        )}
 
-        {/* Mobile Jump Button (Multi-touch immediate touchstart while walking with joystick) */}
+        {/* Mobile Jump / Handbrake Button */}
         <button
           type="button"
           onTouchStart={(e) => {
@@ -631,7 +715,7 @@ export const ViewportHUD: React.FC<ViewportHUDProps> = ({
           }}
           className="touch-none select-none w-16 h-16 rounded-full border-2 border-cyan-400 bg-cyan-500/80 text-zinc-950 active:scale-90 font-bold text-xs uppercase shadow-2xl shadow-cyan-500/50 backdrop-blur-md flex items-center justify-center transition-all"
         >
-          JUMP
+          {stats.isDriving ? 'BRAKE' : 'JUMP'}
         </button>
       </div>
     </>

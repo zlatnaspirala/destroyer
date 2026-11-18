@@ -76,6 +76,12 @@ export default function App() {
     smartCullMinFloor: 0,
     smartCullMaxFloor: 10,
     smartCulledCount: 0,
+    isDriving: false,
+    activeVehicleName: '',
+    vehicleSpeedKmh: 0,
+    activeVehicleHealth: 100,
+    nearbyVehicleName: '',
+    nearbyVehicleHealth: 100,
   });
 
   // Touch & Pointer state for orbit controls
@@ -168,7 +174,7 @@ export default function App() {
         const res = await engine.init({
           canvas: canvasRef.current,
           enableSubgroups: true,
-          enableCulling: false,
+          enableCulling: true,
         });
 
         if (cancelled) {
@@ -635,6 +641,11 @@ export default function App() {
                     engineRef.current.playerController.punchRequested = true;
                   }
                 }}
+                onToggleVehicleEntry={() => {
+                  if (engineRef.current) {
+                    engineRef.current.playerController.toggleVehicleEntry();
+                  }
+                }}
                 onLoadBVH={(bvhText, name) => {
                   if (engineRef.current) {
                     const res = engineRef.current.loadBVHAnimation(bvhText, name);
@@ -656,6 +667,7 @@ export default function App() {
                 availableAnimations={availableAnimations}
                 activeAnimationName={activeAnimationName}
                 activePlayerSource={activePlayerSource}
+                activeNpcSource={activeNpcSource}
                 elevatorTargetFloor={elevatorTargetFloor}
                 onSelectElevatorFloor={(floor) => {
                   setElevatorTargetFloor(floor);
