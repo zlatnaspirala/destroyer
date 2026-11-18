@@ -23,9 +23,11 @@ export interface BoxCollider {
 export interface MoveableObject {
   id: string;
   entityId: number;
+  extraEntityIds?: number[];
   name: string;
   position: [number, number, number];
   halfExtents: [number, number, number];
+  shape: 'box' | 'cylinder' | 'convex';
   velocity: [number, number, number];
   rotationY: number;
   angularVelY: number;
@@ -34,6 +36,14 @@ export interface MoveableObject {
   mass: number;
   restitution: number;
   colliderId: string;
+}
+
+export interface NPCPunchTarget {
+  id: string;
+  name: string;
+  position: [number, number, number];
+  radius: number;
+  height: number;
 }
 
 export interface CharacterCapsule {
@@ -61,9 +71,10 @@ export class JoltPhysics {
   public doorLeftId = 'door_left';
   public doorRightId = 'door_right';
 
-  // Dynamic Moveable Props (crates, barrels, punchable cubes)
+  // Dynamic Moveable Props (crates, barrels, mid-level convex shapes)
   public moveableObjects: MoveableObject[] = [];
   private propColliderLookup: Map<string, MoveableObject> = new Map();
+  public npcPunchTargets: NPCPunchTarget[] = [];
 
   constructor() {
     this.setupDefaultBuildingPhysics();
@@ -77,12 +88,23 @@ export class JoltPhysics {
     this.colliders.delete(id);
   }
 
+  public registerNPCPunchTarget(target: NPCPunchTarget): void {
+    const existing = this.npcPunchTargets.findIndex((t) => t.id === target.id);
+    if (existing >= 0) {
+      this.npcPunchTargets[existing] = target;
+    } else {
+      this.npcPunchTargets.push(target);
+    }
+  }
+
   public addMoveableObject(params: {
     id: string;
     entityId: number;
+    extraEntityIds?: number[];
     name: string;
     position: [number, number, number];
     halfExtents: [number, number, number];
+    shape?: 'box' | 'cylinder' | 'convex';
     mass?: number;
     restitution?: number;
   }): MoveableObject {
@@ -90,9 +112,11 @@ export class JoltPhysics {
     const obj: MoveableObject = {
       id: params.id,
       entityId: params.entityId,
+      extraEntityIds: params.extraEntityIds,
       name: params.name,
       position: [params.position[0], params.position[1], params.position[2]],
       halfExtents: [params.halfExtents[0], params.halfExtents[1], params.halfExtents[2]],
+      shape: params.shape ?? 'box',
       velocity: [0, 0, 0],
       rotationY: 0,
       angularVelY: 0,
@@ -119,6 +143,7 @@ export class JoltPhysics {
     this.colliders.clear();
     this.moveableObjects = [];
     this.propColliderLookup.clear();
+    this.npcPunchTargets = [];
   }
 
   public setElevatorTargetFloor(floor: number): void {
@@ -295,12 +320,13 @@ export class JoltPhysics {
     forwardDir: [number, number, number],
     range = 2.75,
     power = 12.5
-  ): { hitCount: number; hitNames: string[] } {
+  ): { hitCount: number; hitNames: string[]; hitNPCIds: string[] } {
     const fLen = Math.hypot(forwardDir[0], forwardDir[2]) || 1;
     const fx = forwardDir[0] / fLen;
     const fz = forwardDir[2] / fLen;
 
     const hitNames: string[] = [];
+    const hitNPCIds: string[] = [];
     const fistY = playerPos[1] + 1.15;
 
     for (let i = 0; i < this.moveableObjects.length; i++) {
@@ -345,7 +371,29 @@ export class JoltPhysics {
       }
     }
 
-    return { hitCount: hitNames.length, hitNames };
+    // Also check seated/stationary NPC punch targets (e.g. desk worker woman)
+    for (let i = 0; i < this.npcPunchTargets.length; i++) {
+      const npc = this.npcPunchTargets[i];
+      const dx = npc.position[0] - playerPos[0];
+      const dz = npc.position[2] - playerPos[2];
+      const npcMidY = npc.position[1] + npc.height * 0.5;
+      const dy = npcMidY - fistY;
+
+      const horizDist = Math.hypot(dx, dz);
+      const effectiveDist = Math.max(0, horizDist - npc.radius);
+      if (effectiveDist > range + 0.35) continue;
+      if (Math.abs(dy) > 1.6) continue;
+
+      const dirX = horizDist > 0.001 ? dx / horizDist : fx;
+      const dirZ = horizDist > 0.001 ? dz / horizDist : fz;
+      const forwardDot = dirX * fx + dirZ * fz;
+      if (forwardDot > 0.1 || effectiveDist < 1.0) {
+        hitNPCIds.push(npc.id);
+        hitNames.push(npc.name);
+      }
+    }
+
+    return { hitCount: hitNames.length, hitNames, hitNPCIds };
   }
 
   /**

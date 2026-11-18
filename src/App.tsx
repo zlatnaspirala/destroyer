@@ -10,11 +10,13 @@
 
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { BackendWorkspaceEditor } from './components/BackendWorkspaceEditor';
+import { FreeAssetsModal } from './components/FreeAssetsModal';
 import { Navigation } from './components/Navigation';
 import { ObjectPropertiesPanel } from './components/ObjectPropertiesPanel';
 import { SystemPanel } from './components/SystemPanel';
 import { ViewportHUD } from './components/ViewportHUD';
 import { DestroyerEngine, isMobileBrowser } from './engine/DestroyerEngine';
+import { Free3DAssetEntry } from './engine/loaders/FreeAssetCatalog';
 import { EngineStats } from './engine/core/Types';
 import { AlertTriangle, RefreshCw, Smartphone, Cpu, Sliders, X } from 'lucide-react';
 
@@ -46,6 +48,8 @@ export default function App() {
     'BVH_Idle_Mocap',
   ]);
   const [activePlayerSource, setActivePlayerSource] = useState('Procedural Humanoid');
+  const [activeNpcSource, setActiveNpcSource] = useState('Procedural Sitting Worker');
+  const [showFreeAssetsModal, setShowFreeAssetsModal] = useState(false);
   const [isDraggingGLB, setIsDraggingGLB] = useState(false);
 
   // Stats state
@@ -192,6 +196,7 @@ export default function App() {
         setAvailableAnimations(engine.getAvailableAnimations());
         setActiveAnimationName(engine.animController.getCurrentClipName());
         setActivePlayerSource(engine.activePlayerSourceLabel);
+        setActiveNpcSource(engine.activeNpcSourceLabel);
         isInitializingRef.current = false;
 
         // Periodic stats update
@@ -271,7 +276,7 @@ export default function App() {
   }, [showLeftPanel, showRightPanel, triggerResize]);
 
   // Persist GLB file to /api/assets/upload in chunks so it survives reloads
-  const persistGLBAsset = async (buffer: ArrayBuffer, fileName: string) => {
+  const persistGLBAsset = async (buffer: ArrayBuffer, fileName: string, prefix: 'player_' | 'npc_' = 'player_') => {
     try {
       const bytes = new Uint8Array(buffer);
       const chunks: string[] = [];
@@ -283,7 +288,7 @@ export default function App() {
       await fetch('/api/assets/upload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: `player_${fileName}`, base64Data }),
+        body: JSON.stringify({ name: `${prefix}${fileName}`, base64Data }),
       });
     } catch (err) {
       console.warn('[GLB Persist Optional Error]:', err);
@@ -298,9 +303,51 @@ export default function App() {
       setAvailableAnimations(engineRef.current.getAvailableAnimations());
       setActiveAnimationName(engineRef.current.animController.getCurrentClipName());
       setActivePlayerSource(engineRef.current.activePlayerSourceLabel);
+      setActiveNpcSource(engineRef.current.activeNpcSourceLabel);
       setSceneVersion((v) => v + 1);
-      void persistGLBAsset(buffer, fileName);
+      void persistGLBAsset(buffer, fileName, 'player_');
     }
+  };
+
+  // Handle Sitting Desk Woman NPC GLB upload (worker-woman-1.glb)
+  const handleUploadNpcGLB = async (buffer: ArrayBuffer, fileName: string) => {
+    if (engineRef.current && !engineRef.current.isDeviceLost) {
+      await engineRef.current.loadNpcGLB(buffer, fileName);
+      setActiveNpcSource(engineRef.current.activeNpcSourceLabel);
+      setSceneVersion((v) => v + 1);
+      void persistGLBAsset(buffer, fileName, 'npc_');
+    }
+  };
+
+  // Handle Spawn Physics Prop (primitive box, cylinder barrel, or mid-level convex solid)
+  const handleSpawnPhysicsProp = (kind: 'crate' | 'barrel' | 'octacrate' | 'cone' | 'bin') => {
+    if (engineRef.current && !engineRef.current.isDeviceLost) {
+      const newId = engineRef.current.spawnPhysicsProp(kind);
+      if (newId >= 0) {
+        setSelectedEntityId(newId);
+        setSceneVersion((v) => v + 1);
+      }
+    }
+  };
+
+  // Handle Spawn Verified Free External GLB Prop
+  const handleSpawnExternalGLB = async (
+    entry: Free3DAssetEntry
+  ): Promise<{ success: boolean; error?: string }> => {
+    if (!engineRef.current || engineRef.current.isDeviceLost) {
+      return { success: false, error: 'Engine not ready.' };
+    }
+    const res = await engineRef.current.spawnExternalGLBProp(entry.glbUrl, {
+      name: entry.name,
+      targetHeight: entry.targetHeightMeters,
+      physicsShape: entry.physicsShape,
+      mass: entry.mass,
+    });
+    if (res.success) {
+      if (res.entityId >= 0) setSelectedEntityId(res.entityId);
+      setSceneVersion((v) => v + 1);
+    }
+    return { success: res.success, error: res.error };
   };
 
   // Handle Spawn Cube
@@ -401,6 +448,7 @@ export default function App() {
         onSetRightPanelTab={setRightPanelTab}
         onResetCamera={handleResetCamera}
         onSpawnCube={handleSpawnCube}
+        onOpenFreeAssets={() => setShowFreeAssetsModal(true)}
         fps={stats.fps}
         subgroupsActive={stats.subgroupsActive}
       />
@@ -458,7 +506,11 @@ export default function App() {
               reader.onload = (ev) => {
                 const buf = ev.target?.result;
                 if (buf instanceof ArrayBuffer) {
-                  void handleLoadGLB(buf, file.name);
+                  if (/worker[-_]?woman|^npc_/i.test(file.name)) {
+                    void handleUploadNpcGLB(buf, file.name);
+                  } else {
+                    void handleLoadGLB(buf, file.name);
+                  }
                 }
               };
               reader.readAsArrayBuffer(file);
@@ -469,7 +521,7 @@ export default function App() {
           {isDraggingGLB && (
             <div className="absolute inset-0 z-40 bg-emerald-950/60 border-2 border-dashed border-emerald-400 flex items-center justify-center pointer-events-none backdrop-blur-sm">
               <div className="px-5 py-3 rounded-xl bg-zinc-950/90 border border-emerald-400/70 text-emerald-300 font-mono text-sm font-bold shadow-2xl">
-                Drop .GLB file to replace Player Character
+                Drop .GLB file to load Player or worker-woman NPC
               </div>
             </div>
           )}
@@ -688,6 +740,16 @@ export default function App() {
           </aside>
         )}
       </div>
+
+      {/* Free 3D Assets, Mobile Convex Props, NPC Loader & License Attribution Modal */}
+      <FreeAssetsModal
+        isOpen={showFreeAssetsModal}
+        onClose={() => setShowFreeAssetsModal(false)}
+        onSpawnPhysicsProp={handleSpawnPhysicsProp}
+        onSpawnExternalGLB={handleSpawnExternalGLB}
+        onUploadNpcGLB={(buf, name) => void handleUploadNpcGLB(buf, name)}
+        activeNpcSource={activeNpcSource}
+      />
     </div>
   );
 }

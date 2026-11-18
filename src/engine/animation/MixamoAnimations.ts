@@ -351,4 +351,138 @@ export class MixamoAnimations {
       { name: 'Mixamo_Punch_Cycle', duration: 0.42, channels: punchChannels },
     ];
   }
+
+  /**
+   * Generates Seated Desk Idle + Seated Getting-Punched recoil clips for a Mixamo character rig.
+   */
+  static generateSeatedClips(joints: SkeletonJoint[]): AnimationClip[] {
+    if (joints.length === 0) return [];
+    const findJoint = (pattern: RegExp): number =>
+      joints.findIndex((j) => pattern.test(j.name));
+
+    const idx = {
+      hips: findJoint(/(^|:)hips$/i),
+      spine1: findJoint(/(^|:)spine1$/i),
+      head: findJoint(/(^|:)head$/i),
+      lShoulder: findJoint(/leftshoulder$/i),
+      lArm: findJoint(/leftarm$/i),
+      lForeArm: findJoint(/leftforearm$/i),
+      rShoulder: findJoint(/rightshoulder$/i),
+      rArm: findJoint(/rightarm$/i),
+      rForeArm: findJoint(/rightforearm$/i),
+      lUpLeg: findJoint(/leftupleg$/i),
+      lLeg: findJoint(/leftleg$/i),
+      rUpLeg: findJoint(/rightupleg$/i),
+      rLeg: findJoint(/rightleg$/i),
+    };
+
+    const worldBindRot: Quat[] = new Array(joints.length);
+    const computed = new Uint8Array(joints.length);
+    const tempWorld = new Array<Float32Array>(joints.length);
+    const getBindWorld = (i: number): Float32Array => {
+      if (computed[i]) return tempWorld[i];
+      computed[i] = 1;
+      const j = joints[i];
+      const out = Mat4.create();
+      if (j.parentIndex >= 0 && j.parentIndex < joints.length) {
+        Mat4.multiply(getBindWorld(j.parentIndex), j.localMatrix, out);
+      } else {
+        out.set(j.localMatrix);
+      }
+      tempWorld[i] = out;
+      worldBindRot[i] = Mat4.decompose(out).rotation;
+      return out;
+    };
+    for (let i = 0; i < joints.length; i++) getBindWorld(i);
+
+    const toLocalRot = (jointIdx: number, rx: number, ry: number, rz: number): Quat => {
+      const qDelta = eulerXYZToQuat(rx, ry, rz);
+      const j = joints[jointIdx];
+      const qWorldJ = worldBindRot[jointIdx];
+      const qWorldP: Quat =
+        j.parentIndex >= 0 && j.parentIndex < joints.length ? worldBindRot[j.parentIndex] : [0, 0, 0, 1];
+      return normQuat(mulQuat(mulQuat(invQuat(qWorldP), qDelta), qWorldJ));
+    };
+
+    const makeRotChannel = (
+      jointIdx: number,
+      times: number[],
+      eulers: [number, number, number][]
+    ): AnimationChannel | null => {
+      if (jointIdx < 0) return null;
+      const values = new Float32Array(times.length * 4);
+      for (let k = 0; k < times.length; k++) {
+        const q = toLocalRot(jointIdx, eulers[k][0], eulers[k][1], eulers[k][2]);
+        values[k * 4 + 0] = q[0];
+        values[k * 4 + 1] = q[1];
+        values[k * 4 + 2] = q[2];
+        values[k * 4 + 3] = q[3];
+      }
+      return {
+        targetNode: jointIdx,
+        path: 'rotation',
+        times: new Float32Array(times),
+        values,
+        interpolation: 'LINEAR',
+      };
+    };
+
+    const push = (list: AnimationChannel[], ch: AnimationChannel | null) => {
+      if (ch) list.push(ch);
+    };
+
+    // 1. Seated Desk Idle (2.8s loop)
+    const sitTimes = [0, 1.4, 2.8];
+    const sitChannels: AnimationChannel[] = [];
+    push(sitChannels, makeRotChannel(idx.lUpLeg, sitTimes, [[-1.35, 0, 0.06], [-1.35, 0, 0.06], [-1.35, 0, 0.06]]));
+    push(sitChannels, makeRotChannel(idx.rUpLeg, sitTimes, [[-1.35, 0, -0.06], [-1.35, 0, -0.06], [-1.35, 0, -0.06]]));
+    push(sitChannels, makeRotChannel(idx.lLeg, sitTimes, [[1.38, 0, 0], [1.38, 0, 0], [1.38, 0, 0]]));
+    push(sitChannels, makeRotChannel(idx.rLeg, sitTimes, [[1.38, 0, 0], [1.38, 0, 0], [1.38, 0, 0]]));
+    push(sitChannels, makeRotChannel(idx.spine1, sitTimes, [[0.04, 0, 0], [0.08, 0.03, 0], [0.04, 0, 0]]));
+    push(sitChannels, makeRotChannel(idx.head, sitTimes, [[0.04, -0.06, 0], [0.02, 0.06, 0], [0.04, -0.06, 0]]));
+    push(sitChannels, makeRotChannel(idx.lShoulder, sitTimes, [[0, 0, -0.14], [0, 0, -0.12], [0, 0, -0.14]]));
+    push(sitChannels, makeRotChannel(idx.rShoulder, sitTimes, [[0, 0, 0.14], [0, 0, 0.12], [0, 0, 0.14]]));
+    push(sitChannels, makeRotChannel(idx.lArm, sitTimes, [[-0.25, 0.15, -1.18], [-0.28, 0.15, -1.15], [-0.25, 0.15, -1.18]]));
+    push(sitChannels, makeRotChannel(idx.rArm, sitTimes, [[-0.25, -0.15, 1.18], [-0.28, -0.15, 1.15], [-0.25, -0.15, 1.18]]));
+    push(sitChannels, makeRotChannel(idx.lForeArm, sitTimes, [[0, -0.85, 0], [0, -0.88, 0], [0, -0.85, 0]]));
+    push(sitChannels, makeRotChannel(idx.rForeArm, sitTimes, [[0, 0.85, 0], [0, 0.88, 0], [0, 0.85, 0]]));
+
+    // 2. Seated Getting Punched Recoil (0.95s)
+    const hitTimes = [0, 0.12, 0.34, 0.65, 0.95];
+    const hitChannels: AnimationChannel[] = [];
+    push(hitChannels, makeRotChannel(idx.lUpLeg, hitTimes, [
+      [-1.35, 0, 0.06], [-1.10, 0, 0.14], [-1.15, 0, 0.12], [-1.28, 0, 0.08], [-1.35, 0, 0.06],
+    ]));
+    push(hitChannels, makeRotChannel(idx.rUpLeg, hitTimes, [
+      [-1.35, 0, -0.06], [-1.08, 0, -0.14], [-1.14, 0, -0.12], [-1.28, 0, -0.08], [-1.35, 0, -0.06],
+    ]));
+    push(hitChannels, makeRotChannel(idx.lLeg, hitTimes, [[1.38, 0, 0], [1.15, 0, 0], [1.22, 0, 0], [1.32, 0, 0], [1.38, 0, 0]]));
+    push(hitChannels, makeRotChannel(idx.rLeg, hitTimes, [[1.38, 0, 0], [1.15, 0, 0], [1.22, 0, 0], [1.32, 0, 0], [1.38, 0, 0]]));
+    push(hitChannels, makeRotChannel(idx.hips, hitTimes, [
+      [0, 0, 0], [-0.22, -0.12, 0.06], [-0.30, -0.18, 0.08], [-0.10, -0.06, 0.02], [0, 0, 0],
+    ]));
+    push(hitChannels, makeRotChannel(idx.spine1, hitTimes, [
+      [0.04, 0, 0], [-0.52, -0.24, 0.10], [-0.62, -0.28, 0.12], [-0.18, -0.10, 0.04], [0.04, 0, 0],
+    ]));
+    push(hitChannels, makeRotChannel(idx.head, hitTimes, [
+      [0.04, 0, 0], [-0.55, -0.35, 0.15], [-0.45, -0.25, 0.10], [-0.12, -0.08, 0], [0.04, 0, 0],
+    ]));
+    push(hitChannels, makeRotChannel(idx.lArm, hitTimes, [
+      [-0.25, 0.15, -1.18], [-1.15, 0.45, -0.65], [-0.95, 0.35, -0.78], [-0.50, 0.22, -1.05], [-0.25, 0.15, -1.18],
+    ]));
+    push(hitChannels, makeRotChannel(idx.rArm, hitTimes, [
+      [-0.25, -0.15, 1.18], [-1.10, -0.45, 0.65], [-0.92, -0.35, 0.78], [-0.48, -0.22, 1.05], [-0.25, -0.15, 1.18],
+    ]));
+    push(hitChannels, makeRotChannel(idx.lForeArm, hitTimes, [
+      [0, -0.85, 0], [0, -1.45, 0], [0, -1.35, 0], [0, -1.05, 0], [0, -0.85, 0],
+    ]));
+    push(hitChannels, makeRotChannel(idx.rForeArm, hitTimes, [
+      [0, 0.85, 0], [0, 1.45, 0], [0, 1.35, 0], [0, 1.05, 0], [0, 0.85, 0],
+    ]));
+
+    return [
+      { name: 'Mixamo_Sitting_Idle', duration: 2.8, channels: sitChannels },
+      { name: 'Mixamo_Sitting_Hit', duration: 0.95, channels: hitChannels },
+    ];
+  }
 }

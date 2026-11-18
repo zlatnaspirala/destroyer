@@ -376,6 +376,11 @@ export class PlayerController {
           );
           this.lastPunchHitCount = hitRes.hitCount;
           this.lastPunchHitNames = hitRes.hitNames;
+          if (hitRes.hitNPCIds && hitRes.hitNPCIds.length > 0) {
+            for (const npcId of hitRes.hitNPCIds) {
+              this.engine.triggerNpcPunchReaction(npcId);
+            }
+          }
         }
       }
       if (this.punchTime >= this.punchDuration) {

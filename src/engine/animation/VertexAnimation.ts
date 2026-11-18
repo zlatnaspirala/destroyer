@@ -87,21 +87,32 @@ export class VertexAnimationController {
 
     if (this.entityManager) {
       this.entityManager.totalJointsCount = this.joints.length;
-      this.ensureScratchSize(this.joints.length);
-      this.scratchVisited.fill(0);
-
-      // Populate initial skinning matrices in bind pose
-      for (let i = offset; i < this.joints.length; i++) {
-        const joint = this.joints[i];
-        this.computeJointWorld(i);
-        Mat4.multiply(joint.worldMatrix, joint.inverseBindMatrix, this.scratchSkinMat);
-        const bufOffset = i * 16;
-        if (bufOffset + 16 <= this.entityManager.jointMatrices.length) {
-          this.entityManager.jointMatrices.set(this.scratchSkinMat, bufOffset);
-        }
-      }
+      this.populateJointMatrices(this.entityManager.jointMatrices, 0, offset, this.joints.length);
     }
     return offset;
+  }
+
+  public writeBindPoseTo(outJointMatrices: Float32Array, jointMatrixOffset = 0): void {
+    this.ensureScratchSize(this.joints.length);
+    this.populateJointMatrices(outJointMatrices, jointMatrixOffset, 0, this.joints.length);
+  }
+
+  private populateJointMatrices(
+    outJointMatrices: Float32Array,
+    jointMatrixOffset: number,
+    startJoint: number,
+    endJoint: number
+  ): void {
+    this.scratchVisited.fill(0);
+    for (let i = startJoint; i < endJoint; i++) {
+      const joint = this.joints[i];
+      this.computeJointWorld(i);
+      Mat4.multiply(joint.worldMatrix, joint.inverseBindMatrix, this.scratchSkinMat);
+      const bufOffset = (jointMatrixOffset + i) * 16;
+      if (bufOffset + 16 <= outJointMatrices.length) {
+        outJointMatrices.set(this.scratchSkinMat, bufOffset);
+      }
+    }
   }
 
   setMorphWeight(index: number, weight: number): void {

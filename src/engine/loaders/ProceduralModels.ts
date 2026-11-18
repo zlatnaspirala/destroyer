@@ -177,6 +177,161 @@ export class ProceduralModels {
     };
   }
 
+  /**
+   * Mid-level convex chamfered polyhedron cargo crate (~44 tris, mobile-optimized).
+   * Generated from outward-facing flat/beveled convex hull rings so colliders remain pure AABBs.
+   */
+  static createConvexOctaCrate(size = 0.9): ParsedGLBPrimitive {
+    const h = size * 0.5;
+    const b = size * 0.34; // Inner bevel plateau
+    const rings: { y: number; r: number }[] = [
+      { y: -h, r: b },
+      { y: -b, r: h },
+      { y: b, r: h },
+      { y: h, r: b },
+    ];
+    return ProceduralModels.buildConvexOctagonSolid(rings, 'Moveable_Convex_OctaCrate', {
+      baseColor: [0.85, 0.56, 0.18, 1.0],
+      emissiveColor: [0.05, 0.03, 0.0, 0.15],
+      roughness: 0.44,
+      metallic: 0.42,
+      ao: 1.0,
+      alphaCutoff: 0.5,
+    });
+  }
+
+  /**
+   * Mid-level convex safety/traffic pylon cone (~48 tris, fast cylinder collider).
+   */
+  static createConvexHazardCone(radius = 0.34, height = 0.88): ParsedGLBPrimitive {
+    const halfH = height * 0.5;
+    const rings: { y: number; r: number }[] = [
+      { y: -halfH, r: radius },
+      { y: -halfH + 0.12, r: radius * 0.95 },
+      { y: -halfH + 0.16, r: radius * 0.66 },
+      { y: halfH, r: radius * 0.20 },
+    ];
+    return ProceduralModels.buildConvexOctagonSolid(rings, 'Moveable_Convex_HazardCone', {
+      baseColor: [0.94, 0.38, 0.08, 1.0],
+      emissiveColor: [0.12, 0.04, 0.01, 0.25],
+      roughness: 0.48,
+      metallic: 0.08,
+      ao: 1.0,
+      alphaCutoff: 0.5,
+    });
+  }
+
+  /**
+   * Mid-level convex tapered hexagonal/octagonal office recycling bin (~32 tris).
+   */
+  static createConvexOfficeBin(radius = 0.30, height = 0.72): ParsedGLBPrimitive {
+    const halfH = height * 0.5;
+    const rings: { y: number; r: number }[] = [
+      { y: -halfH, r: radius * 0.72 },
+      { y: halfH - 0.08, r: radius },
+      { y: halfH, r: radius * 0.92 },
+    ];
+    return ProceduralModels.buildConvexOctagonSolid(rings, 'Moveable_Convex_OfficeBin', {
+      baseColor: [0.22, 0.52, 0.66, 1.0],
+      emissiveColor: [0.01, 0.04, 0.06, 0.15],
+      roughness: 0.38,
+      metallic: 0.58,
+      ao: 1.0,
+      alphaCutoff: 0.5,
+    });
+  }
+
+  private static buildConvexOctagonSolid(
+    rings: { y: number; r: number }[],
+    name: string,
+    material: NonNullable<ParsedGLBPrimitive['material']>
+  ): ParsedGLBPrimitive {
+    const sides = 8;
+    const positions: number[] = [];
+    const normals: number[] = [];
+    const uvs: number[] = [];
+    const indices: number[] = [];
+    let maxR = 0;
+
+    const pushTri = (
+      a: [number, number, number],
+      b: [number, number, number],
+      c: [number, number, number],
+      ua: [number, number],
+      ub: [number, number],
+      uc: [number, number]
+    ) => {
+      const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
+      const vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
+      let nx = uy * vz - uz * vy;
+      let ny = uz * vx - ux * vz;
+      let nz = ux * vy - uy * vx;
+      const len = Math.hypot(nx, ny, nz) || 1;
+      nx /= len; ny /= len; nz /= len;
+      const base = positions.length / 3;
+      positions.push(a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]);
+      normals.push(nx, ny, nz, nx, ny, nz, nx, ny, nz);
+      uvs.push(ua[0], ua[1], ub[0], ub[1], uc[0], uc[1]);
+      indices.push(base, base + 1, base + 2);
+      for (const p of [a, b, c]) {
+        const d = Math.hypot(p[0], p[1], p[2]);
+        if (d > maxR) maxR = d;
+      }
+    };
+
+    const ringPts = (ring: { y: number; r: number }): [number, number, number][] => {
+      const pts: [number, number, number][] = [];
+      for (let i = 0; i < sides; i++) {
+        const a = (i / sides) * Math.PI * 2 + Math.PI / 8;
+        pts.push([Math.cos(a) * ring.r, ring.y, Math.sin(a) * ring.r]);
+      }
+      return pts;
+    };
+
+    const allRings = rings.map(ringPts);
+
+    // Side bands
+    for (let r = 0; r < allRings.length - 1; r++) {
+      const lower = allRings[r];
+      const upper = allRings[r + 1];
+      const v0 = r / (allRings.length - 1);
+      const v1 = (r + 1) / (allRings.length - 1);
+      for (let i = 0; i < sides; i++) {
+        const next = (i + 1) % sides;
+        const u0 = i / sides;
+        const u1 = (i + 1) / sides;
+        pushTri(lower[i], lower[next], upper[i], [u0, v0], [u1, v0], [u0, v1]);
+        pushTri(upper[i], lower[next], upper[next], [u0, v1], [u1, v0], [u1, v1]);
+      }
+    }
+
+    // Bottom cap
+    const bottomCenter: [number, number, number] = [0, rings[0].y, 0];
+    const bottomPts = allRings[0];
+    for (let i = 0; i < sides; i++) {
+      const next = (i + 1) % sides;
+      pushTri(bottomCenter, bottomPts[next], bottomPts[i], [0.5, 0.5], [1, 0], [0, 0]);
+    }
+
+    // Top cap
+    const topCenter: [number, number, number] = [0, rings[rings.length - 1].y, 0];
+    const topPts = allRings[allRings.length - 1];
+    for (let i = 0; i < sides; i++) {
+      const next = (i + 1) % sides;
+      pushTri(topCenter, topPts[i], topPts[next], [0.5, 0.5], [0, 1], [1, 1]);
+    }
+
+    return {
+      name,
+      positions: new Float32Array(positions),
+      normals: new Float32Array(normals),
+      uvs: new Float32Array(uvs),
+      indices: new Uint32Array(indices),
+      boundingRadius: maxR,
+      material,
+    };
+  }
+
   static createSphere(radius = 1.2, rings = 16, sectors = 16): ParsedGLBPrimitive {
     const positions: number[] = [];
     const normals: number[] = [];
@@ -1611,6 +1766,244 @@ export class ProceduralModels {
     allClips: AnimationClip[];
   } {
     return ProceduralModels.createHumanBodyFromOBJ();
+  }
+
+  /**
+   * Procedural fallback for Seated Office Woman NPC (used if worker-woman-1.glb is absent).
+   * Posed sitting on the desk edge facing +Z with hips at Y~0.44m and calves dangling down to Y=0.
+   * Joint 0: Pelvis/Thighs, Joint 1: Torso (spine), Joint 2: Head+Hair, Joint 3: Arms.
+   */
+  static createSittingOfficeWorker(): {
+    primitives: ParsedGLBPrimitive[];
+    joints: SkeletonJoint[];
+    clips: AnimationClip[];
+  } {
+    const buildJointedPart = (
+      boxes: { center: [number, number, number]; half: [number, number, number]; joint: number }[],
+      name: string,
+      baseColor: [number, number, number, number],
+      roughness = 0.55
+    ): ParsedGLBPrimitive => {
+      const positions: number[] = [];
+      const normals: number[] = [];
+      const uvs: number[] = [];
+      const indices: number[] = [];
+      const joints: number[] = [];
+      const weights: number[] = [];
+
+      for (const b of boxes) {
+        const prim = ProceduralModels.createBoxPrimitive(b.center, b.half, name);
+        const vOff = positions.length / 3;
+        for (let i = 0; i < prim.positions.length; i++) positions.push(prim.positions[i]);
+        for (let i = 0; i < prim.normals.length; i++) normals.push(prim.normals[i]);
+        for (let i = 0; i < prim.uvs.length; i++) uvs.push(prim.uvs[i]);
+        for (let i = 0; i < prim.indices.length; i++) indices.push(prim.indices[i] + vOff);
+        const vCount = prim.positions.length / 3;
+        for (let v = 0; v < vCount; v++) {
+          joints.push(b.joint, 0, 0, 0);
+          weights.push(1.0, 0.0, 0.0, 0.0);
+        }
+      }
+
+      return {
+        name,
+        positions: new Float32Array(positions),
+        normals: new Float32Array(normals),
+        uvs: new Float32Array(uvs),
+        indices: new Uint32Array(indices),
+        joints: new Uint32Array(joints),
+        weights: new Float32Array(weights),
+        boundingRadius: 1.4,
+        material: {
+          baseColor,
+          emissiveColor: [0, 0, 0, 0],
+          roughness,
+          metallic: 0.08,
+          ao: 1.0,
+          alphaCutoff: 0.5,
+        },
+      };
+    };
+
+    // Skirt/Slacks & Calves (Joint 0: Pelvis/Legs)
+    const lowerPrim = buildJointedPart(
+      [
+        { center: [0, 0.50, -0.02], half: [0.18, 0.09, 0.16], joint: 0 }, // Pelvis seated
+        { center: [-0.09, 0.48, 0.18], half: [0.075, 0.065, 0.18], joint: 0 }, // Left thigh forward
+        { center: [0.09, 0.48, 0.18], half: [0.075, 0.065, 0.18], joint: 0 }, // Right thigh forward
+        { center: [-0.09, 0.24, 0.34], half: [0.055, 0.22, 0.06], joint: 0 }, // Left calf
+        { center: [0.09, 0.24, 0.34], half: [0.055, 0.22, 0.06], joint: 0 }, // Right calf
+        { center: [-0.09, 0.03, 0.38], half: [0.055, 0.03, 0.09], joint: 0 }, // Left shoe
+        { center: [0.09, 0.03, 0.38], half: [0.055, 0.03, 0.09], joint: 0 }, // Right shoe
+      ],
+      'Worker_Slacks',
+      [0.14, 0.16, 0.22, 1.0],
+      0.65
+    );
+
+    // Blazer Torso (Joint 1) + Arms (Joint 3)
+    const blazerPrim = buildJointedPart(
+      [
+        { center: [0, 0.78, -0.04], half: [0.17, 0.23, 0.11], joint: 1 }, // Jacket torso
+        { center: [-0.21, 0.80, 0.04], half: [0.055, 0.16, 0.06], joint: 3 }, // Left upper arm
+        { center: [0.21, 0.80, 0.04], half: [0.055, 0.16, 0.06], joint: 3 }, // Right upper arm
+        { center: [-0.18, 0.64, 0.16], half: [0.048, 0.05, 0.13], joint: 3 }, // Left forearm resting
+        { center: [0.18, 0.64, 0.16], half: [0.048, 0.05, 0.13], joint: 3 }, // Right forearm resting
+      ],
+      'Worker_Blazer',
+      [0.62, 0.22, 0.30, 1.0],
+      0.52
+    );
+
+    // Skin Head + Hands (Joint 2 Head, Joint 3 Hands)
+    const skinPrim = buildJointedPart(
+      [
+        { center: [0, 1.06, -0.02], half: [0.055, 0.05, 0.055], joint: 2 }, // Neck
+        { center: [0, 1.19, -0.01], half: [0.10, 0.11, 0.105], joint: 2 }, // Head
+        { center: [-0.16, 0.64, 0.31], half: [0.04, 0.035, 0.05], joint: 3 }, // Left hand
+        { center: [0.16, 0.64, 0.31], half: [0.04, 0.035, 0.05], joint: 3 }, // Right hand
+      ],
+      'Worker_Skin',
+      [0.88, 0.72, 0.60, 1.0],
+      0.48
+    );
+
+    // Hair & Bun (Joint 2)
+    const hairPrim = buildJointedPart(
+      [
+        { center: [0, 1.24, -0.03], half: [0.11, 0.09, 0.115], joint: 2 }, // Hair cap
+        { center: [0, 1.22, -0.15], half: [0.06, 0.06, 0.06], joint: 2 }, // Hair bun
+      ],
+      'Worker_Hair',
+      [0.24, 0.14, 0.09, 1.0],
+      0.42
+    );
+
+    const idMat = () => new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+    const joints: SkeletonJoint[] = [
+      {
+        name: 'Worker_Pelvis',
+        parentIndex: -1,
+        initialTranslation: [0, 0, 0],
+        initialRotation: [0, 0, 0, 1],
+        initialScale: [1, 1, 1],
+        inverseBindMatrix: idMat(),
+        localMatrix: idMat(),
+        worldMatrix: idMat(),
+      },
+      {
+        name: 'Worker_Torso',
+        parentIndex: 0,
+        initialTranslation: [0, 0.56, -0.04],
+        initialRotation: [0, 0, 0, 1],
+        initialScale: [1, 1, 1],
+        inverseBindMatrix: new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, -0.56, 0.04, 1]),
+        localMatrix: new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0.56, -0.04, 1]),
+        worldMatrix: new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0.56, -0.04, 1]),
+      },
+      {
+        name: 'Worker_Head',
+        parentIndex: 1,
+        initialTranslation: [0, 0.48, 0.02],
+        initialRotation: [0, 0, 0, 1],
+        initialScale: [1, 1, 1],
+        inverseBindMatrix: new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, -1.04, 0.02, 1]),
+        localMatrix: new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0.48, 0.02, 1]),
+        worldMatrix: new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 1.04, -0.02, 1]),
+      },
+      {
+        name: 'Worker_Arms',
+        parentIndex: 1,
+        initialTranslation: [0, 0.34, 0.02],
+        initialRotation: [0, 0, 0, 1],
+        initialScale: [1, 1, 1],
+        inverseBindMatrix: new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, -0.90, 0.02, 1]),
+        localMatrix: new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0.34, 0.02, 1]),
+        worldMatrix: new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0.90, -0.02, 1]),
+      },
+    ];
+
+    const idleClip: AnimationClip = {
+      name: 'Worker_Sitting_Idle',
+      duration: 2.6,
+      channels: [
+        {
+          targetNode: 1,
+          path: 'rotation',
+          interpolation: 'LINEAR',
+          times: new Float32Array([0, 1.3, 2.6]),
+          values: new Float32Array([
+            0.02, 0, 0, 0.9998,
+            -0.02, 0.02, 0, 0.9996,
+            0.02, 0, 0, 0.9998,
+          ]),
+        },
+        {
+          targetNode: 2,
+          path: 'rotation',
+          interpolation: 'LINEAR',
+          times: new Float32Array([0, 1.3, 2.6]),
+          values: new Float32Array([
+            0.03, -0.08, 0, 0.9963,
+            0.01, 0.08, 0, 0.9967,
+            0.03, -0.08, 0, 0.9963,
+          ]),
+        },
+      ],
+    };
+
+    // Getting-punched seated reaction (recoil backward + defensive arms up)
+    const hitClip: AnimationClip = {
+      name: 'Worker_Sitting_Punched',
+      duration: 0.9,
+      channels: [
+        {
+          targetNode: 1,
+          path: 'rotation',
+          interpolation: 'LINEAR',
+          times: new Float32Array([0, 0.12, 0.32, 0.65, 0.9]),
+          values: new Float32Array([
+            0.02, 0, 0, 0.9998,
+            -0.38, -0.14, 0.08, 0.910,
+            -0.44, -0.18, 0.10, 0.875,
+            -0.14, -0.06, 0.03, 0.988,
+            0.02, 0, 0, 0.9998,
+          ]),
+        },
+        {
+          targetNode: 2,
+          path: 'rotation',
+          interpolation: 'LINEAR',
+          times: new Float32Array([0, 0.12, 0.32, 0.65, 0.9]),
+          values: new Float32Array([
+            0, 0, 0, 1,
+            -0.32, -0.22, 0.12, 0.914,
+            -0.25, -0.16, 0.08, 0.951,
+            -0.08, -0.06, 0, 0.995,
+            0, 0, 0, 1,
+          ]),
+        },
+        {
+          targetNode: 3,
+          path: 'rotation',
+          interpolation: 'LINEAR',
+          times: new Float32Array([0, 0.12, 0.35, 0.65, 0.9]),
+          values: new Float32Array([
+            0, 0, 0, 1,
+            -0.65, 0, 0, 0.760,
+            -0.55, 0, 0, 0.835,
+            -0.20, 0, 0, 0.980,
+            0, 0, 0, 1,
+          ]),
+        },
+      ],
+    };
+
+    return {
+      primitives: [lowerPrim, blazerPrim, skinPrim, hairPrim],
+      joints,
+      clips: [idleClip, hitClip],
+    };
   }
 }
 

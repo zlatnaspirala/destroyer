@@ -35,6 +35,7 @@ export class DestroyerEngine {
   public camera: Camera;
   public renderer: IndirectRenderer;
   public animController: VertexAnimationController;
+  public npcAnimController: VertexAnimationController;
   public playerController: PlayerController;
   public physics: JoltPhysics;
 
@@ -89,15 +90,43 @@ export class DestroyerEngine {
   private buildingBannerEntityIds: [number, number] = [-1, -1];
   private groundSlabEntityId = -1;
   private playerEntityIds: number[] = [];
+  private npcEntityIds: number[] = [];
 
   private customPlayerGLB: { buffer: ArrayBuffer; name: string } | null = null;
+  private customNpcGLB: { buffer: ArrayBuffer; name: string } | null = null;
   private isCustomPlayerRig = false;
   private playerWalkClipName = 'Human_Walk_Cycle';
   private playerIdleClipName: string | null = 'BVH_Idle_Mocap';
   private playerJumpClipName: string | null = 'BVH_Jump_Mocap';
   private playerPunchClipName: string | null = 'BVH_Punch_Mocap';
+
+  // Sitting Desk Office Worker NPC state
+  private npcJointOffset = 0;
+  private npcHasSkinning = false;
+  private npcIdleClipName: string | null = null;
+  private npcHitClipName: string | null = null;
+  private npcHitTimer = 0;
+  private npcHitDuration = 0.9;
+  private npcBasePos: [number, number, number] = [0, 0.70, 6.42];
+  public activeNpcSourceLabel = 'Procedural Sitting Worker';
+
+  // Moveable prop mesh/material caches (primitives + mid-level convex)
   private anarchyCrateMeshId = -1;
   private anarchyCrateMatId = -1;
+  private anarchyBarrelMeshId = -1;
+  private anarchyBarrelMatId = -1;
+  private anarchyOctaCrateMeshId = -1;
+  private anarchyOctaCrateMatId = -1;
+  private anarchyConeMeshId = -1;
+  private anarchyConeMatId = -1;
+  private anarchyBinMeshId = -1;
+  private anarchyBinMatId = -1;
+
+  // Dynamic mesh + shared texture atlas state for runtime GLB prop spawning
+  private loadedGeometryPrims: ParsedGLBPrimitive[] = [];
+  private sharedAtlasImages: GLBTextureImage[] = [];
+  private sharedAtlasMatRefs: { matId: number; globalTexIdx: number }[] = [];
+
   private tempPropMat = Mat4.create();
   private userLockedClip = false;
   public activePlayerSourceLabel = 'Procedural Humanoid';
@@ -110,6 +139,7 @@ export class DestroyerEngine {
     this.camera = new Camera();
     this.renderer = new IndirectRenderer(this.deviceManager, this.entityManager, this.camera);
     this.animController = new VertexAnimationController(this.entityManager);
+    this.npcAnimController = new VertexAnimationController();
     this.physics = new JoltPhysics();
     this.playerController = new PlayerController(this);
 
@@ -335,6 +365,11 @@ export class DestroyerEngine {
           Mat4.fromTranslationRotationScale(obj.position, [qx, qy, qz, qw], [1, 1, 1], this.tempPropMat);
           const rad = Math.max(1.2, Math.hypot(obj.halfExtents[0], obj.halfExtents[1], obj.halfExtents[2]) + 0.3);
           this.entityManager.updateEntityMatrix(obj.entityId, this.tempPropMat, obj.position, rad);
+          if (obj.extraEntityIds) {
+            for (let ex = 0; ex < obj.extraEntityIds.length; ex++) {
+              this.entityManager.updateEntityMatrix(obj.extraEntityIds[ex], this.tempPropMat, obj.position, rad);
+            }
+          }
         }
       }
 
@@ -390,6 +425,53 @@ export class DestroyerEngine {
           this.animController.update(deltaSec);
         } else if (this.playerWalkClipName) {
           this.animController.evaluateClipAtTime(this.playerWalkClipName, 0);
+        }
+      }
+
+      // Independent Sitting Desk Woman NPC Animation Evaluation (writes at npcJointOffset)
+      if (this.npcHasSkinning && this.npcAnimController.joints.length > 0) {
+        if (this.npcHitTimer > 0 && this.npcHitClipName) {
+          const prevRemaining = this.npcHitTimer;
+          this.npcHitTimer = Math.max(0, this.npcHitTimer - deltaSec);
+          const elapsed = this.npcHitDuration - prevRemaining;
+          this.npcAnimController.evaluateClipAtTime(
+            this.npcHitClipName,
+            elapsed,
+            this.entityManager.jointMatrices,
+            this.npcJointOffset
+          );
+          // Subtle physical flinch wobble while reacting
+          if (this.npcEntityIds.length > 0) {
+            const flinch = Math.sin((elapsed / Math.max(0.05, this.npcHitDuration)) * Math.PI) * 0.10;
+            Mat4.fromTranslation(
+              [this.npcBasePos[0], this.npcBasePos[1], this.npcBasePos[2] - flinch],
+              this.tempPropMat
+            );
+            for (const eid of this.npcEntityIds) {
+              this.entityManager.updateEntityMatrix(eid, this.tempPropMat, this.npcBasePos, 2.0);
+            }
+          }
+        } else {
+          if (this.npcIdleClipName) {
+            if (this.npcAnimController.getCurrentClipName() !== this.npcIdleClipName) {
+              this.npcAnimController.playClipByName(this.npcIdleClipName, true);
+            }
+            this.npcAnimController.update(deltaSec, this.entityManager.jointMatrices, this.npcJointOffset);
+          } else if (this.npcHitClipName) {
+            // Single-clip getting-punched GLB: frame 0 holds the calm seated pose cleanly
+            this.npcAnimController.evaluateClipAtTime(
+              this.npcHitClipName,
+              0,
+              this.entityManager.jointMatrices,
+              this.npcJointOffset
+            );
+          }
+          if (this.npcEntityIds.length > 0) {
+            Mat4.fromTranslation(this.npcBasePos, this.tempPropMat);
+            for (const eid of this.npcEntityIds) {
+              this.entityManager.updateEntityMatrix(eid, this.tempPropMat, this.npcBasePos, 2.0);
+            }
+          }
         }
       }
 
@@ -453,9 +535,9 @@ export class DestroyerEngine {
     this.renderer.uploadGeometry(combinedVerts, combinedIndices);
   }
 
-  private async tryFetchGLB(url: string): Promise<ArrayBuffer | null> {
+  private async tryFetchGLB(url: string, allowCache = false): Promise<ArrayBuffer | null> {
     try {
-      const res = await fetch(url, { cache: 'no-store' });
+      const res = await fetch(url, { cache: allowCache ? 'default' : 'no-store' });
       if (!res.ok) return null;
       const buf = await res.arrayBuffer();
       if (buf.byteLength < 12) return null;
@@ -468,34 +550,55 @@ export class DestroyerEngine {
     }
   }
 
-  private async buildTextureAtlasFromGLB(
+  /**
+   * Appends used texture images from a parsed GLB into the shared GPU diffuse atlas
+   * and rebuilds the atlas texture without clobbering previously loaded models.
+   * Returns a map from local textureImageIndex -> global sharedAtlasImages index.
+   */
+  private registerTexturesInSharedAtlas(
     textures: GLBTextureImage[],
-    primitives?: ParsedGLBPrimitive[]
-  ): Promise<Map<number, [number, number, number]>> {
-    const rectMap = new Map<number, [number, number, number]>();
-    let targetTextures = textures;
-    if (primitives && primitives.length > 0) {
-      const usedSet = new Set<number>();
-      for (const p of primitives) {
-        if (p.textureImageIndex !== undefined && p.textureImageIndex !== null) {
-          usedSet.add(p.textureImageIndex);
-        }
+    primitives: ParsedGLBPrimitive[]
+  ): Map<number, number> {
+    const localToGlobal = new Map<number, number>();
+    if (textures.length === 0) return localToGlobal;
+
+    const usedLocalIndices = new Set<number>();
+    for (const p of primitives) {
+      if (p.textureImageIndex !== undefined && p.textureImageIndex !== null) {
+        usedLocalIndices.add(p.textureImageIndex);
       }
-      targetTextures = textures.filter((t) => usedSet.has(t.index));
     }
+    if (usedLocalIndices.size === 0) return localToGlobal;
 
-    if (targetTextures.length === 0 || typeof document === 'undefined') {
+    // Keep mobile VRAM light by capping combined atlas tiles at 16 (mobile) / 25 (desktop)
+    const maxTiles = isMobileBrowser() ? 16 : 25;
+    for (const tex of textures) {
+      if (!usedLocalIndices.has(tex.index)) continue;
+      if (this.sharedAtlasImages.length >= maxTiles) break;
+      const globalIdx = this.sharedAtlasImages.length;
+      this.sharedAtlasImages.push({
+        index: globalIdx,
+        bytes: tex.bytes,
+        mimeType: tex.mimeType,
+      });
+      localToGlobal.set(tex.index, globalIdx);
+    }
+    return localToGlobal;
+  }
+
+  private async rebuildSharedDiffuseAtlas(): Promise<void> {
+    if (this.sharedAtlasImages.length === 0 || typeof document === 'undefined') {
       this.renderer.clearDiffuseAtlas();
-      return rectMap;
+      return;
     }
 
-    const decoded: { index: number; bitmap: ImageBitmap }[] = [];
-    for (const tex of targetTextures) {
+    const decoded: { globalIdx: number; bitmap: ImageBitmap }[] = [];
+    for (const tex of this.sharedAtlasImages) {
       try {
         const copy = new Uint8Array(tex.bytes);
         const blob = new Blob([copy], { type: tex.mimeType || 'image/png' });
         const bitmap = await createImageBitmap(blob);
-        decoded.push({ index: tex.index, bitmap });
+        decoded.push({ globalIdx: tex.index, bitmap });
       } catch (err) {
         console.warn('[GLB Texture Decode] Skipping image', tex.index, err);
       }
@@ -503,11 +606,11 @@ export class DestroyerEngine {
 
     if (decoded.length === 0) {
       this.renderer.clearDiffuseAtlas();
-      return rectMap;
+      return;
     }
 
     const cols = Math.ceil(Math.sqrt(decoded.length));
-    const tileSize = cols <= 4 ? 512 : 256;
+    const tileSize = isMobileBrowser() ? (cols <= 2 ? 256 : 192) : (cols <= 4 ? 512 : 256);
     const atlasSize = cols * tileSize;
 
     const canvas = document.createElement('canvas');
@@ -516,12 +619,13 @@ export class DestroyerEngine {
     const ctx = canvas.getContext('2d');
     if (!ctx) {
       for (const d of decoded) d.bitmap.close();
-      return rectMap;
+      return;
     }
 
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, atlasSize, atlasSize);
 
+    const newRects: [number, number, number][] = new Array(this.sharedAtlasImages.length);
     for (let i = 0; i < decoded.length; i++) {
       const col = i % cols;
       const row = Math.floor(i / cols);
@@ -530,39 +634,81 @@ export class DestroyerEngine {
       ctx.drawImage(decoded[i].bitmap, x, y, tileSize, tileSize);
       decoded[i].bitmap.close();
 
-      rectMap.set(decoded[i].index, [
+      newRects[decoded[i].globalIdx] = [
         (x + 0.5) / atlasSize,
         (y + 0.5) / atlasSize,
         (tileSize - 1.0) / atlasSize,
-      ]);
+      ];
     }
 
     const imgData = ctx.getImageData(0, 0, atlasSize, atlasSize);
     this.renderer.setDiffuseAtlas(new Uint8Array(imgData.data.buffer), atlasSize, atlasSize);
-    return rectMap;
+
+    // Refresh existing material atlas UVs whenever the shared atlas grows
+    for (const ref of this.sharedAtlasMatRefs) {
+      const mat = this.entityManager.getMaterial(ref.matId);
+      const rect = newRects[ref.globalTexIdx];
+      if (mat && rect) {
+        mat.atlasRect = rect;
+        mat.flags = 2;
+        this.entityManager.updateMaterial(ref.matId, mat);
+      }
+    }
+  }
+
+  private registerTexturedPrimitivesMaterials(
+    primitives: ParsedGLBPrimitive[],
+    localToGlobalTex: Map<number, number>,
+    defaultMatId: number
+  ): number[] {
+    return primitives.map((prim) => {
+      if (!prim.material && (prim.textureImageIndex === undefined || prim.textureImageIndex === null)) {
+        return defaultMatId;
+      }
+      const m = prim.material || {
+        baseColor: [0.85, 0.85, 0.88, 1.0] as [number, number, number, number],
+        emissiveColor: [0, 0, 0, 0] as [number, number, number, number],
+        roughness: 0.55,
+        metallic: 0.1,
+        ao: 1.0,
+        alphaCutoff: 0.5,
+      };
+      const globalTexIdx =
+        prim.textureImageIndex !== undefined && prim.textureImageIndex !== null
+          ? localToGlobalTex.get(prim.textureImageIndex)
+          : undefined;
+      const matId = this.entityManager.registerMaterial({
+        ...m,
+        flags: globalTexIdx !== undefined ? 2 : 0,
+      });
+      if (globalTexIdx !== undefined) {
+        this.sharedAtlasMatRefs.push({ matId, globalTexIdx });
+      }
+      return matId;
+    });
   }
 
   private async resolveAnarchyPlayer(): Promise<{
     primitives: ParsedGLBPrimitive[];
     joints: import('./core/Types').SkeletonJoint[];
     clips: import('./core/Types').AnimationClip[];
-    atlasRects: Map<number, [number, number, number]>;
+    textures: GLBTextureImage[];
     isCustomRig: boolean;
     sourceLabel: string;
   }> {
-    this.renderer.clearDiffuseAtlas();
-
     // 1. Check in-memory uploaded GLB first
     let glbBuffer: ArrayBuffer | null = this.customPlayerGLB?.buffer ?? null;
     let glbName = this.customPlayerGLB?.name ?? '';
 
-    // 2. Check server-persisted GLB uploads (/api/assets, sorted newest-first)
+    // 2. Check server-persisted GLB uploads (/api/assets, ignoring NPC worker-woman uploads)
     if (!glbBuffer) {
       try {
         const res = await fetch('/api/assets', { cache: 'no-store' });
         if (res.ok) {
           const assets: { name: string; url: string }[] = await res.json();
-          const glbAssets = assets.filter((a) => /\.glb$/i.test(a.name));
+          const glbAssets = assets.filter(
+            (a) => /\.glb$/i.test(a.name) && !/worker[-_]?woman|^npc_/i.test(a.name)
+          );
           if (glbAssets.length > 0) {
             const preferred = glbAssets[0];
             glbBuffer = await this.tryFetchGLB(preferred.url);
@@ -574,14 +720,15 @@ export class DestroyerEngine {
       }
     }
 
-    // 3. Check Vite-discovered workspace assets & standard workspace paths
+    // 3. Check Vite-discovered workspace assets & standard paths (excluding worker-woman NPC files)
     if (!glbBuffer) {
       const globUrls = Object.values(
         import.meta.glob('/src/assets/**/*.glb', { query: '?url', eager: true, import: 'default' })
       ) as string[];
 
+      const filteredGlobs = globUrls.filter((u) => !/worker[-_]?woman|\/npc\//i.test(u));
       const candidatePaths = [
-        ...globUrls,
+        ...filteredGlobs.sort((a, b) => (/remy/i.test(a) ? -1 : /remy/i.test(b) ? 1 : 0)),
         '/src/assets/animations/character-remy/remy.glb',
         '/src/assets/animations/character-remy/Remy.glb',
         '/src/assets/animations/character-remy/standard-walk.glb',
@@ -607,15 +754,12 @@ export class DestroyerEngine {
       try {
         const parsed = GLBLoader.parse(glbBuffer, { normalizeToHeight: 1.75 });
         if (parsed.primitives.length > 0) {
-          const atlasRects = await this.buildTextureAtlasFromGLB(parsed.textures, parsed.primitives);
-
           let finalClips = [...parsed.clips];
           if (parsed.hasSkinning && MixamoAnimations.isMixamoSkeleton(parsed.joints)) {
             const generated = MixamoAnimations.generateStandardClips(parsed.joints);
             if (finalClips.length === 0) {
               finalClips = generated;
             } else {
-              // Fill in Idle / Jump / Punch if only a walk clip was embedded
               const hasIdle = finalClips.some((c) => /idle|stand|breath/i.test(c.name));
               const hasJump = finalClips.some((c) => /jump|air/i.test(c.name));
               const hasPunch = finalClips.some((c) => /punch|jab|hit|attack/i.test(c.name));
@@ -631,7 +775,7 @@ export class DestroyerEngine {
             primitives: parsed.primitives,
             joints: parsed.joints,
             clips: finalClips,
-            atlasRects,
+            textures: parsed.textures,
             isCustomRig: parsed.hasSkinning && parsed.joints.length > 0,
             sourceLabel: `GLB: ${glbName}`,
           };
@@ -658,7 +802,7 @@ export class DestroyerEngine {
             primitives: sanitizedPrims,
             joints: [],
             clips: [],
-            atlasRects: new Map(),
+            textures: [],
             isCustomRig: false,
             sourceLabel: 'FBX Mesh (Static)',
           };
@@ -674,10 +818,125 @@ export class DestroyerEngine {
       primitives: [proc.primitive],
       joints: proc.joints,
       clips: proc.allClips,
-      atlasRects: new Map(),
+      textures: [],
       isCustomRig: false,
       sourceLabel: 'Procedural Humanoid',
     };
+  }
+
+  /**
+   * Resolves the Sitting Desk Woman NPC from:
+   * 1. Uploaded customNpcGLB,
+   * 2. Server-persisted /api/assets matching worker-woman or npc_,
+   * 3. Workspace src/assets/animations/worker-woman-1/worker-woman-1.glb,
+   * 4. Procedural articulated Sitting Office Worker fallback.
+   */
+  private async resolveOfficeWorkerNPC(): Promise<{
+    primitives: ParsedGLBPrimitive[];
+    joints: import('./core/Types').SkeletonJoint[];
+    clips: import('./core/Types').AnimationClip[];
+    textures: GLBTextureImage[];
+    hasSkinning: boolean;
+    sourceLabel: string;
+  }> {
+    let glbBuffer: ArrayBuffer | null = this.customNpcGLB?.buffer ?? null;
+    let glbName = this.customNpcGLB?.name ?? '';
+
+    if (!glbBuffer) {
+      try {
+        const res = await fetch('/api/assets', { cache: 'no-store' });
+        if (res.ok) {
+          const assets: { name: string; url: string }[] = await res.json();
+          const npcAssets = assets.filter((a) => /\.glb$/i.test(a.name) && /worker[-_]?woman|^npc_/i.test(a.name));
+          if (npcAssets.length > 0) {
+            glbBuffer = await this.tryFetchGLB(npcAssets[0].url);
+            if (glbBuffer) glbName = npcAssets[0].name;
+          }
+        }
+      } catch {
+        // optional
+      }
+    }
+
+    if (!glbBuffer) {
+      const globUrls = Object.values(
+        import.meta.glob('/src/assets/**/*.glb', { query: '?url', eager: true, import: 'default' })
+      ) as string[];
+      const workerGlobs = globUrls.filter((u) => /worker[-_]?woman/i.test(u));
+      const candidatePaths = [
+        ...workerGlobs,
+        '/src/assets/animations/worker-woman-1/worker-woman-1.glb',
+        '/assets/animations/worker-woman-1/worker-woman-1.glb',
+        '/assets/worker-woman-1.glb',
+        '/worker-woman-1.glb',
+      ];
+      for (const candidate of candidatePaths) {
+        if (!candidate) continue;
+        const buf = await this.tryFetchGLB(candidate);
+        if (buf) {
+          glbBuffer = buf;
+          glbName = candidate.split('/').pop()?.split('?')[0] || 'worker-woman-1.glb';
+          break;
+        }
+      }
+    }
+
+    if (glbBuffer) {
+      try {
+        const parsed = GLBLoader.parse(glbBuffer, { normalizeToHeight: 1.28 });
+        if (parsed.primitives.length > 0) {
+          let finalClips = [...parsed.clips];
+          if (parsed.hasSkinning && MixamoAnimations.isMixamoSkeleton(parsed.joints) && finalClips.length === 0) {
+            finalClips = MixamoAnimations.generateSeatedClips(parsed.joints);
+          }
+          return {
+            primitives: parsed.primitives,
+            joints: parsed.joints,
+            clips: finalClips,
+            textures: parsed.textures,
+            hasSkinning: parsed.hasSkinning && parsed.joints.length > 0,
+            sourceLabel: `GLB: ${glbName}`,
+          };
+        }
+      } catch (err) {
+        console.warn('[NPC GLB Parse Error] Falling back to procedural sitting worker:', err);
+      }
+    }
+
+    const proc = ProceduralModels.createSittingOfficeWorker();
+    return {
+      primitives: proc.primitives,
+      joints: proc.joints,
+      clips: proc.clips,
+      textures: [],
+      hasSkinning: true,
+      sourceLabel: 'Procedural Sitting Worker',
+    };
+  }
+
+  public triggerNpcPunchReaction(npcId: string): void {
+    if (npcId === 'office_worker_woman') {
+      this.npcHitTimer = Math.max(0.45, this.npcHitDuration);
+    }
+  }
+
+  async loadNpcGLB(arrayBuffer: ArrayBuffer, fileName = 'worker-woman-1.glb'): Promise<void> {
+    if (this.isDeviceLost) return;
+    const savedPos: [number, number, number] = [...this.playerController.position];
+    const savedTheta = this.playerController.cameraTheta;
+    const savedPhi = this.playerController.cameraPhi;
+    const savedDist = this.playerController.cameraDistance;
+
+    this.customNpcGLB = { buffer: arrayBuffer, name: fileName };
+    await this.loadAnarchyWorld();
+
+    if (this.playerController.entityId >= 0) {
+      this.playerController.position = savedPos;
+      this.playerController.cameraTheta = savedTheta;
+      this.playerController.cameraPhi = savedPhi;
+      this.playerController.rotationY = savedTheta + Math.PI;
+      this.playerController.cameraDistance = savedDist;
+    }
   }
 
   async loadPlayerGLB(arrayBuffer: ArrayBuffer, fileName = 'player.glb'): Promise<void> {
@@ -708,27 +967,55 @@ export class DestroyerEngine {
 
     this.entityManager.clear();
     this.animController.clear();
+    this.npcAnimController.clear();
     this.renderer.clearDiffuseAtlas();
     this.renderer.waveFactor = 0.0;
     this.playerController.extraEntityIds = [];
     this.anarchyCrateMeshId = -1;
     this.anarchyCrateMatId = -1;
+    this.anarchyBarrelMeshId = -1;
+    this.anarchyBarrelMatId = -1;
+    this.anarchyOctaCrateMeshId = -1;
+    this.anarchyOctaCrateMatId = -1;
+    this.anarchyConeMeshId = -1;
+    this.anarchyConeMatId = -1;
+    this.anarchyBinMeshId = -1;
+    this.anarchyBinMatId = -1;
+    this.loadedGeometryPrims = [];
+    this.sharedAtlasImages = [];
+    this.sharedAtlasMatRefs = [];
     this.userLockedClip = false;
     this.buildingFloorEntities = [];
     this.buildingBannerEntityIds = [-1, -1];
     this.groundSlabEntityId = -1;
     this.playerEntityIds = [];
+    this.npcEntityIds = [];
+    this.npcHitTimer = 0;
 
     const device = this.deviceManager.getDevice();
 
-    // Single 10-story business building with opening door, interior stairs, elevator & punchable props
+    // Single 10-story business building with opening door, interior stairs, elevator, seated desk NPC & convex props
     {
       this.physics.setupDefaultBuildingPhysics();
 
       const buildingData = ProceduralModels.createSingleBuildingWithStairsAndElevator();
-      const resolvedPlayer = await this.resolveAnarchyPlayer();
+      const [resolvedPlayer, resolvedNpc] = await Promise.all([
+        this.resolveAnarchyPlayer(),
+        this.resolveOfficeWorkerNPC(),
+      ]);
+
       this.isCustomPlayerRig = resolvedPlayer.isCustomRig;
       this.activePlayerSourceLabel = resolvedPlayer.sourceLabel;
+      this.activeNpcSourceLabel = resolvedNpc.sourceLabel;
+
+      const playerLocalToGlobalTex = this.registerTexturesInSharedAtlas(
+        resolvedPlayer.textures,
+        resolvedPlayer.primitives
+      );
+      const npcLocalToGlobalTex = this.registerTexturesInSharedAtlas(
+        resolvedNpc.textures,
+        resolvedNpc.primitives
+      );
 
       if (this.isCustomPlayerRig) {
         const clips = resolvedPlayer.clips;
@@ -833,28 +1120,30 @@ export class DestroyerEngine {
         flags: 0,
       });
 
-      const playerPrimMatIds: number[] = resolvedPlayer.primitives.map((prim) => {
-        if (!prim.material && (prim.textureImageIndex === undefined || prim.textureImageIndex === null)) {
-          return defaultPlayerMatId;
-        }
-        const m = prim.material || {
-          baseColor: [0.85, 0.85, 0.88, 1.0] as [number, number, number, number],
-          emissiveColor: [0, 0, 0, 0] as [number, number, number, number],
-          roughness: 0.55,
-          metallic: 0.1,
-          ao: 1.0,
-          alphaCutoff: 0.5,
-        };
-        const texRect =
-          prim.textureImageIndex !== undefined && prim.textureImageIndex !== null
-            ? resolvedPlayer.atlasRects.get(prim.textureImageIndex)
-            : undefined;
-        return this.entityManager.registerMaterial({
-          ...m,
-          flags: texRect ? 2 : 0,
-          atlasRect: texRect,
-        });
+      const playerPrimMatIds = this.registerTexturedPrimitivesMaterials(
+        resolvedPlayer.primitives,
+        playerLocalToGlobalTex,
+        defaultPlayerMatId
+      );
+
+      const defaultNpcMatId = this.entityManager.registerMaterial({
+        baseColor: [0.68, 0.24, 0.34, 1.0],
+        emissiveColor: [0, 0, 0, 0],
+        roughness: 0.52,
+        metallic: 0.1,
+        ao: 1.0,
+        alphaCutoff: 0.5,
+        flags: 0,
       });
+
+      const npcPrimMatIds = this.registerTexturedPrimitivesMaterials(
+        resolvedNpc.primitives,
+        npcLocalToGlobalTex,
+        defaultNpcMatId
+      );
+
+      // Build shared GPU diffuse atlas combining Player + NPC textures
+      await this.rebuildSharedDiffuseAtlas();
 
       const textMatId = this.entityManager.registerMaterial({
         baseColor: [0.95, 0.75, 0.15, 1.0], // Glowing Gold 3D Text
@@ -891,32 +1180,37 @@ export class DestroyerEngine {
         );
       }
 
-      // Generate Moveable Physics Crates & Barrels
+      // Generate Moveable Physics Primitives & Mid-Level Convex Props
       const cratePrim = ProceduralModels.createPhysicsCrate(0.9);
       const barrelPrim = ProceduralModels.createPhysicsBarrel(0.38, 1.05, 12);
-      const crateMatId = this.entityManager.registerMaterial(
-        cratePrim.material ?? {
-          baseColor: [0.76, 0.48, 0.20, 1.0],
-          emissiveColor: [0.06, 0.03, 0.0, 0.2],
-          roughness: 0.62,
-          metallic: 0.18,
-          ao: 1.0,
-          alphaCutoff: 0.5,
-        }
-      );
-      const barrelMatId = this.entityManager.registerMaterial(
-        barrelPrim.material ?? {
-          baseColor: [0.16, 0.62, 0.82, 1.0],
-          emissiveColor: [0.02, 0.08, 0.14, 0.3],
-          roughness: 0.34,
-          metallic: 0.72,
-          ao: 1.0,
-          alphaCutoff: 0.5,
-        }
-      );
-      this.anarchyCrateMatId = crateMatId;
+      const octaCratePrim = ProceduralModels.createConvexOctaCrate(0.9);
+      const conePrim = ProceduralModels.createConvexHazardCone(0.34, 0.88);
+      const binPrim = ProceduralModels.createConvexOfficeBin(0.30, 0.72);
 
-      // Register Skeleton & Clips
+      const regPropMat = (prim: ParsedGLBPrimitive) =>
+        this.entityManager.registerMaterial(
+          prim.material ?? {
+            baseColor: [0.76, 0.48, 0.20, 1.0],
+            emissiveColor: [0.04, 0.02, 0.0, 0.15],
+            roughness: 0.55,
+            metallic: 0.2,
+            ao: 1.0,
+            alphaCutoff: 0.5,
+          }
+        );
+
+      const crateMatId = regPropMat(cratePrim);
+      const barrelMatId = regPropMat(barrelPrim);
+      const octaCrateMatId = regPropMat(octaCratePrim);
+      const coneMatId = regPropMat(conePrim);
+      const binMatId = regPropMat(binPrim);
+      this.anarchyCrateMatId = crateMatId;
+      this.anarchyBarrelMatId = barrelMatId;
+      this.anarchyOctaCrateMatId = octaCrateMatId;
+      this.anarchyConeMatId = coneMatId;
+      this.anarchyBinMatId = binMatId;
+
+      // Register Player Skeleton & Clips (starts at joint index 0)
       const jointOffset = this.animController.registerSkeleton(resolvedPlayer.joints);
       for (const clip of resolvedPlayer.clips) {
         this.animController.addClip(clip);
@@ -927,6 +1221,39 @@ export class DestroyerEngine {
         } else {
           this.animController.playClip(0, true);
         }
+      }
+
+      // Register Isolated NPC Skeleton & Clips (starts at npcJointOffset)
+      this.npcJointOffset = this.animController.joints.length;
+      this.npcHasSkinning = resolvedNpc.hasSkinning && resolvedNpc.joints.length > 0;
+      if (this.npcHasSkinning) {
+        this.npcAnimController.registerSkeleton(resolvedNpc.joints);
+        for (const clip of resolvedNpc.clips) {
+          this.npcAnimController.addClip(clip);
+        }
+        this.entityManager.totalJointsCount = this.npcJointOffset + this.npcAnimController.joints.length;
+        this.npcAnimController.writeBindPoseTo(this.entityManager.jointMatrices, this.npcJointOffset);
+
+        const clips = resolvedNpc.clips;
+        const explicitHit = clips.find((c) => /punch|hit|react|slap|impact|hurt/i.test(c.name))?.name || null;
+        const explicitIdle = clips.find((c) => /sit|idle|desk|breath/i.test(c.name))?.name || null;
+
+        if (explicitHit) {
+          this.npcHitClipName = explicitHit;
+          this.npcIdleClipName = explicitIdle;
+        } else if (clips.length === 1) {
+          // Single-clip Mixamo sitting-punched export (e.g. "mixamo.com"): frame 0 is calm sitting, full clip is recoil
+          this.npcHitClipName = clips[0].name;
+          this.npcIdleClipName = null;
+        } else {
+          this.npcIdleClipName = explicitIdle || clips[0]?.name || null;
+          this.npcHitClipName = clips.find((c) => c.name !== this.npcIdleClipName)?.name || clips[0]?.name || null;
+        }
+        const hitClipObj = clips.find((c) => c.name === this.npcHitClipName);
+        this.npcHitDuration = hitClipObj?.duration && hitClipObj.duration > 0.1 ? hitClipObj.duration : 0.9;
+      } else {
+        this.npcIdleClipName = null;
+        this.npcHitClipName = null;
       }
 
       // Queue ALL Geometries & Register Meshes in exact synchronized order
@@ -971,6 +1298,15 @@ export class DestroyerEngine {
         )
       );
 
+      const npcMeshIds: number[] = resolvedNpc.primitives.map((p, pIdx) =>
+        queueMesh(
+          p,
+          p.name || `Worker_Woman_Part_${pIdx}`,
+          p.boundingRadius || 1.8,
+          this.npcHasSkinning || !!(p.joints && p.joints.length > 0)
+        )
+      );
+
       const floorLabelMeshIds: number[] = floorLabelMeshes.map((prim, k) =>
         queueMesh(prim, `3D_Text_Floor_${k}`, 5.0)
       );
@@ -978,8 +1314,16 @@ export class DestroyerEngine {
       const crateMeshId = queueMesh(cratePrim, 'Moveable_Physics_Crate', cratePrim.boundingRadius || 0.9);
       this.anarchyCrateMeshId = crateMeshId;
       const barrelMeshId = queueMesh(barrelPrim, 'Moveable_Physics_Barrel', barrelPrim.boundingRadius || 0.7);
+      this.anarchyBarrelMeshId = barrelMeshId;
+      const octaCrateMeshId = queueMesh(octaCratePrim, 'Moveable_Convex_OctaCrate', octaCratePrim.boundingRadius || 0.9);
+      this.anarchyOctaCrateMeshId = octaCrateMeshId;
+      const coneMeshId = queueMesh(conePrim, 'Moveable_Convex_HazardCone', conePrim.boundingRadius || 0.7);
+      this.anarchyConeMeshId = coneMeshId;
+      const binMeshId = queueMesh(binPrim, 'Moveable_Convex_OfficeBin', binPrim.boundingRadius || 0.6);
+      this.anarchyBinMeshId = binMeshId;
 
-      this.uploadGeometries(pendingMeshes.map((m) => m.prim));
+      this.loadedGeometryPrims = pendingMeshes.map((m) => m.prim);
+      this.uploadGeometries(this.loadedGeometryPrims);
 
       let vOffset = 0;
       let iOffset = 0;
@@ -1238,39 +1582,109 @@ export class DestroyerEngine {
       }
       this.playerEntityIds = playerEntityIds;
 
-      // Moveable Punchable Crates & Barrels in courtyard & ground lobby
+      // Sitting Office Worker NPC (worker-woman-1.glb or fallback) sitting on Floor 0 Lobby Desk facing +Z entrance
+      const npcMat = Mat4.create();
+      Mat4.fromTranslation(this.npcBasePos, npcMat);
+      const npcIds: number[] = [];
+      for (let pIdx = 0; pIdx < npcMeshIds.length; pIdx++) {
+        const entId = this.entityManager.addEntity({
+          meshId: npcMeshIds[pIdx],
+          materialId: npcPrimMatIds[pIdx] ?? defaultNpcMatId,
+          worldMatrix: npcMat,
+          sphereCenter: [0, 0.7, 0, 1.8],
+          flags: 1,
+          animOffset: this.npcJointOffset,
+          name: pIdx === 0 ? 'Worker_Woman_Desk_NPC' : `Worker_Woman_Part_${pIdx}`,
+        });
+        npcIds.push(entId);
+      }
+      this.npcEntityIds = npcIds;
+
+      // Attach NPC entities to Floor 0 of Main Building (buildingIndex 0) so Smart Floor Culling hides them cleanly above Floor 1
+      const mainFloor0Entry = this.buildingFloorEntities.find((e) => e.buildingIndex === 0 && e.floor === 0);
+      if (mainFloor0Entry) {
+        mainFloor0Entry.entityIds.push(...npcIds);
+      }
+
+      // Register Desk Woman collider + punch target in JoltPhysics
+      this.physics.addBoxCollider({
+        id: 'worker_woman_desk_collider',
+        name: 'Worker Woman (Desk NPC)',
+        center: [this.npcBasePos[0], this.npcBasePos[1] + 0.65, this.npcBasePos[2]],
+        size: [0.38, 0.62, 0.36],
+        category: 'wall',
+      });
+      this.physics.registerNPCPunchTarget({
+        id: 'office_worker_woman',
+        name: 'Office Worker (Desk)',
+        position: [...this.npcBasePos],
+        radius: 0.55,
+        height: 1.28,
+      });
+
+      // Moveable Punchable Primitives & Mid-Level Convex Props in courtyard & ground lobby
       const propSpawns: {
-        kind: 'crate' | 'barrel';
+        kind: 'crate' | 'barrel' | 'octacrate' | 'cone' | 'bin';
         name: string;
         pos: [number, number, number];
         mass: number;
         restitution: number;
       }[] = [
-        // Front courtyard flanking walkway (immediately visible & punchable at spawn)
+        // Front courtyard flanking walkway (mix of pure box primitives + mid-level convex polyhedra)
         { kind: 'crate', name: 'Courtyard_Crate_01', pos: [-2.4, 0.53, 22.8], mass: 1.0, restitution: 0.35 },
-        { kind: 'crate', name: 'Courtyard_Crate_02', pos: [2.4, 0.53, 22.8], mass: 1.0, restitution: 0.35 },
+        { kind: 'octacrate', name: 'Courtyard_Convex_OctaCrate_01', pos: [2.4, 0.53, 22.8], mass: 1.05, restitution: 0.38 },
         { kind: 'crate', name: 'Courtyard_Crate_03', pos: [-3.8, 0.53, 22.1], mass: 1.1, restitution: 0.35 },
-        { kind: 'crate', name: 'Courtyard_Crate_Stack', pos: [-3.8, 1.44, 22.1], mass: 0.9, restitution: 0.38 },
-        { kind: 'crate', name: 'Courtyard_Crate_04', pos: [3.6, 0.45, 24.0], mass: 1.0, restitution: 0.35 },
+        { kind: 'octacrate', name: 'Courtyard_Convex_OctaCrate_Stack', pos: [-3.8, 1.44, 22.1], mass: 0.9, restitution: 0.40 },
+        { kind: 'cone', name: 'Courtyard_Convex_SafetyCone_01', pos: [-1.5, 0.44, 21.5], mass: 0.55, restitution: 0.45 },
+        { kind: 'cone', name: 'Courtyard_Convex_SafetyCone_02', pos: [1.5, 0.44, 21.5], mass: 0.55, restitution: 0.45 },
         { kind: 'barrel', name: 'Courtyard_Barrel_01', pos: [-2.2, 0.525, 24.1], mass: 1.25, restitution: 0.42 },
         { kind: 'barrel', name: 'Courtyard_Barrel_02', pos: [2.3, 0.525, 24.2], mass: 1.25, restitution: 0.42 },
-        { kind: 'barrel', name: 'Courtyard_Barrel_03', pos: [3.9, 0.605, 21.8], mass: 1.25, restitution: 0.42 },
         // Inside ground lobby
         { kind: 'crate', name: 'Lobby_Crate_01', pos: [-6.5, 0.45, 11.2], mass: 1.0, restitution: 0.35 },
-        { kind: 'crate', name: 'Lobby_Crate_02', pos: [-5.5, 0.45, 11.2], mass: 1.0, restitution: 0.35 },
-        { kind: 'crate', name: 'Lobby_Crate_Stack', pos: [-6.0, 1.35, 11.2], mass: 0.9, restitution: 0.38 },
+        { kind: 'octacrate', name: 'Lobby_Convex_Crate_02', pos: [-5.5, 0.45, 11.2], mass: 1.0, restitution: 0.38 },
+        { kind: 'bin', name: 'Lobby_Convex_Bin_01', pos: [-2.3, 0.36, 6.2], mass: 0.65, restitution: 0.42 },
+        { kind: 'bin', name: 'Lobby_Convex_Bin_02', pos: [2.3, 0.36, 6.2], mass: 0.65, restitution: 0.42 },
         { kind: 'barrel', name: 'Lobby_Barrel_01', pos: [-4.2, 0.525, 9.6], mass: 1.25, restitution: 0.42 },
       ];
 
       for (let i = 0; i < propSpawns.length; i++) {
         const sp = propSpawns[i];
-        const isCrate = sp.kind === 'crate';
-        const halfExt: [number, number, number] = isCrate ? [0.45, 0.45, 0.45] : [0.38, 0.525, 0.38];
+        const meshId =
+          sp.kind === 'crate'
+            ? crateMeshId
+            : sp.kind === 'barrel'
+            ? barrelMeshId
+            : sp.kind === 'octacrate'
+            ? octaCrateMeshId
+            : sp.kind === 'cone'
+            ? coneMeshId
+            : binMeshId;
+        const matId =
+          sp.kind === 'crate'
+            ? crateMatId
+            : sp.kind === 'barrel'
+            ? barrelMatId
+            : sp.kind === 'octacrate'
+            ? octaCrateMatId
+            : sp.kind === 'cone'
+            ? coneMatId
+            : binMatId;
+        const halfExt: [number, number, number] =
+          sp.kind === 'crate' || sp.kind === 'octacrate'
+            ? [0.45, 0.45, 0.45]
+            : sp.kind === 'barrel'
+            ? [0.38, 0.525, 0.38]
+            : sp.kind === 'cone'
+            ? [0.34, 0.44, 0.34]
+            : [0.30, 0.36, 0.30];
+        const shape: 'box' | 'cylinder' | 'convex' =
+          sp.kind === 'crate' ? 'box' : sp.kind === 'barrel' ? 'cylinder' : 'convex';
+
         const propMat = Mat4.create();
         Mat4.fromTranslation(sp.pos, propMat);
         const propEntityId = this.entityManager.addEntity({
-          meshId: isCrate ? crateMeshId : barrelMeshId,
-          materialId: isCrate ? crateMatId : barrelMatId,
+          meshId,
+          materialId: matId,
           worldMatrix: propMat,
           sphereCenter: [sp.pos[0], sp.pos[1], sp.pos[2], 1.2],
           flags: 1,
@@ -1283,6 +1697,7 @@ export class DestroyerEngine {
           name: sp.name,
           position: sp.pos,
           halfExtents: halfExt,
+          shape,
           mass: sp.mass,
           restitution: sp.restitution,
         });
@@ -1416,6 +1831,11 @@ export class DestroyerEngine {
         propVisible = oy >= bandMinY && oy <= bandMaxY;
       }
       this.entityManager.setEntityVisible(obj.entityId, propVisible);
+      if (obj.extraEntityIds) {
+        for (let ex = 0; ex < obj.extraEntityIds.length; ex++) {
+          this.entityManager.setEntityVisible(obj.extraEntityIds[ex], propVisible);
+        }
+      }
     }
 
     const visibleNow = this.entityManager.getVisibleFlagEntityCount();
@@ -1433,25 +1853,34 @@ export class DestroyerEngine {
     await this.loadPlayerGLB(arrayBuffer, fileName);
   }
 
-  spawnProceduralCube(name = 'Moveable_Crate'): number {
-    if (this.isDeviceLost || this.anarchyCrateMeshId < 0 || this.anarchyCrateMatId < 0) return -1;
+  spawnPhysicsProp(kind: 'crate' | 'barrel' | 'octacrate' | 'cone' | 'bin' = 'crate', customName?: string): number {
+    if (this.isDeviceLost) return -1;
+    const meshMap: Record<typeof kind, { meshId: number; matId: number; halfExt: [number, number, number]; shape: 'box' | 'cylinder' | 'convex'; mass: number }> = {
+      crate: { meshId: this.anarchyCrateMeshId, matId: this.anarchyCrateMatId, halfExt: [0.45, 0.45, 0.45], shape: 'box', mass: 1.0 },
+      barrel: { meshId: this.anarchyBarrelMeshId, matId: this.anarchyBarrelMatId, halfExt: [0.38, 0.525, 0.38], shape: 'cylinder', mass: 1.25 },
+      octacrate: { meshId: this.anarchyOctaCrateMeshId, matId: this.anarchyOctaCrateMatId, halfExt: [0.45, 0.45, 0.45], shape: 'convex', mass: 1.05 },
+      cone: { meshId: this.anarchyConeMeshId, matId: this.anarchyConeMatId, halfExt: [0.34, 0.44, 0.34], shape: 'convex', mass: 0.55 },
+      bin: { meshId: this.anarchyBinMeshId, matId: this.anarchyBinMatId, halfExt: [0.30, 0.36, 0.30], shape: 'convex', mass: 0.65 },
+    };
+    const cfg = meshMap[kind];
+    if (!cfg || cfg.meshId < 0 || cfg.matId < 0) return -1;
 
     const p = this.playerController.position;
     const fwdX = -Math.sin(this.playerController.cameraTheta);
     const fwdZ = -Math.cos(this.playerController.cameraTheta);
     const spawnPos: [number, number, number] = [
       p[0] + fwdX * 2.4,
-      p[1] + 0.65,
+      p[1] + cfg.halfExt[1] + 0.25,
       p[2] + fwdZ * 2.4,
     ];
     const worldMat = Mat4.create();
     Mat4.fromTranslation(spawnPos, worldMat);
     const idx = this.physics.moveableObjects.length + 1;
-    const propName = name === 'Procedural_Cube' || name === 'Moveable_Crate' ? `Spawned_Crate_${idx}` : name;
+    const propName = customName || `Spawned_${kind}_${idx}`;
 
     const entityId = this.entityManager.addEntity({
-      meshId: this.anarchyCrateMeshId,
-      materialId: this.anarchyCrateMatId,
+      meshId: cfg.meshId,
+      materialId: cfg.matId,
       worldMatrix: worldMat,
       sphereCenter: [spawnPos[0], spawnPos[1], spawnPos[2], 1.2],
       flags: 1,
@@ -1463,14 +1892,178 @@ export class DestroyerEngine {
       entityId,
       name: propName,
       position: spawnPos,
-      halfExtents: [0.45, 0.45, 0.45],
-      mass: 1.0,
+      halfExtents: cfg.halfExt,
+      shape: cfg.shape,
+      mass: cfg.mass,
       restitution: 0.38,
     });
 
     const device = this.deviceManager.getDevice();
     this.entityManager.uploadToGPU(device);
     return entityId;
+  }
+
+  spawnProceduralCube(name = 'Moveable_Crate'): number {
+    return this.spawnPhysicsProp('crate', name === 'Procedural_Cube' || name === 'Moveable_Crate' ? undefined : name);
+  }
+
+  /**
+   * Fetches a legal free CC0 / CC-BY online GLB asset, computes its tight primitive AABB collider
+   * for mobile-friendly physics, packs any textures into the shared atlas, and spawns it in front of player.
+   */
+  async spawnExternalGLBProp(
+    url: string,
+    options: {
+      name: string;
+      targetHeight?: number;
+      physicsShape?: 'box' | 'cylinder' | 'convex';
+      mass?: number;
+    }
+  ): Promise<{ success: boolean; entityId: number; error?: string }> {
+    if (this.isDeviceLost) return { success: false, entityId: -1, error: 'WebGPU device is lost.' };
+    try {
+      const buf = await this.tryFetchGLB(url, true);
+      if (!buf) {
+        return { success: false, entityId: -1, error: 'Failed to download valid binary .GLB asset.' };
+      }
+
+      const parsed = GLBLoader.parse(buf, { normalizeToHeight: options.targetHeight ?? 0.9 });
+      if (parsed.primitives.length === 0) {
+        return { success: false, entityId: -1, error: 'GLB contained no renderable mesh primitives.' };
+      }
+
+      // Compute exact tight bounding box across all primitives for primitive physics collider
+      let minX = Infinity, minY = Infinity, minZ = Infinity;
+      let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+      for (const prim of parsed.primitives) {
+        for (let v = 0; v < prim.positions.length; v += 3) {
+          const vx = prim.positions[v];
+          const vy = prim.positions[v + 1];
+          const vz = prim.positions[v + 2];
+          if (vx < minX) minX = vx;
+          if (vy < minY) minY = vy;
+          if (vz < minZ) minZ = vz;
+          if (vx > maxX) maxX = vx;
+          if (vy > maxY) maxY = vy;
+          if (vz > maxZ) maxZ = vz;
+        }
+      }
+
+      const cx = Number.isFinite(minX) ? (minX + maxX) * 0.5 : 0;
+      const cy = Number.isFinite(minY) ? (minY + maxY) * 0.5 : 0.45;
+      const cz = Number.isFinite(minZ) ? (minZ + maxZ) * 0.5 : 0;
+      const hx = Math.max(0.15, Number.isFinite(minX) ? (maxX - minX) * 0.5 : 0.35);
+      const hy = Math.max(0.15, Number.isFinite(minY) ? (maxY - minY) * 0.5 : 0.35);
+      const hz = Math.max(0.15, Number.isFinite(minZ) ? (maxZ - minZ) * 0.5 : 0.35);
+
+      // Re-center vertices cleanly around [0, 0, 0] so physics rotation spins smoothly around center
+      const cleanPrims: ParsedGLBPrimitive[] = parsed.primitives.map((prim) => {
+        const centeredPos = new Float32Array(prim.positions.length);
+        for (let v = 0; v < prim.positions.length; v += 3) {
+          centeredPos[v] = prim.positions[v] - cx;
+          centeredPos[v + 1] = prim.positions[v + 1] - cy;
+          centeredPos[v + 2] = prim.positions[v + 2] - cz;
+        }
+        return {
+          ...prim,
+          positions: centeredPos,
+          joints: undefined,
+          weights: undefined,
+        };
+      });
+
+      const localToGlobalTex = this.registerTexturesInSharedAtlas(parsed.textures, cleanPrims);
+      const defaultPropMatId = this.entityManager.registerMaterial({
+        baseColor: [0.85, 0.85, 0.88, 1.0],
+        emissiveColor: [0, 0, 0, 0],
+        roughness: 0.5,
+        metallic: 0.15,
+        ao: 1.0,
+        alphaCutoff: 0.5,
+      });
+      const primMatIds = this.registerTexturedPrimitivesMaterials(cleanPrims, localToGlobalTex, defaultPropMatId);
+
+      // Compute current vertex/index offsets before appending
+      let vOffset = 0;
+      let iOffset = 0;
+      for (const existing of this.loadedGeometryPrims) {
+        vOffset += Math.floor(existing.positions.length / 3);
+        iOffset += existing.indices.length;
+      }
+
+      const newMeshIds: number[] = [];
+      for (let i = 0; i < cleanPrims.length; i++) {
+        const prim = cleanPrims[i];
+        const vCount = Math.floor(prim.positions.length / 3);
+        const meshId = this.entityManager.registerMesh({
+          name: `${options.name}_Part_${i}`,
+          firstIndex: iOffset,
+          indexCount: prim.indices.length,
+          baseVertex: vOffset,
+          vertexCount: vCount,
+          boundingRadius: Math.hypot(hx, hy, hz) + 0.25,
+          hasSkinning: false,
+          hasMorphTargets: false,
+          morphTargetCount: 0,
+        });
+        this.loadedGeometryPrims.push(prim);
+        newMeshIds.push(meshId);
+        vOffset += vCount;
+        iOffset += prim.indices.length;
+      }
+
+      this.uploadGeometries(this.loadedGeometryPrims);
+      if (parsed.textures.length > 0) {
+        await this.rebuildSharedDiffuseAtlas();
+      }
+
+      const p = this.playerController.position;
+      const fwdX = -Math.sin(this.playerController.cameraTheta);
+      const fwdZ = -Math.cos(this.playerController.cameraTheta);
+      const spawnPos: [number, number, number] = [
+        p[0] + fwdX * 2.5,
+        p[1] + hy + 0.25,
+        p[2] + fwdZ * 2.5,
+      ];
+      const worldMat = Mat4.create();
+      Mat4.fromTranslation(spawnPos, worldMat);
+
+      let firstEntityId = -1;
+      const extraEntityIds: number[] = [];
+      for (let i = 0; i < newMeshIds.length; i++) {
+        const entId = this.entityManager.addEntity({
+          meshId: newMeshIds[i],
+          materialId: primMatIds[i] ?? defaultPropMatId,
+          worldMatrix: worldMat,
+          sphereCenter: [spawnPos[0], spawnPos[1], spawnPos[2], Math.hypot(hx, hy, hz) + 0.3],
+          flags: 1,
+          animOffset: 0,
+          name: newMeshIds.length === 1 ? options.name : `${options.name}_${i}`,
+        });
+        if (i === 0) firstEntityId = entId;
+        else extraEntityIds.push(entId);
+      }
+
+      if (firstEntityId >= 0) {
+        this.physics.addMoveableObject({
+          id: `ext_${Date.now()}_${firstEntityId}`,
+          entityId: firstEntityId,
+          extraEntityIds: extraEntityIds.length > 0 ? extraEntityIds : undefined,
+          name: options.name,
+          position: spawnPos,
+          halfExtents: [hx, hy, hz],
+          shape: options.physicsShape ?? 'convex',
+          mass: options.mass ?? 1.0,
+          restitution: 0.38,
+        });
+      }
+
+      const device = this.deviceManager.getDevice();
+      this.entityManager.uploadToGPU(device);
+      return { success: true, entityId: firstEntityId };
+    } catch (err: any) {
+      return { success: false, entityId: -1, error: err?.message || String(err) };
+    }
   }
 
   /**

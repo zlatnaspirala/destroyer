@@ -8,6 +8,7 @@ import {
   Box,
   Cpu,
   Layers,
+  Package,
   Sliders,
   RotateCcw,
   Plus,
@@ -22,6 +23,7 @@ interface NavigationProps {
   onSetRightPanelTab: (tab: 'system' | 'inspector') => void;
   onResetCamera: () => void;
   onSpawnCube: () => void;
+  onOpenFreeAssets: () => void;
   fps: number;
   subgroupsActive?: boolean;
 }
@@ -35,6 +37,7 @@ export const Navigation: React.FC<NavigationProps> = ({
   onSetRightPanelTab,
   onResetCamera,
   onSpawnCube,
+  onOpenFreeAssets,
   fps,
   subgroupsActive = false,
 }) => {
@@ -116,10 +119,20 @@ export const Navigation: React.FC<NavigationProps> = ({
       </div>
 
       {/* Zone 3: Quick Action & Live Telemetry */}
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+        <button
+          onClick={onOpenFreeAssets}
+          className="flex items-center gap-1 px-2 py-1 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded text-xs text-zinc-200 hover:text-white transition-colors whitespace-nowrap shrink-0"
+          title="Physics Props, NPC Loader, & Verified CC0/CC-BY 3D Assets"
+        >
+          <Package className="w-3 h-3 text-emerald-400 shrink-0" />
+          <span className="hidden md:inline">Assets &amp; Licenses</span>
+          <span className="md:hidden">Assets</span>
+        </button>
+
         <button
           onClick={onSpawnCube}
-          className="hidden md:flex items-center gap-1 px-2 py-1 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded text-xs text-zinc-300 hover:text-white transition-colors"
+          className="hidden lg:flex items-center gap-1 px-2 py-1 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded text-xs text-zinc-300 hover:text-white transition-colors whitespace-nowrap shrink-0"
           title="Spawn Moveable Crate in Front of Player"
         >
           <Plus className="w-3 h-3 text-cyan-400" />
@@ -128,7 +141,7 @@ export const Navigation: React.FC<NavigationProps> = ({
 
         <button
           onClick={onResetCamera}
-          className="flex items-center gap-1 px-2 py-1 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded text-xs text-zinc-300 hover:text-white transition-colors"
+          className="flex items-center gap-1 px-2 py-1 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded text-xs text-zinc-300 hover:text-white transition-colors whitespace-nowrap shrink-0"
           title="Reset Camera View"
         >
           <RotateCcw className="w-3 h-3 text-zinc-400" />
@@ -136,7 +149,7 @@ export const Navigation: React.FC<NavigationProps> = ({
         </button>
 
         {subgroupsActive && (
-          <span className="hidden lg:inline px-1.5 py-0.5 bg-cyan-950/80 text-cyan-400 border border-cyan-800/60 rounded text-[10px] font-mono">
+          <span className="hidden xl:inline px-1.5 py-0.5 bg-cyan-950/80 text-cyan-400 border border-cyan-800/60 rounded text-[10px] font-mono">
             SUBGROUPS
           </span>
         )}
