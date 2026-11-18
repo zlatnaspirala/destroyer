@@ -107,7 +107,7 @@ export class DestroyerEngine {
   private npcHitClipName: string | null = null;
   private npcHitTimer = 0;
   private npcHitDuration = 0.9;
-  private npcBasePos: [number, number, number] = [0, 0.70, 6.42];
+  private npcBasePos: [number, number, number] = [0, 1.14, 6.08];
   public activeNpcSourceLabel = 'Procedural Sitting Worker';
 
   // Moveable prop mesh/material caches (primitives + mid-level convex)
@@ -431,8 +431,9 @@ export class DestroyerEngine {
       // Independent Sitting Desk Woman NPC Animation Evaluation (writes at npcJointOffset)
       if (this.npcHasSkinning && this.npcAnimController.joints.length > 0) {
         if (this.npcHitTimer > 0 && this.npcHitClipName) {
+          const hitPlaybackRate = this.npcHitDuration > 3.0 ? 1.35 : 1.0;
           const prevRemaining = this.npcHitTimer;
-          this.npcHitTimer = Math.max(0, this.npcHitTimer - deltaSec);
+          this.npcHitTimer = Math.max(0, this.npcHitTimer - deltaSec * hitPlaybackRate);
           const elapsed = this.npcHitDuration - prevRemaining;
           this.npcAnimController.evaluateClipAtTime(
             this.npcHitClipName,
@@ -440,9 +441,13 @@ export class DestroyerEngine {
             this.entityManager.jointMatrices,
             this.npcJointOffset
           );
-          // Subtle physical flinch wobble while reacting
+          // Subtle physical flinch wobble only during initial punch impact (first 0.55s)
           if (this.npcEntityIds.length > 0) {
-            const flinch = Math.sin((elapsed / Math.max(0.05, this.npcHitDuration)) * Math.PI) * 0.10;
+            const impactWindow = Math.min(0.55, this.npcHitDuration);
+            const flinch =
+              elapsed < impactWindow
+                ? Math.sin((elapsed / Math.max(0.05, impactWindow)) * Math.PI) * 0.08
+                : 0;
             Mat4.fromTranslation(
               [this.npcBasePos[0], this.npcBasePos[1], this.npcBasePos[2] - flinch],
               this.tempPropMat
@@ -883,7 +888,7 @@ export class DestroyerEngine {
 
     if (glbBuffer) {
       try {
-        const parsed = GLBLoader.parse(glbBuffer, { normalizeToHeight: 1.28 });
+        const parsed = GLBLoader.parse(glbBuffer, { normalizeToHeight: 1.70 });
         if (parsed.primitives.length > 0) {
           let finalClips = [...parsed.clips];
           if (parsed.hasSkinning && MixamoAnimations.isMixamoSkeleton(parsed.joints) && finalClips.length === 0) {
@@ -1606,19 +1611,19 @@ export class DestroyerEngine {
         mainFloor0Entry.entityIds.push(...npcIds);
       }
 
-      // Register Desk Woman collider + punch target in JoltPhysics
+      // Register Desk Woman collider + punch target in JoltPhysics (seated on Floor 0 Lobby Reception Desk)
       this.physics.addBoxCollider({
         id: 'worker_woman_desk_collider',
         name: 'Worker Woman (Desk NPC)',
-        center: [this.npcBasePos[0], this.npcBasePos[1] + 0.65, this.npcBasePos[2]],
-        size: [0.38, 0.62, 0.36],
+        center: [this.npcBasePos[0], this.npcBasePos[1] + 0.62, this.npcBasePos[2]],
+        size: [0.42, 0.62, 0.42],
         category: 'wall',
       });
       this.physics.registerNPCPunchTarget({
         id: 'office_worker_woman',
         name: 'Office Worker (Desk)',
         position: [...this.npcBasePos],
-        radius: 0.55,
+        radius: 0.72,
         height: 1.28,
       });
 

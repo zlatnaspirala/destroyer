@@ -331,10 +331,21 @@ export class GLBLoader {
     const binView = new DataView(binSlice || new ArrayBuffer(0));
     const binBytes = new Uint8Array(binSlice || new ArrayBuffer(0));
 
-    // 1. Extract Embedded Textures/Images
+    // 1. Collect diffuse image indices referenced by materials to avoid decoding huge unused normal/gloss maps on mobile
+    const usedDiffuseImages = new Set<number>();
+    if (Array.isArray(gltf.materials) && Array.isArray(gltf.textures)) {
+      for (const m of gltf.materials) {
+        const texIdx = m?.pbrMetallicRoughness?.baseColorTexture?.index;
+        if (texIdx !== undefined && gltf.textures[texIdx]?.source !== undefined) {
+          usedDiffuseImages.add(gltf.textures[texIdx].source);
+        }
+      }
+    }
+
     const textures: GLBTextureImage[] = [];
     if (Array.isArray(gltf.images)) {
       for (let idx = 0; idx < gltf.images.length; idx++) {
+        if (usedDiffuseImages.size > 0 && !usedDiffuseImages.has(idx)) continue;
         const img = gltf.images[idx];
         if (img.bufferView !== undefined && binSlice) {
           const bv = gltf.bufferViews[img.bufferView];
@@ -465,6 +476,114 @@ export class GLBLoader {
       }
     }
 
+    // 3b. Parse Skeletal Animation Clips early so unskinned accessories (e.g. Mixamo Ch07_Hair)
+    // can match either Bind-Pose Head or Frame-0 Seated Head accurately.
+    const clips: AnimationClip[] = [];
+    if (Array.isArray(gltf.animations) && joints.length > 0) {
+      for (let aIdx = 0; aIdx < gltf.animations.length; aIdx++) {
+        const anim = gltf.animations[aIdx];
+        const channels: AnimationChannel[] = [];
+        let maxDuration = 0;
+
+        if (Array.isArray(anim.channels) && Array.isArray(anim.samplers)) {
+          for (const ch of anim.channels) {
+            const targetNode = ch.target?.node;
+            const path = ch.target?.path;
+            if (targetNode === undefined) continue;
+            if (path !== 'translation' && path !== 'rotation' && path !== 'scale') continue;
+
+            const jointIdx = nodeToJoint.get(targetNode);
+            if (jointIdx === undefined) continue;
+
+            const sampler = anim.samplers[ch.sampler];
+            if (!sampler) continue;
+
+            const times = GLBLoader.readAccessorFloat(gltf, binView, sampler.input);
+            let values = GLBLoader.readAccessorFloat(gltf, binView, sampler.output);
+            const compCount = path === 'rotation' ? 4 : 3;
+
+            if (sampler.interpolation === 'CUBICSPLINE' && values.length >= times.length * compCount * 3) {
+              const packed = new Float32Array(times.length * compCount);
+              for (let k = 0; k < times.length; k++) {
+                const srcBase = (k * 3 + 1) * compCount;
+                const dstBase = k * compCount;
+                for (let c = 0; c < compCount; c++) {
+                  packed[dstBase + c] = values[srcBase + c];
+                }
+              }
+              values = packed;
+            }
+
+            if (path === 'rotation') {
+              for (let k = 0; k < times.length; k++) {
+                const base = k * 4;
+                const qLen = Math.hypot(values[base], values[base + 1], values[base + 2], values[base + 3]) || 1;
+                values[base] /= qLen;
+                values[base + 1] /= qLen;
+                values[base + 2] /= qLen;
+                values[base + 3] /= qLen;
+              }
+            }
+
+            if (times.length > 0) {
+              const lastT = times[times.length - 1];
+              if (lastT > maxDuration) maxDuration = lastT;
+            }
+
+            channels.push({
+              targetNode: jointIdx,
+              path,
+              times,
+              values,
+              interpolation: sampler.interpolation === 'STEP' ? 'STEP' : 'LINEAR',
+            });
+          }
+        }
+
+        if (channels.length > 0) {
+          clips.push({
+            name: anim.name || `GLB_Animation_${aIdx}`,
+            duration: maxDuration > 0 ? maxDuration : 1.0,
+            channels,
+          });
+        }
+      }
+    }
+
+    // Precompute Frame-0 joint world matrices if we have a primary clip
+    let frame0JointWorlds: Float32Array[] | null = null;
+    if (joints.length > 0 && clips.length > 0) {
+      const clip0 = clips[0];
+      const f0Local: Float32Array[] = joints.map((j) => new Float32Array(j.localMatrix));
+      const tArr: [number, number, number][] = joints.map((j) => [...(j.initialTranslation || [0, 0, 0])]);
+      const rArr: [number, number, number, number][] = joints.map((j) => [...(j.initialRotation || [0, 0, 0, 1])]);
+      const sArr: [number, number, number][] = joints.map((j) => [...(j.initialScale || [1, 1, 1])]);
+      for (const ch of clip0.channels) {
+        if (ch.times.length === 0) continue;
+        const j = ch.targetNode;
+        if (ch.path === 'translation') tArr[j] = [ch.values[0], ch.values[1], ch.values[2]];
+        else if (ch.path === 'rotation') rArr[j] = [ch.values[0], ch.values[1], ch.values[2], ch.values[3]];
+        else if (ch.path === 'scale') sArr[j] = [ch.values[0], ch.values[1], ch.values[2]];
+      }
+      for (let i = 0; i < joints.length; i++) {
+        Mat4.fromTranslationRotationScale(tArr[i], rArr[i], sArr[i], f0Local[i]);
+      }
+      const computed0 = new Uint8Array(joints.length);
+      frame0JointWorlds = joints.map(() => Mat4.create());
+      const getW0 = (i: number): Float32Array => {
+        if (computed0[i]) return frame0JointWorlds![i];
+        computed0[i] = 1;
+        const p = joints[i].parentIndex;
+        if (p >= 0 && p < joints.length) {
+          Mat4.multiply(getW0(p), f0Local[i], frame0JointWorlds![i]);
+        } else {
+          frame0JointWorlds![i].set(f0Local[i]);
+        }
+        return frame0JointWorlds![i];
+      };
+      for (let i = 0; i < joints.length; i++) getW0(i);
+    }
+
     // Helper: Convert GLTF material index to FlatMaterial + texture index
     const resolveMaterial = (matIdx: number | undefined): { material: FlatMaterial; textureImageIndex: number | null } => {
       if (matIdx === undefined || !gltf.materials || !gltf.materials[matIdx]) {
@@ -593,7 +712,8 @@ export class GLBLoader {
           }
           isSkinned = true;
         } else if (joints.length > 0 && nodeIdx >= 0) {
-          // Rigidly attach unskinned sub-mesh (e.g. eyes/hair parented to bone) to nearest ancestor joint
+          // Rigidly attach unskinned sub-mesh (e.g. eyes/hair parented to bone or Armature)
+          const subName = `${gltfNodes[nodeIdx]?.name || ''} ${mesh.name || ''}`;
           let cur = nodeIdx;
           let attachedJointIdx = -1;
           while (cur >= 0) {
@@ -604,9 +724,43 @@ export class GLBLoader {
             cur = nodeParent[cur];
           }
 
+          // Mixamo/Blender exports sometimes parent Ch07_Hair rigidly under Armature instead of Head bone
+          const attachedName = attachedJointIdx >= 0 ? joints[attachedJointIdx].name : '';
+          let useFrame0Reference = false;
+          if (
+            (attachedJointIdx < 0 || /armature|root|normroot/i.test(attachedName)) &&
+            /hair|wig|hat|cap|helm|glasses|lash|brow|headgear/i.test(subName)
+          ) {
+            const headJointIdx = joints.findIndex((j) => /(^|:)head$/i.test(j.name));
+            if (headJointIdx >= 0) {
+              attachedJointIdx = headJointIdx;
+              if (frame0JointWorlds && vertCount > 0) {
+                let cx = 0, cy = 0, cz = 0;
+                const sampleStep = Math.max(1, Math.floor(vertCount / 128));
+                let samples = 0;
+                for (let v = 0; v < vertCount; v += sampleStep) {
+                  const p = Mat4.transformVec4(
+                    [positions[v * 3], positions[v * 3 + 1], positions[v * 3 + 2], 1],
+                    nodeBindWorldMats[nodeIdx]
+                  );
+                  cx += p[0]; cy += p[1]; cz += p[2];
+                  samples++;
+                }
+                cx /= samples; cy /= samples; cz /= samples;
+                const bindH = joints[headJointIdx].worldMatrix;
+                const f0H = frame0JointWorlds[headJointIdx];
+                const distBind = Math.hypot(cx - bindH[12], cy - bindH[13], cz - bindH[14]);
+                const distF0 = Math.hypot(cx - f0H[12], cy - f0H[13], cz - f0H[14]);
+                useFrame0Reference = distF0 + 0.08 < distBind;
+              }
+            }
+          }
+
           if (attachedJointIdx >= 0) {
-            // Pre-transform into ancestor joint bind space: inv(bindWorld * IBM) * nodeBindWorld
-            const jointWorld = joints[attachedJointIdx].worldMatrix;
+            // Pre-transform into ancestor joint space: inv(refWorld * IBM) * nodeBindWorld
+            const jointWorld = useFrame0Reference && frame0JointWorlds
+              ? frame0JointWorlds[attachedJointIdx]
+              : joints[attachedJointIdx].worldMatrix;
             const jointIbm = joints[attachedJointIdx].inverseBindMatrix;
             const sBind = Mat4.create();
             Mat4.multiply(jointWorld, jointIbm, sBind);
@@ -828,80 +982,6 @@ export class GLBLoader {
     // Recompute bounding radii
     for (const prim of primitives) {
       prim.boundingRadius = Math.max(1.5, finalHeight);
-    }
-
-    // 6. Parse Skeletal Animation Clips
-    const clips: AnimationClip[] = [];
-    if (Array.isArray(gltf.animations) && joints.length > 0) {
-      for (let aIdx = 0; aIdx < gltf.animations.length; aIdx++) {
-        const anim = gltf.animations[aIdx];
-        const channels: AnimationChannel[] = [];
-        let maxDuration = 0;
-
-        if (Array.isArray(anim.channels) && Array.isArray(anim.samplers)) {
-          for (const ch of anim.channels) {
-            const targetNode = ch.target?.node;
-            const path = ch.target?.path;
-            if (targetNode === undefined) continue;
-            if (path !== 'translation' && path !== 'rotation' && path !== 'scale') continue;
-
-            const jointIdx = nodeToJoint.get(targetNode);
-            if (jointIdx === undefined) continue;
-
-            const sampler = anim.samplers[ch.sampler];
-            if (!sampler) continue;
-
-            const times = GLBLoader.readAccessorFloat(gltf, binView, sampler.input);
-            let values = GLBLoader.readAccessorFloat(gltf, binView, sampler.output);
-            const compCount = path === 'rotation' ? 4 : 3;
-
-            // Convert CUBICSPLINE (inTangent, value, outTangent) -> packed LINEAR values
-            if (sampler.interpolation === 'CUBICSPLINE' && values.length >= times.length * compCount * 3) {
-              const packed = new Float32Array(times.length * compCount);
-              for (let k = 0; k < times.length; k++) {
-                const srcBase = (k * 3 + 1) * compCount;
-                const dstBase = k * compCount;
-                for (let c = 0; c < compCount; c++) {
-                  packed[dstBase + c] = values[srcBase + c];
-                }
-              }
-              values = packed;
-            }
-
-            if (path === 'rotation') {
-              for (let k = 0; k < times.length; k++) {
-                const base = k * 4;
-                const qLen = Math.hypot(values[base], values[base + 1], values[base + 2], values[base + 3]) || 1;
-                values[base] /= qLen;
-                values[base + 1] /= qLen;
-                values[base + 2] /= qLen;
-                values[base + 3] /= qLen;
-              }
-            }
-
-            if (times.length > 0) {
-              const lastT = times[times.length - 1];
-              if (lastT > maxDuration) maxDuration = lastT;
-            }
-
-            channels.push({
-              targetNode: jointIdx,
-              path,
-              times,
-              values,
-              interpolation: sampler.interpolation === 'STEP' ? 'STEP' : 'LINEAR',
-            });
-          }
-        }
-
-        if (channels.length > 0) {
-          clips.push({
-            name: anim.name || `GLB_Animation_${aIdx}`,
-            duration: maxDuration > 0 ? maxDuration : 1.0,
-            channels,
-          });
-        }
-      }
     }
 
     return {
