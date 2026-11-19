@@ -4,15 +4,23 @@
  * All default mobile-recommended items are compact binary GLBs without heavy Draco dependencies.
  */
 
+export type Free3DAssetCategory =
+  | 'Vehicles'
+  | 'People'
+  | 'Office'
+  | 'Furniture'
+  | 'Courtyard'
+  | 'Calibration';
+
 export interface Free3DAssetEntry {
   id: string;
   name: string;
-  category: 'Office' | 'Furniture' | 'Courtyard' | 'Calibration';
+  category: Free3DAssetCategory;
   author: string;
   authorUrl: string;
   collection: string;
   sourceUrl: string;
-  license: 'CC0 1.0 Public Domain' | 'CC-BY 4.0 International';
+  license: 'CC0 1.0 Public Domain' | 'CC-BY 4.0 International' | 'MIT License';
   licenseUrl: string;
   requiresAttribution: boolean;
   attributionText: string;
@@ -22,6 +30,9 @@ export interface Free3DAssetEntry {
   mobileSafe: boolean;
   physicsShape: 'box' | 'cylinder' | 'convex';
   mass: number;
+  spawnAs?: 'prop' | 'vehicle' | 'player';
+  bakeRotateY?: number;
+  notes?: string;
 }
 
 export interface FreeAssetHubSource {
@@ -33,6 +44,27 @@ export interface FreeAssetHubSource {
 }
 
 export const VERIFIED_FREE_3D_HUBS: FreeAssetHubSource[] = [
+  {
+    name: 'Kenney Starter Kit Racing (Vehicles)',
+    url: 'https://github.com/KenneyNL/Starter-Kit-Racing',
+    licenseSummary: 'CC0 1.0 Universal (Public Domain)',
+    licenseUrl: 'https://creativecommons.org/publicdomain/zero/1.0/',
+    notes: 'Lightweight low-poly trucks, street racers, and motorcycles with shared colormap texture, ideal for mobile browsers.',
+  },
+  {
+    name: 'BabylonJS Assets Library',
+    url: 'https://github.com/BabylonJS/Assets',
+    licenseSummary: 'CC-BY 4.0 International',
+    licenseUrl: 'https://github.com/BabylonJS/Assets/blob/master/LICENSE',
+    notes: 'Curated WebGPU/WebGL binary GLB vehicles and scene props with attribution.',
+  },
+  {
+    name: 'Three.js Sample Models',
+    url: 'https://github.com/mrdoob/three.js/tree/dev/examples/models/gltf',
+    licenseSummary: 'MIT License / Mixamo Sample',
+    licenseUrl: 'https://github.com/mrdoob/three.js/blob/dev/LICENSE',
+    notes: 'Rigged Mixamo everyday character GLB assets ready for WebGPU skeletal skinning.',
+  },
   {
     name: 'Polygonal Mind CC0 Initiative (GLB by ToxSam)',
     url: 'https://github.com/ToxSam/cc0-models-Polygonal-Mind',
@@ -52,7 +84,7 @@ export const VERIFIED_FREE_3D_HUBS: FreeAssetHubSource[] = [
     url: 'https://github.com/KhronosGroup/glTF-Sample-Assets',
     licenseSummary: 'Per-Model (CC0 1.0 / CC-BY 4.0 Verified)',
     licenseUrl: 'https://github.com/KhronosGroup/glTF-Sample-Assets/blob/main/README.md',
-    notes: 'Official Khronos reference PBR models; each item here is individually verified as CC0 1.0 or CC-BY 4.0.',
+    notes: 'Official Khronos reference PBR vehicles and ordinary human characters; each item here is individually verified as CC0 1.0 or CC-BY 4.0.',
   },
   {
     name: 'Kenney Assets',
@@ -60,13 +92,6 @@ export const VERIFIED_FREE_3D_HUBS: FreeAssetHubSource[] = [
     licenseSummary: 'CC0 1.0 Universal (Public Domain)',
     licenseUrl: 'https://creativecommons.org/publicdomain/zero/1.0/',
     notes: 'Low-poly Furniture Kit, City Kit, and Prototype Bits ideal for mobile browsers.',
-  },
-  {
-    name: 'Quaternius Ultimate Packs',
-    url: 'https://quaternius.com',
-    licenseSummary: 'CC0 1.0 Universal (Public Domain)',
-    licenseUrl: 'https://creativecommons.org/publicdomain/zero/1.0/',
-    notes: 'Stylized low-poly characters, modular buildings, and office props under CC0.',
   },
   {
     name: 'Poly Haven 3D Models',
@@ -78,6 +103,243 @@ export const VERIFIED_FREE_3D_HUBS: FreeAssetHubSource[] = [
 ];
 
 export const FREE_3D_ASSETS_CATALOG: Free3DAssetEntry[] = [
+  // ==================== DRIVEABLE FREE ONLINE VEHICLES ====================
+  {
+    id: 'kenney-truck-red',
+    name: 'Red Utility Pickup Truck',
+    category: 'Vehicles',
+    author: 'Kenney Vleugels (Kenney.nl)',
+    authorUrl: 'https://kenney.nl',
+    collection: 'Starter Kit Racing',
+    sourceUrl: 'https://github.com/KenneyNL/Starter-Kit-Racing',
+    license: 'CC0 1.0 Public Domain',
+    licenseUrl: 'https://creativecommons.org/publicdomain/zero/1.0/',
+    requiresAttribution: false,
+    attributionText: 'Vehicle model by Kenney (CC0 1.0 Universal)',
+    glbUrl: 'https://raw.githubusercontent.com/KenneyNL/Starter-Kit-Racing/main/models/vehicle-truck-red.glb',
+    sizeKB: 90,
+    targetHeightMeters: 1.88,
+    mobileSafe: true,
+    physicsShape: 'box',
+    mass: 1500,
+    spawnAs: 'vehicle',
+    notes: 'City utility pickup truck · auto-loaded in city alongside classic sedans',
+  },
+  {
+    id: 'kenney-truck-yellow',
+    name: 'Yellow Sport Pickup Truck',
+    category: 'Vehicles',
+    author: 'Kenney Vleugels (Kenney.nl)',
+    authorUrl: 'https://kenney.nl',
+    collection: 'Starter Kit Racing',
+    sourceUrl: 'https://github.com/KenneyNL/Starter-Kit-Racing',
+    license: 'CC0 1.0 Public Domain',
+    licenseUrl: 'https://creativecommons.org/publicdomain/zero/1.0/',
+    requiresAttribution: false,
+    attributionText: 'Vehicle model by Kenney (CC0 1.0 Universal)',
+    glbUrl: 'https://raw.githubusercontent.com/KenneyNL/Starter-Kit-Racing/main/models/vehicle-truck-yellow.glb',
+    sizeKB: 91,
+    targetHeightMeters: 1.88,
+    mobileSafe: true,
+    physicsShape: 'box',
+    mass: 1500,
+    spawnAs: 'vehicle',
+    notes: 'City sport truck · auto-loaded near Gas Station #1 & Residential Avenue',
+  },
+  {
+    id: 'kenney-truck-green',
+    name: 'Green Off-Road Truck',
+    category: 'Vehicles',
+    author: 'Kenney Vleugels (Kenney.nl)',
+    authorUrl: 'https://kenney.nl',
+    collection: 'Starter Kit Racing',
+    sourceUrl: 'https://github.com/KenneyNL/Starter-Kit-Racing',
+    license: 'CC0 1.0 Public Domain',
+    licenseUrl: 'https://creativecommons.org/publicdomain/zero/1.0/',
+    requiresAttribution: false,
+    attributionText: 'Vehicle model by Kenney (CC0 1.0 Universal)',
+    glbUrl: 'https://raw.githubusercontent.com/KenneyNL/Starter-Kit-Racing/main/models/vehicle-truck-green.glb',
+    sizeKB: 102,
+    targetHeightMeters: 1.88,
+    mobileSafe: true,
+    physicsShape: 'box',
+    mass: 1550,
+    spawnAs: 'vehicle',
+    notes: 'Sturdy off-road pickup with roof bars',
+  },
+  {
+    id: 'kenney-truck-purple',
+    name: 'Purple Cruiser Truck',
+    category: 'Vehicles',
+    author: 'Kenney Vleugels (Kenney.nl)',
+    authorUrl: 'https://kenney.nl',
+    collection: 'Starter Kit Racing',
+    sourceUrl: 'https://github.com/KenneyNL/Starter-Kit-Racing',
+    license: 'CC0 1.0 Public Domain',
+    licenseUrl: 'https://creativecommons.org/publicdomain/zero/1.0/',
+    requiresAttribution: false,
+    attributionText: 'Vehicle model by Kenney (CC0 1.0 Universal)',
+    glbUrl: 'https://raw.githubusercontent.com/KenneyNL/Starter-Kit-Racing/main/models/vehicle-truck-purple.glb',
+    sizeKB: 77,
+    targetHeightMeters: 1.88,
+    mobileSafe: true,
+    physicsShape: 'box',
+    mass: 1450,
+    spawnAs: 'vehicle',
+    notes: 'Compact street pickup',
+  },
+  {
+    id: 'kenney-motorcycle',
+    name: 'Urban Street Motorcycle',
+    category: 'Vehicles',
+    author: 'Kenney Vleugels (Kenney.nl)',
+    authorUrl: 'https://kenney.nl',
+    collection: 'Starter Kit Racing',
+    sourceUrl: 'https://github.com/KenneyNL/Starter-Kit-Racing',
+    license: 'CC0 1.0 Public Domain',
+    licenseUrl: 'https://creativecommons.org/publicdomain/zero/1.0/',
+    requiresAttribution: false,
+    attributionText: 'Vehicle model by Kenney (CC0 1.0 Universal)',
+    glbUrl: 'https://raw.githubusercontent.com/KenneyNL/Starter-Kit-Racing/main/models/vehicle-motorcycle.glb',
+    sizeKB: 95,
+    targetHeightMeters: 1.35,
+    mobileSafe: true,
+    physicsShape: 'box',
+    mass: 420,
+    spawnAs: 'vehicle',
+    notes: 'Nimble two-wheeler commuter bike',
+  },
+  {
+    id: 'babylon-vintage-coupe',
+    name: 'Vintage Street Coupe',
+    category: 'Vehicles',
+    author: 'BabylonJS Contributors',
+    authorUrl: 'https://github.com/BabylonJS/Assets',
+    collection: 'BabylonJS Assets Library',
+    sourceUrl: 'https://github.com/BabylonJS/Assets/blob/master/meshes/car.glb',
+    license: 'CC-BY 4.0 International',
+    licenseUrl: 'https://github.com/BabylonJS/Assets/blob/master/LICENSE',
+    requiresAttribution: true,
+    attributionText: 'BabylonJS Vintage Car — Creative Commons Attribution 4.0 (CC-BY 4.0)',
+    glbUrl: 'https://raw.githubusercontent.com/BabylonJS/Assets/master/meshes/car.glb',
+    sizeKB: 163,
+    targetHeightMeters: 1.55,
+    mobileSafe: true,
+    physicsShape: 'box',
+    mass: 1350,
+    spawnAs: 'vehicle',
+    bakeRotateY: Math.PI * 0.5,
+    notes: 'Classic vintage coupe · auto-loaded along Main Boulevard',
+  },
+  {
+    id: 'khr-cesium-milk-truck',
+    name: 'Cesium Delivery Box Truck',
+    category: 'Vehicles',
+    author: 'Cesium (Khronos glTF Sample Assets)',
+    authorUrl: 'https://github.com/KhronosGroup/glTF-Sample-Assets',
+    collection: 'Khronos glTF-Sample-Assets',
+    sourceUrl: 'https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/CesiumMilkTruck',
+    license: 'CC-BY 4.0 International',
+    licenseUrl: 'https://creativecommons.org/licenses/by/4.0/legalcode',
+    requiresAttribution: true,
+    attributionText: '© Cesium — Creative Commons Attribution 4.0 International (CC-BY 4.0)',
+    glbUrl: 'https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/CesiumMilkTruck/glTF-Binary/CesiumMilkTruck.glb',
+    sizeKB: 361,
+    targetHeightMeters: 2.35,
+    mobileSafe: true,
+    physicsShape: 'box',
+    mass: 2400,
+    spawnAs: 'vehicle',
+    notes: 'Heavy city delivery van · auto-loaded in commercial district',
+  },
+  {
+    id: 'khr-concept-supercar',
+    name: 'Unity Fan Concept Supercar',
+    category: 'Vehicles',
+    author: 'Unity Fan (Khronos glTF Sample Assets)',
+    authorUrl: 'https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/CarConcept',
+    collection: 'Khronos glTF-Sample-Assets',
+    sourceUrl: 'https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/CarConcept',
+    license: 'CC0 1.0 Public Domain',
+    licenseUrl: 'https://creativecommons.org/publicdomain/zero/1.0/legalcode',
+    requiresAttribution: false,
+    attributionText: 'Model by Unity Fan via Khronos glTF-Sample-Assets (CC0 1.0)',
+    glbUrl: 'https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/CarConcept/glTF-Binary/CarConcept.glb',
+    sizeKB: 11700,
+    targetHeightMeters: 1.32,
+    mobileSafe: false,
+    physicsShape: 'box',
+    mass: 1450,
+    spawnAs: 'vehicle',
+    notes: 'High-detail CC0 sports supercar (desktop / Wi-Fi recommended)',
+  },
+
+  // ==================== ORDINARY EVERYDAY PEOPLE CHARACTERS ====================
+  {
+    id: 'khr-cesium-man',
+    name: 'Casual City Citizen (Everyday Man)',
+    category: 'People',
+    author: 'Cesium (Khronos glTF Sample Assets)',
+    authorUrl: 'https://github.com/KhronosGroup/glTF-Sample-Assets',
+    collection: 'Khronos glTF-Sample-Assets',
+    sourceUrl: 'https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/CesiumMan',
+    license: 'CC-BY 4.0 International',
+    licenseUrl: 'https://creativecommons.org/licenses/by/4.0/legalcode',
+    requiresAttribution: true,
+    attributionText: '© Cesium — Creative Commons Attribution 4.0 International (CC-BY 4.0)',
+    glbUrl: 'https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/CesiumMan/glTF-Binary/CesiumMan.glb',
+    sizeKB: 428,
+    targetHeightMeters: 1.75,
+    mobileSafe: true,
+    physicsShape: 'box',
+    mass: 75,
+    spawnAs: 'player',
+    notes: 'Ordinary everyday walking citizen · auto-strolls Main Boulevard sidewalk',
+  },
+  {
+    id: 'three-michelle-woman',
+    name: 'Michelle (Casual City Woman)',
+    category: 'People',
+    author: 'Three.js / Mixamo Sample',
+    authorUrl: 'https://github.com/mrdoob/three.js',
+    collection: 'Three.js Sample Models',
+    sourceUrl: 'https://github.com/mrdoob/three.js/blob/dev/examples/models/gltf/Michelle.glb',
+    license: 'MIT License',
+    licenseUrl: 'https://github.com/mrdoob/three.js/blob/dev/LICENSE',
+    requiresAttribution: true,
+    attributionText: 'Three.js Examples (MIT License) / Mixamo Character Sample',
+    glbUrl: 'https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/models/gltf/Michelle.glb',
+    sizeKB: 3200,
+    targetHeightMeters: 1.75,
+    mobileSafe: false,
+    physicsShape: 'box',
+    mass: 65,
+    spawnAs: 'player',
+    notes: 'Everyday woman in casual street jacket (full walk/idle/jump/punch Mixamo rig)',
+  },
+  {
+    id: 'destroyer-remy-hoodie',
+    name: 'Remy (Casual Hoodie Guy)',
+    category: 'People',
+    author: 'Destroyer Assets / Mixamo',
+    authorUrl: 'https://github.com/zlatnaspirala/destroyer',
+    collection: 'Destroyer Repository',
+    sourceUrl: 'https://github.com/zlatnaspirala/destroyer/blob/main/src/assets/animations/character-remy/remy.glb',
+    license: 'CC-BY 4.0 International',
+    licenseUrl: 'https://creativecommons.org/licenses/by/4.0/legalcode',
+    requiresAttribution: true,
+    attributionText: 'Mixamo Everyday Character (Destroyer Repository)',
+    glbUrl: 'https://raw.githubusercontent.com/zlatnaspirala/destroyer/main/src/assets/animations/character-remy/remy.glb',
+    sizeKB: 31000,
+    targetHeightMeters: 1.75,
+    mobileSafe: false,
+    physicsShape: 'box',
+    mass: 72,
+    spawnAs: 'player',
+    notes: 'Everyday young man in jeans & hoodie (Wi-Fi / Desktop 31 MB)',
+  },
+
+  // ==================== OFFICE, FURNITURE & COURTYARD PROPS ====================
   {
     id: 'pm-office-book',
     name: 'Hardcover Office Book',

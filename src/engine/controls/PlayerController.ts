@@ -49,6 +49,9 @@ export class PlayerController {
   public isMoving = false;
   public currentSpeed = 0;       // Smooth forward/back velocity dampening
   public currentTurnSpeed = 0;   // Smooth rotation dampening
+  public knockbackVelX = 0;      // Police kick/shove horizontal impulse X
+  public knockbackVelZ = 0;      // Police kick/shove horizontal impulse Z
+  public knockbackCooldown = 0;  // Prevents continuous stunlocking
 
   // 3rd Person Camera settings (Theta = horizontal yaw, Phi = vertical pitch)
   public cameraDistance = 7.5;
@@ -69,6 +72,8 @@ export class PlayerController {
   public joystickVec: [number, number] = [0, 0];
   public jumpRequested = false;
   public punchRequested = false;
+  public gunFireRequested = false;
+  private gunCooldown = 0;
 
   private isPointerDragging = false;
   private isTouchPointer = false;
@@ -110,11 +115,19 @@ export class PlayerController {
             this.punch();
           }
         }
+        if (e.code === 'KeyG' && !e.repeat) {
+          e.preventDefault();
+          if (this.activeVehicleIndex < 0) {
+            this.fireWeapon();
+          }
+        }
 
-        // E key: Exit car / Enter nearby car / Press elevator button
+        // E key: Exit car / Enter nearby car / Equip Gun Shop pistol / Press elevator button
         if (e.code === 'KeyE' && !e.repeat) {
           if (!this.toggleVehicleEntry()) {
-            this.interactWith3DElevatorButton();
+            if (!this.engine.tryInteractGunShop()) {
+              this.interactWith3DElevatorButton();
+            }
           }
         }
 
@@ -208,6 +221,7 @@ export class PlayerController {
       return true;
     }
 
+    if (this.engine.isPlayerJailed()) return false;
     const nearIdx = this.findNearestVehicleIndex(4.4);
     if (nearIdx >= 0) {
       this.activeVehicleIndex = nearIdx;
@@ -342,6 +356,34 @@ export class PlayerController {
     return true;
   }
 
+  public fireWeapon(): boolean {
+    if (this.gunCooldown > 0 || this.activeVehicleIndex >= 0) return false;
+    if (!this.engine.consumeWeaponShot()) return false;
+    this.gunCooldown = 0.28;
+    if (this.engine.physics) {
+      this.scratchRayOrigin[0] = this.position[0];
+      this.scratchRayOrigin[1] = this.position[1] + 1.35;
+      this.scratchRayOrigin[2] = this.position[2];
+      this.scratchPunchFwd[0] = -Math.sin(this.cameraTheta);
+      this.scratchPunchFwd[1] = 0;
+      this.scratchPunchFwd[2] = -Math.cos(this.cameraTheta);
+      const res = this.engine.physics.fireWeaponRay(this.scratchRayOrigin, this.scratchPunchFwd, 60.0);
+      this.engine.onWeaponFired(this.position, res.hitNpcId, res.hitPoliceCar);
+    }
+    return true;
+  }
+
+  public applyPoliceKnockback(dirX: number, dirZ: number, impulse = 12.0): void {
+    const len = Math.hypot(dirX, dirZ) || 1;
+    this.knockbackVelX += (dirX / len) * impulse;
+    this.knockbackVelZ += (dirZ / len) * impulse;
+    if (this.isGrounded) {
+      this.velocityY = Math.max(this.velocityY, 3.2);
+      this.isGrounded = false;
+    }
+    this.knockbackCooldown = 0.65;
+  }
+
   public jump(): void {
     this.jumpBufferTimer = 0.18;
     this.tryExecuteJump();
@@ -467,8 +509,13 @@ export class PlayerController {
       this.tryExecuteJump();
     }
 
-    // 2b. Punch cooldown, buffered request & timed impact impulse
+    // 2b. Punch cooldown, buffered request, gun firing & timed impact impulse
     this.punchCooldown = Math.max(0, this.punchCooldown - deltaSec);
+    this.gunCooldown = Math.max(0, this.gunCooldown - deltaSec);
+    if (this.gunFireRequested) {
+      this.fireWeapon();
+      this.gunFireRequested = false;
+    }
     if (this.punchRequested) {
       this.punch();
       this.punchRequested = false;
@@ -494,6 +541,11 @@ export class PlayerController {
           }
           for (let n = 0; n < hitRes.hitNPCIds.length; n++) {
             this.engine.triggerNpcPunchReaction(hitRes.hitNPCIds[n]);
+          }
+          if (hitRes.hitPoliceCar) {
+            this.engine.onPoliceCarPunched();
+          } else if (hitRes.hitCount > 0) {
+            this.engine.onPlayerPunchWitnessCheck(this.position, hitRes.hitNPCIds.length > 0);
           }
         }
       }
@@ -542,12 +594,20 @@ export class PlayerController {
     this.currentSpeed += (targetSpeed - this.currentSpeed) * Math.min(1.0, deltaSec * friction);
     this.isMoving = Math.abs(this.currentSpeed) > 0.1 || Math.abs(this.currentTurnSpeed) > 0.1;
 
+    // Decay external police kick / ram knockback (zero alloc)
+    this.knockbackCooldown = Math.max(0, this.knockbackCooldown - deltaSec);
+    const kbDecay = Math.max(0, 1.0 - deltaSec * 6.5);
+    this.knockbackVelX *= kbDecay;
+    this.knockbackVelZ *= kbDecay;
+    if (Math.abs(this.knockbackVelX) < 0.05) this.knockbackVelX = 0;
+    if (Math.abs(this.knockbackVelZ) < 0.05) this.knockbackVelZ = 0;
+
     // Forward direction vector derived from facing angle
     const fwdX = -Math.sin(this.cameraTheta);
     const fwdZ = -Math.cos(this.cameraTheta);
 
-    const dispX = fwdX * this.currentSpeed * deltaSec;
-    const dispZ = fwdZ * this.currentSpeed * deltaSec;
+    const dispX = (fwdX * this.currentSpeed + this.knockbackVelX) * deltaSec;
+    const dispZ = (fwdZ * this.currentSpeed + this.knockbackVelZ) * deltaSec;
 
     // 4. Jump & Gravity Physics
     let dispY = 0;
@@ -811,9 +871,9 @@ export class PlayerController {
       this.engine.physics.updateVehicleCollider(car.colliderId, nextX, nextY, nextZ, car.rotationY);
     }
 
-    // World bounds safety clamp
-    nextX = Math.max(-185, Math.min(250, nextX));
-    nextZ = Math.max(-165, Math.min(205, nextZ));
+    // World bounds safety clamp (expanded for Out-of-City Max Security Prison)
+    nextX = Math.max(-245, Math.min(260, nextX));
+    nextZ = Math.max(-265, Math.min(220, nextZ));
 
     car.position[0] = nextX;
     car.position[1] = nextY;

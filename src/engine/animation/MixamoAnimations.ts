@@ -344,11 +344,51 @@ export class MixamoAnimations {
       [0.02, 0, -0.03], [0.16, 0, -0.05], [0.22, 0, -0.06], [0.10, 0, -0.04], [0.02, 0, -0.03],
     ]));
 
+    // --- 5. PHONE CALL CLIP (Standing/anxious posture holding mobile phone to right ear, 1.6s loop) ---
+    const phoneTimes = [0.0, 0.4, 0.8, 1.2, 1.6];
+    const phoneChannels: AnimationChannel[] = [];
+    pushIfValid(phoneChannels, makeRotChannel(idx.hips, phoneTimes, [
+      [0.02, 0.0, 0.0], [0.02, 0.08, 0.0], [0.02, 0.0, 0.0], [0.02, -0.08, 0.0], [0.02, 0.0, 0.0],
+    ]));
+    pushIfValid(phoneChannels, makeRotChannel(idx.spine1, phoneTimes, [
+      [0.04, 0.02, 0.0], [0.06, 0.12, 0.02], [0.04, 0.0, 0.0], [0.06, -0.10, -0.02], [0.04, 0.02, 0.0],
+    ]));
+    pushIfValid(phoneChannels, makeRotChannel(idx.head, phoneTimes, [
+      [0.05, -0.10, -0.06], [0.02, 0.14, -0.08], [0.04, -0.04, -0.05], [0.02, -0.16, -0.07], [0.05, -0.10, -0.06],
+    ]));
+    pushIfValid(phoneChannels, makeRotChannel(idx.lShoulder, phoneTimes, [
+      [0, 0, -0.14], [0, 0, -0.12], [0, 0, -0.14], [0, 0, -0.12], [0, 0, -0.14],
+    ]));
+    pushIfValid(phoneChannels, makeRotChannel(idx.rShoulder, phoneTimes, [
+      [0, 0.12, 0.06], [0, 0.14, 0.05], [0, 0.12, 0.06], [0, 0.10, 0.06], [0, 0.12, 0.06],
+    ]));
+    // Left arm lowered with slight agitated gesture
+    pushIfValid(phoneChannels, makeRotChannel(idx.lArm, phoneTimes, [
+      [-0.18, 0, -1.18], [-0.36, 0.10, -1.08], [-0.22, 0, -1.16], [-0.34, 0.08, -1.10], [-0.18, 0, -1.18],
+    ]));
+    pushIfValid(phoneChannels, makeRotChannel(idx.lForeArm, phoneTimes, [
+      [0, -0.45, 0], [0, -0.78, 0], [0, -0.52, 0], [0, -0.74, 0], [0, -0.45, 0],
+    ]));
+    // Right arm raised + forearm flexed sharply so hand holds phone right next to right ear
+    pushIfValid(phoneChannels, makeRotChannel(idx.rArm, phoneTimes, [
+      [-1.08, 0.22, 0.42], [-1.12, 0.24, 0.40], [-1.06, 0.22, 0.42], [-1.10, 0.20, 0.44], [-1.08, 0.22, 0.42],
+    ]));
+    pushIfValid(phoneChannels, makeRotChannel(idx.rForeArm, phoneTimes, [
+      [0, 1.95, 0], [0, 1.98, 0], [0, 1.94, 0], [0, 1.96, 0], [0, 1.95, 0],
+    ]));
+    pushIfValid(phoneChannels, makeRotChannel(idx.lUpLeg, phoneTimes, [
+      [0.02, 0, 0.04], [0.02, 0, 0.04], [0.02, 0, 0.04], [0.02, 0, 0.04], [0.02, 0, 0.04],
+    ]));
+    pushIfValid(phoneChannels, makeRotChannel(idx.rUpLeg, phoneTimes, [
+      [0.02, 0, -0.04], [0.02, 0, -0.04], [0.02, 0, -0.04], [0.02, 0, -0.04], [0.02, 0, -0.04],
+    ]));
+
     return [
       { name: 'Mixamo_Walk_Cycle', duration: 0.9, channels: walkChannels },
       { name: 'Mixamo_Idle_Cycle', duration: 2.4, channels: idleChannels },
       { name: 'Mixamo_Jump_Cycle', duration: 0.85, channels: jumpChannels },
       { name: 'Mixamo_Punch_Cycle', duration: 0.42, channels: punchChannels },
+      { name: 'Mixamo_PhoneCall_Cycle', duration: 1.6, channels: phoneChannels },
     ];
   }
 

@@ -643,6 +643,16 @@ export class FlatEntityManager {
     }
   }
 
+  setEntityAnimOffset(id: number, animOffset: number): void {
+    if (id < 0 || id >= this.nextEntityId) return;
+    this.entityUintView[id * FlatEntityManager.ENTITY_STRIDE_FLOATS + 23] = animOffset;
+  }
+
+  setEntityMaterialId(id: number, materialId: number): void {
+    if (id < 0 || id >= this.nextEntityId) return;
+    this.entityUintView[id * FlatEntityManager.ENTITY_STRIDE_FLOATS + 21] = materialId;
+  }
+
   isEntityVisible(id: number): boolean {
     if (id < 0 || id >= this.nextEntityId) return false;
     const eOffset = id * FlatEntityManager.ENTITY_STRIDE_FLOATS;

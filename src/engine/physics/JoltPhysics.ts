@@ -86,6 +86,7 @@ export class JoltPhysics {
   private scratchPunchNPCIds: string[] = [];
   private scratchPunchResult = {
     hitCount: 0,
+    hitPoliceCar: false,
     hitNames: this.scratchPunchNames,
     hitNPCIds: this.scratchPunchNPCIds,
   };
@@ -107,6 +108,18 @@ export class JoltPhysics {
     z: 0,
     collided: false,
   };
+  private scratchRayHit = {
+    hitDist: 100,
+    hitNpcId: '',
+    hitPoliceCar: false,
+    hitCarName: '',
+    hitPropName: '',
+  };
+
+  public setColliderTrigger(id: string, isTrigger: boolean): void {
+    const col = this.colliders.get(id);
+    if (col) col.isTrigger = isTrigger;
+  }
 
   constructor() {
     this.setupDefaultBuildingPhysics();
@@ -318,6 +331,7 @@ export class JoltPhysics {
         center: [spec.center[0], spec.center[1], spec.center[2]],
         size: [spec.size[0], spec.size[1], spec.size[2]],
         category: spec.category,
+        isTrigger: spec.isTrigger,
       });
     }
   }
@@ -392,7 +406,7 @@ export class JoltPhysics {
     forwardDir: [number, number, number],
     range = 2.75,
     power = 12.5
-  ): { hitCount: number; hitNames: string[]; hitNPCIds: string[] } {
+  ): { hitCount: number; hitPoliceCar: boolean; hitNames: string[]; hitNPCIds: string[] } {
     const fLen = Math.hypot(forwardDir[0], forwardDir[2]) || 1;
     const fx = forwardDir[0] / fLen;
     const fz = forwardDir[2] / fLen;
@@ -401,6 +415,7 @@ export class JoltPhysics {
     const hitNPCIds = this.scratchPunchNPCIds;
     hitNames.length = 0;
     hitNPCIds.length = 0;
+    this.scratchPunchResult.hitPoliceCar = false;
     const fistY = playerPos[1] + 1.15;
 
     for (let i = 0; i < this.moveableObjects.length; i++) {
@@ -501,12 +516,94 @@ export class JoltPhysics {
         car.angularVelY += (armZ * fx - armX * fz) * 0.25;
         car.tiltX = -fz * 0.075;
         car.tiltZ = fx * 0.075;
+        if (car.id.startsWith('police_car_')) {
+          this.scratchPunchResult.hitPoliceCar = true;
+        }
         hitNames.push(`${car.name} (${car.health}%)`);
       }
     }
 
     this.scratchPunchResult.hitCount = hitNames.length;
     return this.scratchPunchResult;
+  }
+
+  /**
+   * Fires a zero-allocation pistol ray from muzzle along forwardDir, applying physics impact to props, cars, or NPCs.
+   */
+  public fireWeaponRay(
+    origin: [number, number, number],
+    forwardDir: [number, number, number],
+    maxRange = 55.0
+  ): { hitDist: number; hitNpcId: string; hitPoliceCar: boolean; hitCarName: string; hitPropName: string } {
+    const fLen = Math.hypot(forwardDir[0], forwardDir[1], forwardDir[2]) || 1;
+    const fx = forwardDir[0] / fLen;
+    const fy = forwardDir[1] / fLen;
+    const fz = forwardDir[2] / fLen;
+
+    this.scratchRayHit.hitDist = this.raycastBoxes(origin, forwardDir, maxRange);
+    this.scratchRayHit.hitNpcId = '';
+    this.scratchRayHit.hitPoliceCar = false;
+    this.scratchRayHit.hitCarName = '';
+    this.scratchRayHit.hitPropName = '';
+
+    let bestT = this.scratchRayHit.hitDist;
+
+    for (let i = 0; i < this.npcPunchTargets.length; i++) {
+      const npc = this.npcPunchTargets[i];
+      const dx = npc.position[0] - origin[0];
+      const dy = (npc.position[1] + npc.height * 0.6) - origin[1];
+      const dz = npc.position[2] - origin[2];
+      const proj = dx * fx + dy * fy + dz * fz;
+      if (proj < 0.3 || proj > bestT) continue;
+      const perpSq = (dx * dx + dy * dy + dz * dz) - proj * proj;
+      const rad = npc.radius + 0.35;
+      if (perpSq <= rad * rad) {
+        bestT = proj;
+        this.scratchRayHit.hitNpcId = npc.id;
+      }
+    }
+
+    for (let i = 0; i < this.moveableObjects.length; i++) {
+      const obj = this.moveableObjects[i];
+      const dx = obj.position[0] - origin[0];
+      const dy = obj.position[1] - origin[1];
+      const dz = obj.position[2] - origin[2];
+      const proj = dx * fx + dy * fy + dz * fz;
+      if (proj < 0.3 || proj > bestT) continue;
+      const perpSq = (dx * dx + dy * dy + dz * dz) - proj * proj;
+      const r = Math.max(obj.halfExtents[0], obj.halfExtents[1], obj.halfExtents[2]) + 0.3;
+      if (perpSq <= r * r) {
+        bestT = proj;
+        const invMass = 1.0 / Math.max(0.35, obj.mass);
+        obj.velocity[0] += fx * 15.0 * invMass;
+        obj.velocity[2] += fz * 15.0 * invMass;
+        obj.velocity[1] += 3.5 * invMass;
+        this.scratchRayHit.hitPropName = obj.name;
+      }
+    }
+
+    for (let i = 0; i < this.vehicles.length; i++) {
+      const car = this.vehicles[i];
+      const dx = car.position[0] - origin[0];
+      const dy = (car.position[1] + 0.7) - origin[1];
+      const dz = car.position[2] - origin[2];
+      const proj = dx * fx + dy * fy + dz * fz;
+      if (proj < 0.5 || proj > bestT) continue;
+      const perpSq = (dx * dx + dy * dy + dz * dz) - proj * proj;
+      if (perpSq <= 3.6) {
+        bestT = proj;
+        car.health = Math.max(0, car.health - 15);
+        car.velX += fx * 3.5;
+        car.velZ += fz * 3.5;
+        car.tiltX = -fz * 0.09;
+        car.tiltZ = fx * 0.09;
+        this.scratchRayHit.hitCarName = car.name;
+        this.scratchRayHit.hitPoliceCar = car.id.startsWith('police_car_');
+      }
+    }
+
+    this.scratchRayHit.hitDist = bestT;
+    return this.scratchRayHit;
   }
 
   /**
@@ -932,6 +1029,52 @@ export class JoltPhysics {
     let hitCeiling = false;
     let standingOnElevator = false;
 
+    // Moving Elevator Platform Safety Guard (zero alloc):
+    // Prevents a rising or slightly uneven cab floor from horizontally ejecting/pinching the rider.
+    const eleCol = this.colliders.get(this.elevatorPlatformId);
+    if (eleCol && vy <= 0.5) {
+      const ec = eleCol.center;
+      const es = eleCol.size;
+      const eleFootPad = capsuleRadius * 0.85;
+      if (
+        px >= ec[0] - es[0] - eleFootPad &&
+        px <= ec[0] + es[0] + eleFootPad &&
+        pz >= ec[2] - es[2] - eleFootPad &&
+        pz <= ec[2] + es[2] + eleFootPad
+      ) {
+        const eleTop = ec[1] + es[1];
+        if (py >= eleTop - 0.60 && py < eleTop) {
+          // Verify no overhead ceiling blocks lifting up to eleTop (ignore vertical walls below head)
+          let blockedAbove = false;
+          for (let i = 0; i < nearby.length; i++) {
+            const col = nearby[i];
+            if (col === eleCol) continue;
+            const c = col.center;
+            const s = col.size;
+            const boxBottom = c[1] - s[1];
+            const boxTop = c[1] + s[1];
+            if (
+              boxBottom >= py + 0.8 &&
+              eleTop + capsuleHeight - 0.02 > boxBottom &&
+              eleTop + 0.05 < boxTop &&
+              px >= c[0] - s[0] - eleFootPad &&
+              px <= c[0] + s[0] + eleFootPad &&
+              pz >= c[2] - s[2] - eleFootPad &&
+              pz <= c[2] + s[2] + eleFootPad
+            ) {
+              blockedAbove = true;
+              break;
+            }
+          }
+          if (!blockedAbove) {
+            py = eleTop;
+            isGrounded = true;
+            standingOnElevator = true;
+          }
+        }
+      }
+    }
+
     // 2. Sub-stepped Horizontal Movement (Max 0.08m per substep eliminates wall tunneling)
     const horizDist = Math.hypot(vx, vz);
     const maxHorizStep = 0.08;
@@ -1163,9 +1306,9 @@ export class JoltPhysics {
           speedScalar,
           car
         );
-        car.position[0] = Math.max(-185, Math.min(250, res.x));
+        car.position[0] = Math.max(-245, Math.min(260, res.x));
         car.position[1] = car.position[1] + (res.y - car.position[1]) * Math.min(1.0, clampedDt * 16.0);
-        car.position[2] = Math.max(-165, Math.min(205, res.z));
+        car.position[2] = Math.max(-265, Math.min(220, res.z));
         if (res.collided) {
           car.velX *= 0.35;
           car.velZ *= 0.35;

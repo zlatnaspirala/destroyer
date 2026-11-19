@@ -15,6 +15,7 @@ export interface BuildingColliderSpec {
   center: [number, number, number];
   size: [number, number, number];
   category: 'wall' | 'floor' | 'stair' | 'prop';
+  isTrigger?: boolean;
 }
 
 export interface SkyscraperFloorGeometry {
@@ -1067,7 +1068,7 @@ export class ProceduralModels {
 
       // ELEVATOR CALL PANEL BACKING & SHAFT DOORWAY SURROUND
       addPart(layer.metalTrimBoxes, 'prop', `ele_panel_${k}`, `F${k} Elevator Panel`, [11.24, baseY + 1.5, 9.0], [0.08, 0.55, 0.24]);
-      addPart(layer.buildingBoxes, 'wall', `ele_hdr_${k}`, `F${k} Elevator Header`, [14.0, baseY + 3.45, 12.6], [2.4, 0.55, 0.18]);
+      addPart(layer.buildingBoxes, 'wall', `ele_hdr_${k}`, `F${k} Elevator Header`, [14.0, baseY + 3.45, 12.82], [2.4, 0.55, 0.10]);
       layer.metalTrimBoxes.push({ center: [14.0, baseY + 3.85, 7.4], size: [2.4, 0.15, 0.15] });
 
       // OFFICE FURNITURE (Corner Executive Suites + Lounge + Filing Cabinets)
@@ -1160,7 +1161,7 @@ export class ProceduralModels {
       layer.ceilingLightBoxes.push({ center: [14.0, baseY + 3.88, 15.5], size: [2.4, 0.04, 0.2] });
     }
 
-    // 2. UPPER FLOOR SLABS (Zero gaps, zero overlaps, clean stair opening X=[-14.2,-9.8], Z=[0,7.5])
+    // 2. UPPER FLOOR SLABS (Zero gaps, zero overlaps, clean stair opening X=[-14.2,-9.8], Z=[0,7.5] + elevator shaft opening X=[11.6,16.4], Z=[7.5,12.45])
     // Assigned to floor k (for k = 1..10): floor k's floor slab = floor (k-1)'s ceiling!
     for (let k = 1; k <= totalFloors; k++) {
       const layer = floors[k];
@@ -1171,7 +1172,9 @@ export class ProceduralModels {
       addPart(layer.buildingBoxes, 'floor', `f_slab_${k}_W2`, `F${k} Slab West 2`, [-12.0, slabY, -0.5], [2.2, 0.05, 0.5]);
       addPart(layer.buildingBoxes, 'floor', `f_slab_${k}_W3`, `F${k} Slab West 3`, [-8.4, slabY, 3.25], [1.4, 0.05, 4.25]);
       addPart(layer.buildingBoxes, 'floor', `f_slab_${k}_EC`, `F${k} Slab EastCenter`, [6.5, slabY, 3.25], [13.5, 0.05, 4.25]);
-      addPart(layer.buildingBoxes, 'floor', `f_slab_${k}_C2`, `F${k} Slab Center 2`, [0, slabY, 11.25], [20.0, 0.05, 3.75]);
+      addPart(layer.buildingBoxes, 'floor', `f_slab_${k}_C2W`, `F${k} Slab Center 2 West`, [-4.2, slabY, 11.25], [15.8, 0.05, 3.75]);
+      addPart(layer.buildingBoxes, 'floor', `f_slab_${k}_C2E`, `F${k} Slab Center 2 East`, [18.2, slabY, 11.25], [1.8, 0.05, 3.75]);
+      addPart(layer.buildingBoxes, 'floor', `f_slab_${k}_C2S`, `F${k} Slab Center 2 South`, [14.0, slabY, 13.725], [2.4, 0.05, 1.275]);
 
       // Stairwell Side Balustrades on floors 1..9 (keeps Z=7.7 stair entrance clear!)
       if (k < totalFloors) {
