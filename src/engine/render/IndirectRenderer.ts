@@ -76,10 +76,21 @@ export class IndirectRenderer {
   public morphWeights: [number, number, number] = [0, 0, 0];
   public exposure = 1.15;
   public lightIntensity = 2.2;
-  public ambientIntensity = 0.28;
+  public ambientIntensity = 0.32;
   public lightDir: [number, number, number] = [-0.6, -1.2, -0.7];
   public lightColor: [number, number, number] = [1.0, 0.98, 0.92];
   public ambientColor: [number, number, number] = [0.45, 0.55, 0.72];
+
+  // Dynamic Day-Night Cycle (0..24h) — zero per-frame allocations
+  public dayNightEnabled = true;
+  public dayNightAutoCycle = true;
+  public timeOfDayHours = 10.5;
+  public dayNightSpeed = 1.0; // 1.0x = 90s full 24h cycle (0.2667 game-hours/sec)
+  public dayNightPhase: 'DAWN' | 'DAY' | 'SUNSET' | 'NIGHT' = 'DAY';
+  public shadowStrength = 0.72;
+  public nightEmissiveBoost = 1.0;
+  public fogDensity = 0.0028;
+  public skyHorizonColor: [number, number, number] = [0.24, 0.38, 0.58];
 
   private width = 800;
   private height = 600;
@@ -91,7 +102,7 @@ export class IndirectRenderer {
   // Zero-garbage pre-allocated uniform buffers & typed array views
   private camUniformsData = new Float32Array(96);
   private camUniformsU32 = new Uint32Array(this.camUniformsData.buffer);
-  private engineParamsData = new Float32Array(24);
+  private engineParamsData = new Float32Array(28);
   private engineParamsU32 = new Uint32Array(this.engineParamsData.buffer);
   private lightViewMatrix = new Float32Array(16);
   private lightProjMatrix = new Float32Array(16);
@@ -111,7 +122,7 @@ export class IndirectRenderer {
   };
   private mainColorAttachment: GPURenderPassColorAttachment = {
     view: null as unknown as GPUTextureView,
-    clearValue: { r: 0.04, g: 0.045, b: 0.065, a: 1.0 },
+    clearValue: { r: 0.36, g: 0.52, b: 0.70, a: 1.0 },
     loadOp: 'clear',
     storeOp: 'store',
   };
@@ -373,11 +384,208 @@ export class IndirectRenderer {
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
-    // Engine params: 24 floats = 96 bytes matching EngineParams struct in WGSL
+    // Engine params: 28 floats = 112 bytes matching EngineParams struct in WGSL
     this.engineParamsBuffer = this.device.createBuffer({
-      size: 96,
+      size: 112,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
+  }
+
+  private static smoothMix(a: number, b: number, t: number): number {
+    return a + (b - a) * t;
+  }
+
+  private static aceToneMap(x: number): number {
+    const num = x * (2.51 * x + 0.03);
+    const den = x * (2.43 * x + 0.59) + 0.14;
+    const mapped = Math.max(0, Math.min(1, num / den));
+    return Math.pow(mapped, 1.0 / 2.2);
+  }
+
+  /**
+   * Advances & applies the dynamic 24-hour Day-Night atmosphere, moving sun/moon direction
+   * for live shadow map casting, color temperatures, exposure, emissive boost, and sky clear color.
+   * Zero heap allocation.
+   */
+  public updateDayNightCycle(deltaSec: number): void {
+    if (!this.dayNightEnabled) return;
+
+    if (this.dayNightAutoCycle && deltaSec > 0) {
+      // 1.0x speed = minimum 15 minutes daytime (06:00-18:00 = 900s) and 12 minutes nighttime (18:00-06:00 = 720s)
+      const isDaylightHours = this.timeOfDayHours >= 6.0 && this.timeOfDayHours < 18.0;
+      const hoursPerSec = isDaylightHours ? 12.0 / 900.0 : 12.0 / 720.0;
+      this.timeOfDayHours = (this.timeOfDayHours + deltaSec * hoursPerSec * this.dayNightSpeed) % 24.0;
+      if (this.timeOfDayHours < 0) this.timeOfDayHours += 24.0;
+    }
+
+    const h = this.timeOfDayHours;
+
+    // Determine named phase
+    if (h >= 5.0 && h < 7.5) this.dayNightPhase = 'DAWN';
+    else if (h >= 7.5 && h < 17.0) this.dayNightPhase = 'DAY';
+    else if (h >= 17.0 && h < 20.0) this.dayNightPhase = 'SUNSET';
+    else this.dayNightPhase = 'NIGHT';
+
+    // Sun angle across the sky: 6:00=0, 12:00=PI/2 (overhead), 18:00=PI
+    const sunTheta = ((h - 6.0) / 24.0) * Math.PI * 2.0;
+    const sunElev = Math.sin(sunTheta); // +1 at noon, -1 at midnight
+    const sunHoriz = Math.cos(sunTheta);
+
+    // Smooth crossfade between Sun (daytime) and Moon (nighttime) so shadow map never flips underground
+    if (sunElev >= 0.06) {
+      const clampElev = Math.max(0.14, sunElev);
+      const scaleH = Math.sqrt(Math.max(0.0, 1.0 - clampElev * clampElev));
+      this.lightDir[0] = -sunHoriz * scaleH * 0.92;
+      this.lightDir[1] = -clampElev;
+      this.lightDir[2] = -0.38;
+    } else {
+      // Moon travels gently across the night sky overhead so night shadows remain realistic
+      const moonTheta = ((h >= 18.0 ? h - 18.0 : h + 6.0) / 12.0) * Math.PI;
+      const moonElev = Math.max(0.28, Math.sin(moonTheta) * 0.78);
+      const moonHoriz = Math.cos(moonTheta);
+      this.lightDir[0] = -moonHoriz * 0.65;
+      this.lightDir[1] = -moonElev;
+      this.lightDir[2] = -0.45;
+    }
+
+    // Piecewise-smooth atmospheric keyframes across [0, 24] hours (zero allocations)
+    // Keys: 0h(Midnight), 4.5h(PreDawn), 6.2h(Sunrise), 8.5h(Morning), 12.5h(Noon), 16.5h(Afternoon), 18.2h(Sunset), 20.0h(Dusk), 24h(Midnight)
+    let sr = 0.025, sg = 0.035, sb = 0.075;
+    let lr = 0.45, lg = 0.58, lb = 0.92, li = 0.45;
+    let ar = 0.16, ag = 0.22, ab = 0.38, ai = 0.24;
+    let exp = 1.08, shStr = 0.42, emBoost = 2.4, fogD = 0.0042;
+
+    if (h < 4.5) {
+      // Deep midnight
+      sr = 0.025; sg = 0.035; sb = 0.075;
+      lr = 0.45; lg = 0.58; lb = 0.92; li = 0.45;
+      ar = 0.16; ag = 0.22; ab = 0.38; ai = 0.24;
+      exp = 1.08; shStr = 0.42; emBoost = 2.45; fogD = 0.0040;
+    } else if (h < 6.25) {
+      // Pre-dawn -> Golden/Rose Sunrise
+      const t = (h - 4.5) / 1.75;
+      const s = t * t * (3 - 2 * t);
+      sr = IndirectRenderer.smoothMix(0.025, 0.34, s);
+      sg = IndirectRenderer.smoothMix(0.035, 0.22, s);
+      sb = IndirectRenderer.smoothMix(0.075, 0.24, s);
+      lr = IndirectRenderer.smoothMix(0.45, 1.0, s);
+      lg = IndirectRenderer.smoothMix(0.58, 0.62, s);
+      lb = IndirectRenderer.smoothMix(0.92, 0.42, s);
+      li = IndirectRenderer.smoothMix(0.45, 1.25, s);
+      ar = IndirectRenderer.smoothMix(0.16, 0.38, s);
+      ag = IndirectRenderer.smoothMix(0.22, 0.34, s);
+      ab = IndirectRenderer.smoothMix(0.38, 0.46, s);
+      ai = IndirectRenderer.smoothMix(0.24, 0.28, s);
+      exp = IndirectRenderer.smoothMix(1.08, 1.12, s);
+      shStr = IndirectRenderer.smoothMix(0.42, 0.58, s);
+      emBoost = IndirectRenderer.smoothMix(2.45, 1.45, s);
+      fogD = IndirectRenderer.smoothMix(0.0040, 0.0034, s);
+    } else if (h < 8.5) {
+      // Sunrise -> Clear Morning
+      const t = (h - 6.25) / 2.25;
+      const s = t * t * (3 - 2 * t);
+      sr = IndirectRenderer.smoothMix(0.34, 0.24, s);
+      sg = IndirectRenderer.smoothMix(0.22, 0.38, s);
+      sb = IndirectRenderer.smoothMix(0.24, 0.58, s);
+      lr = 1.0;
+      lg = IndirectRenderer.smoothMix(0.62, 0.94, s);
+      lb = IndirectRenderer.smoothMix(0.42, 0.86, s);
+      li = IndirectRenderer.smoothMix(1.25, 2.05, s);
+      ar = IndirectRenderer.smoothMix(0.38, 0.44, s);
+      ag = IndirectRenderer.smoothMix(0.34, 0.54, s);
+      ab = IndirectRenderer.smoothMix(0.46, 0.72, s);
+      ai = IndirectRenderer.smoothMix(0.28, 0.32, s);
+      exp = IndirectRenderer.smoothMix(1.12, 1.15, s);
+      shStr = IndirectRenderer.smoothMix(0.58, 0.72, s);
+      emBoost = IndirectRenderer.smoothMix(1.45, 1.0, s);
+      fogD = IndirectRenderer.smoothMix(0.0034, 0.0026, s);
+    } else if (h < 16.0) {
+      // Bright Day -> Noon Peak -> Afternoon
+      const dayT = (h - 8.5) / 7.5;
+      const noonBell = Math.sin(dayT * Math.PI);
+      sr = IndirectRenderer.smoothMix(0.24, 0.28, noonBell);
+      sg = IndirectRenderer.smoothMix(0.38, 0.46, noonBell);
+      sb = IndirectRenderer.smoothMix(0.58, 0.72, noonBell);
+      lr = 1.0;
+      lg = IndirectRenderer.smoothMix(0.94, 0.99, noonBell);
+      lb = IndirectRenderer.smoothMix(0.86, 0.94, noonBell);
+      li = IndirectRenderer.smoothMix(2.05, 2.35, noonBell);
+      ar = IndirectRenderer.smoothMix(0.44, 0.48, noonBell);
+      ag = IndirectRenderer.smoothMix(0.54, 0.60, noonBell);
+      ab = IndirectRenderer.smoothMix(0.72, 0.80, noonBell);
+      ai = IndirectRenderer.smoothMix(0.32, 0.35, noonBell);
+      exp = 1.15;
+      shStr = IndirectRenderer.smoothMix(0.72, 0.78, noonBell);
+      emBoost = 1.0;
+      fogD = 0.0025;
+    } else if (h < 18.4) {
+      // Late Afternoon -> Golden Sunset
+      const t = (h - 16.0) / 2.4;
+      const s = t * t * (3 - 2 * t);
+      sr = IndirectRenderer.smoothMix(0.24, 0.42, s);
+      sg = IndirectRenderer.smoothMix(0.38, 0.20, s);
+      sb = IndirectRenderer.smoothMix(0.58, 0.16, s);
+      lr = 1.0;
+      lg = IndirectRenderer.smoothMix(0.94, 0.50, s);
+      lb = IndirectRenderer.smoothMix(0.86, 0.24, s);
+      li = IndirectRenderer.smoothMix(2.05, 1.35, s);
+      ar = IndirectRenderer.smoothMix(0.44, 0.42, s);
+      ag = IndirectRenderer.smoothMix(0.54, 0.28, s);
+      ab = IndirectRenderer.smoothMix(0.72, 0.42, s);
+      ai = IndirectRenderer.smoothMix(0.32, 0.28, s);
+      exp = IndirectRenderer.smoothMix(1.15, 1.18, s);
+      shStr = IndirectRenderer.smoothMix(0.72, 0.60, s);
+      emBoost = IndirectRenderer.smoothMix(1.0, 1.75, s);
+      fogD = IndirectRenderer.smoothMix(0.0025, 0.0036, s);
+    } else if (h < 20.2) {
+      // Sunset -> Blue Twilight / Dusk -> City Night
+      const t = (h - 18.4) / 1.8;
+      const s = t * t * (3 - 2 * t);
+      sr = IndirectRenderer.smoothMix(0.42, 0.025, s);
+      sg = IndirectRenderer.smoothMix(0.20, 0.035, s);
+      sb = IndirectRenderer.smoothMix(0.16, 0.075, s);
+      lr = IndirectRenderer.smoothMix(1.0, 0.45, s);
+      lg = IndirectRenderer.smoothMix(0.50, 0.58, s);
+      lb = IndirectRenderer.smoothMix(0.24, 0.92, s);
+      li = IndirectRenderer.smoothMix(1.35, 0.45, s);
+      ar = IndirectRenderer.smoothMix(0.42, 0.16, s);
+      ag = IndirectRenderer.smoothMix(0.28, 0.22, s);
+      ab = IndirectRenderer.smoothMix(0.42, 0.38, s);
+      ai = IndirectRenderer.smoothMix(0.28, 0.24, s);
+      exp = IndirectRenderer.smoothMix(1.18, 1.08, s);
+      shStr = IndirectRenderer.smoothMix(0.60, 0.42, s);
+      emBoost = IndirectRenderer.smoothMix(1.75, 2.45, s);
+      fogD = IndirectRenderer.smoothMix(0.0036, 0.0040, s);
+    } else {
+      // Night (20.2..24.0)
+      sr = 0.025; sg = 0.035; sb = 0.075;
+      lr = 0.45; lg = 0.58; lb = 0.92; li = 0.45;
+      ar = 0.16; ag = 0.22; ab = 0.38; ai = 0.24;
+      exp = 1.08; shStr = 0.42; emBoost = 2.45; fogD = 0.0040;
+    }
+
+    this.skyHorizonColor[0] = sr;
+    this.skyHorizonColor[1] = sg;
+    this.skyHorizonColor[2] = sb;
+    this.lightColor[0] = lr;
+    this.lightColor[1] = lg;
+    this.lightColor[2] = lb;
+    this.lightIntensity = li;
+    this.ambientColor[0] = ar;
+    this.ambientColor[1] = ag;
+    this.ambientColor[2] = ab;
+    this.ambientIntensity = ai;
+    this.exposure = exp;
+    this.shadowStrength = shStr;
+    this.nightEmissiveBoost = emBoost;
+    this.fogDensity = fogD;
+
+    // Match clear backdrop color pixel-for-pixel with ACES-mapped fragment horizon fog
+    const clearCol = this.mainColorAttachment.clearValue as GPUColorDict;
+    clearCol.r = IndirectRenderer.aceToneMap(sr * exp);
+    clearCol.g = IndirectRenderer.aceToneMap(sg * exp);
+    clearCol.b = IndirectRenderer.aceToneMap(sb * exp);
+    clearCol.a = 1.0;
   }
 
   resize(width: number, height: number): void {
@@ -607,7 +815,7 @@ export class IndirectRenderer {
         384
       );
 
-      // 4. Update Engine Params (24 floats = 96 bytes, zero allocation)
+      // 4. Update Engine Params (28 floats = 112 bytes, zero allocation)
       this.engineParamsData[0] = timeSeconds;
       this.engineParamsU32[1] = this.debugMode;
       this.engineParamsData[2] = this.waveFactor;
@@ -628,14 +836,21 @@ export class IndirectRenderer {
       this.engineParamsData[17] = this.ambientColor[1];
       this.engineParamsData[18] = this.ambientColor[2];
       this.engineParamsData[19] = this.ambientIntensity;
-      this.engineParamsData[20] = this.exposure;
+      this.engineParamsData[20] = this.skyHorizonColor[0];
+      this.engineParamsData[21] = this.skyHorizonColor[1];
+      this.engineParamsData[22] = this.skyHorizonColor[2];
+      this.engineParamsData[23] = this.nightEmissiveBoost;
+      this.engineParamsData[24] = this.exposure;
+      this.engineParamsData[25] = this.shadowStrength;
+      this.engineParamsData[26] = this.fogDensity;
+      this.engineParamsData[27] = 0.0;
 
       this.device.queue.writeBuffer(
         this.engineParamsBuffer!,
         0,
         this.engineParamsData.buffer as ArrayBuffer,
         0,
-        96
+        112
       );
 
       const meshCount = this.entityManager.meshCount;

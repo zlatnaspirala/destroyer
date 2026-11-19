@@ -5,16 +5,19 @@
 
 import React from 'react';
 import {
-  Activity,
+  Clock,
   Cpu,
   Eye,
-  Flame,
   Layers,
   Moon,
+  Pause,
+  Play,
   RotateCcw,
   Sliders,
   Sparkles,
   Sun,
+  Sunrise,
+  Sunset,
   Tv,
   Zap,
 } from 'lucide-react';
@@ -69,33 +72,39 @@ export const SystemPanel: React.FC<SystemPanelProps> = ({
   };
 
   const handleLightIntensity = (val: number) => {
+    renderer.dayNightEnabled = false;
     renderer.lightIntensity = val;
     onUpdate();
   };
 
   const handleAmbientIntensity = (val: number) => {
+    renderer.dayNightEnabled = false;
     renderer.ambientIntensity = val;
     onUpdate();
   };
 
   const handleExposure = (val: number) => {
+    renderer.dayNightEnabled = false;
     renderer.exposure = val;
     onUpdate();
   };
 
   const handleResetLighting = () => {
-    renderer.lightIntensity = 1.4;
-    renderer.ambientIntensity = 0.35;
-    renderer.exposure = 1.0;
-    renderer.lightColor = [1.0, 0.96, 0.88];
-    renderer.ambientColor = [0.35, 0.45, 0.6];
-    renderer.lightDir = [-0.5, -1.0, -0.6];
+    renderer.dayNightEnabled = true;
+    renderer.dayNightAutoCycle = true;
+    engine?.setDayNightSpeed(1.0);
+    engine?.setTimeOfDay(10.5);
     renderer.bloomEnabled = true;
-    renderer.volumetricEnabled = true;
-    renderer.ssrEnabled = true;
+    renderer.volumetricEnabled = false;
+    renderer.ssrEnabled = false;
     renderer.debugMode = 0;
     onUpdate();
   };
+
+  const totalMins = Math.round((stats.timeOfDayHours ?? 10.5) * 60) % (24 * 60);
+  const timeFormatted = `${String(Math.floor(totalMins / 60)).padStart(2, '0')}:${String(
+    totalMins % 60
+  ).padStart(2, '0')}`;
 
   const shaderModes = [
     { id: 0, label: 'Cook-Torrance PBR', desc: 'Physically based rendering with GGX roughness' },
@@ -126,6 +135,125 @@ export const SystemPanel: React.FC<SystemPanelProps> = ({
           <RotateCcw className="w-3.5 h-3.5" />
           Reset Defaults
         </button>
+      </div>
+
+      {/* 0. Dynamic Day-Night Lighting & Sky Cycle */}
+      <div className="bg-zinc-900/60 border border-zinc-800 rounded-xl p-4 sm:p-5 space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800/60 pb-2.5">
+          <div className="flex items-center gap-2 text-cyan-400 font-semibold text-sm">
+            <Clock className="w-4 h-4 text-cyan-400" />
+            <span>Dynamic Day-Night Lighting System</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="px-2 py-0.5 rounded bg-zinc-950 border border-zinc-700 font-mono text-xs text-white tabular-nums">
+              {timeFormatted} · {stats.dayNightPhase}
+            </span>
+            {engine && (
+              <button
+                type="button"
+                onClick={() => {
+                  engine.toggleDayNightPause();
+                  onUpdate();
+                }}
+                className={`px-2.5 py-1 rounded text-xs font-mono font-semibold flex items-center gap-1 transition-colors ${
+                  stats.dayNightPaused
+                    ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                    : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700'
+                }`}
+              >
+                {stats.dayNightPaused ? (
+                  <>
+                    <Play className="w-3 h-3" /> Resume
+                  </>
+                ) : (
+                  <>
+                    <Pause className="w-3 h-3" /> Pause
+                  </>
+                )}
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div className="space-y-3">
+          <div className="space-y-1.5 bg-zinc-950/60 p-3 rounded-lg border border-zinc-800/60">
+            <div className="flex justify-between items-center text-xs">
+              <span className="text-zinc-300 font-medium">Time of Day (Sun &amp; Moon Shadow Arc)</span>
+              <span className="font-mono text-cyan-300 font-bold tabular-nums">{timeFormatted}</span>
+            </div>
+            <input
+              type="range"
+              min="0"
+              max="23.95"
+              step="0.05"
+              value={stats.timeOfDayHours}
+              onChange={(e) => {
+                engine?.setTimeOfDay(parseFloat(e.target.value));
+                onUpdate();
+              }}
+              className="w-full accent-cyan-400 cursor-pointer h-1.5 bg-zinc-800 rounded"
+            />
+            <div className="flex justify-between text-[10px] text-zinc-500 font-mono">
+              <span>00:00 Midnight</span>
+              <span>06:15 Dawn</span>
+              <span>12:30 Noon</span>
+              <span>18:15 Sunset</span>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-1.5">
+              {[
+                { label: 'Dawn', hours: 6.25, icon: Sunrise },
+                { label: 'Noon', hours: 12.5, icon: Sun },
+                { label: 'Sunset', hours: 18.25, icon: Sunset },
+                { label: 'Night', hours: 23.0, icon: Moon },
+              ].map((preset) => {
+                const Icon = preset.icon;
+                return (
+                  <button
+                    key={preset.label}
+                    type="button"
+                    onClick={() => {
+                      engine?.setTimeOfDay(preset.hours);
+                      onUpdate();
+                    }}
+                    className="px-2.5 py-1.5 rounded-lg bg-zinc-950 hover:bg-zinc-800 border border-zinc-800 text-xs font-medium text-zinc-200 flex items-center gap-1.5 transition-colors"
+                  >
+                    <Icon className="w-3.5 h-3.5 text-amber-400" />
+                    <span>{preset.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="flex flex-col items-end gap-1">
+              <div className="flex items-center gap-1 bg-zinc-950 p-1 rounded-lg border border-zinc-800">
+                <span className="text-[10px] font-mono text-zinc-400 px-1.5">Speed</span>
+                {[1, 5, 15, 60].map((spd) => (
+                  <button
+                    key={spd}
+                    type="button"
+                    onClick={() => {
+                      engine?.setDayNightSpeed(spd);
+                      onUpdate();
+                    }}
+                    className={`px-2 py-0.5 rounded text-[11px] font-mono transition-colors ${
+                      Math.abs((stats.dayNightSpeed ?? 1) - spd) < 0.05
+                        ? 'bg-cyan-500 text-zinc-950 font-bold'
+                        : 'text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    {spd}x
+                  </button>
+                ))}
+              </div>
+              <span className="text-[10px] font-mono text-zinc-500">
+                1.0x = 15m Day / 12m Night
+              </span>
+            </div>
+          </div>
+        </div>
       </div>
 
       {/* 1. Lighting Calibration (Directly solves white blowout) */}

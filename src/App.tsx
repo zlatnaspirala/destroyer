@@ -82,6 +82,29 @@ export default function App() {
     activeVehicleHealth: 100,
     nearbyVehicleName: '',
     nearbyVehicleHealth: 100,
+    timeOfDayHours: 10.5,
+    dayNightPhase: 'DAY',
+    dayNightPaused: false,
+    dayNightSpeed: 1.0,
+    policeAlertActive: false,
+    policeWantedLevel: 0,
+    policeDispatchCount: 0,
+    policeNearestDistMeters: 0,
+    policeEtaSeconds: 0,
+    policeCallerInfo: '',
+    cityCitizenCount: 0,
+    cctvCameraCount: 0,
+    bigCrimeActive: false,
+    policeSirenWarningActive: false,
+    policeSirenCountdown: 0,
+    isJailed: false,
+    jailTimeLeft: 0,
+    jailLocationName: '',
+    jailReason: '',
+    hasWeapon: false,
+    weaponAmmo: 0,
+    gunShopNearby: false,
+    activePatrolCount: 2,
   });
 
   // Touch & Pointer state for orbit controls
@@ -336,12 +359,31 @@ export default function App() {
     }
   };
 
-  // Handle Spawn Verified Free External GLB Prop
+  // Handle Spawn Verified Free External GLB (Vehicle, Ordinary Person Player, or Physics Prop)
   const handleSpawnExternalGLB = async (
     entry: Free3DAssetEntry
   ): Promise<{ success: boolean; error?: string }> => {
     if (!engineRef.current || engineRef.current.isDeviceLost) {
       return { success: false, error: 'Engine not ready.' };
+    }
+    if (entry.spawnAs === 'vehicle') {
+      const res = await engineRef.current.spawnExternalDriveableCar(entry);
+      if (res.success) {
+        setSceneVersion((v) => v + 1);
+      }
+      return res;
+    }
+    if (entry.spawnAs === 'player') {
+      const res = await engineRef.current.loadPlayerFromUrl(entry.glbUrl, `${entry.id}.glb`);
+      if (res.success) {
+        setSelectedEntityId(0);
+        setAvailableAnimations(engineRef.current.getAvailableAnimations());
+        setActiveAnimationName(engineRef.current.animController.getCurrentClipName());
+        setActivePlayerSource(engineRef.current.activePlayerSourceLabel);
+        setActiveNpcSource(engineRef.current.activeNpcSourceLabel);
+        setSceneVersion((v) => v + 1);
+      }
+      return res;
     }
     const res = await engineRef.current.spawnExternalGLBProp(entry.glbUrl, {
       name: entry.name,
@@ -485,6 +527,24 @@ export default function App() {
                 onSpawnCube={handleSpawnCube}
                 onLoadGLB={handleLoadGLB}
                 onUpdate={() => setSceneVersion((v) => v + 1)}
+                onLoadBVH={(bvhText, name) => {
+                  if (engineRef.current) {
+                    const res = engineRef.current.loadBVHAnimation(bvhText, name);
+                    if (res.success) {
+                      setAvailableAnimations(engineRef.current.getAvailableAnimations());
+                      setActiveAnimationName(res.clipName);
+                    }
+                  }
+                }}
+                onSelectAnimation={(clipName) => {
+                  if (engineRef.current) {
+                    engineRef.current.switchAnimation(clipName);
+                    setActiveAnimationName(clipName);
+                  }
+                }}
+                availableAnimations={availableAnimations}
+                activeAnimationName={activeAnimationName}
+                activePlayerSource={activePlayerSource}
               />
             </div>
           </aside>
@@ -646,33 +706,35 @@ export default function App() {
                     engineRef.current.playerController.toggleVehicleEntry();
                   }
                 }}
-                onLoadBVH={(bvhText, name) => {
+                onToggleDayNightPause={() => {
                   if (engineRef.current) {
-                    const res = engineRef.current.loadBVHAnimation(bvhText, name);
-                    if (res.success) {
-                      setAvailableAnimations(engineRef.current.getAvailableAnimations());
-                      setActiveAnimationName(res.clipName);
-                    }
+                    engineRef.current.toggleDayNightPause();
+                    setStats({ ...engineRef.current.stats });
                   }
                 }}
-                onLoadPlayerGLB={(buffer, name) => {
-                  void handleLoadGLB(buffer, name);
-                }}
-                onSelectAnimation={(clipName) => {
-                  if (engineRef.current) {
-                    engineRef.current.switchAnimation(clipName);
-                    setActiveAnimationName(clipName);
-                  }
-                }}
-                availableAnimations={availableAnimations}
-                activeAnimationName={activeAnimationName}
-                activePlayerSource={activePlayerSource}
                 activeNpcSource={activeNpcSource}
                 elevatorTargetFloor={elevatorTargetFloor}
                 onSelectElevatorFloor={(floor) => {
                   setElevatorTargetFloor(floor);
                   if (engineRef.current?.physics) {
                     engineRef.current.physics.setElevatorTargetFloor(floor);
+                  }
+                }}
+                onReleaseFromJail={() => {
+                  if (engineRef.current) {
+                    engineRef.current.releaseFromJail();
+                    setStats({ ...engineRef.current.stats });
+                  }
+                }}
+                onGunShopInteract={() => {
+                  if (engineRef.current) {
+                    engineRef.current.tryInteractGunShop();
+                    setStats({ ...engineRef.current.stats });
+                  }
+                }}
+                onFireWeapon={() => {
+                  if (engineRef.current) {
+                    engineRef.current.playerController.gunFireRequested = true;
                   }
                 }}
               />

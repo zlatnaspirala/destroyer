@@ -31,6 +31,8 @@ export interface GLBTextureImage {
 export interface GLBParseOptions {
   /** Normalize entire character height to target meters (e.g. 1.75) and place feet at Y=0 */
   normalizeToHeight?: number;
+  /** Optional static Y-axis rotation in radians baked into unskinned vertices (aligns models to +Z forward) */
+  bakeRotateY?: number;
 }
 
 export interface GLBParseResult {
@@ -38,6 +40,7 @@ export interface GLBParseResult {
   joints: SkeletonJoint[];
   clips: AnimationClip[];
   textures: GLBTextureImage[];
+  externalImageUris?: { index: number; uri: string }[];
   hasSkinning: boolean;
   boundingHeight: number;
 }
@@ -343,6 +346,7 @@ export class GLBLoader {
     }
 
     const textures: GLBTextureImage[] = [];
+    const externalImageUris: { index: number; uri: string }[] = [];
     if (Array.isArray(gltf.images)) {
       for (let idx = 0; idx < gltf.images.length; idx++) {
         if (usedDiffuseImages.size > 0 && !usedDiffuseImages.has(idx)) continue;
@@ -361,6 +365,8 @@ export class GLBLoader {
           if (decoded) {
             textures.push({ index: idx, mimeType: decoded.mimeType, bytes: decoded.bytes });
           }
+        } else if (typeof img.uri === 'string' && img.uri.length > 0) {
+          externalImageUris.push({ index: idx, uri: img.uri });
         }
       }
     }
@@ -979,6 +985,23 @@ export class GLBLoader {
       }
     }
 
+    // Optional static Y-axis rotation bake (aligns sideways external vehicle models to +Z forward)
+    if (!hasSkinning && options.bakeRotateY && Math.abs(options.bakeRotateY) > 1e-4) {
+      const cR = Math.cos(options.bakeRotateY);
+      const sR = Math.sin(options.bakeRotateY);
+      for (const prim of primitives) {
+        for (let v = 0; v < prim.positions.length; v += 3) {
+          const px = prim.positions[v], pz = prim.positions[v + 2];
+          prim.positions[v] = px * cR + pz * sR;
+          prim.positions[v + 2] = -px * sR + pz * cR;
+
+          const nx = prim.normals[v], nz = prim.normals[v + 2];
+          prim.normals[v] = nx * cR + nz * sR;
+          prim.normals[v + 2] = -nx * sR + nz * cR;
+        }
+      }
+    }
+
     // Recompute bounding radii
     for (const prim of primitives) {
       prim.boundingRadius = Math.max(1.5, finalHeight);
@@ -989,8 +1012,37 @@ export class GLBLoader {
       joints,
       clips,
       textures,
+      externalImageUris: externalImageUris.length > 0 ? externalImageUris : undefined,
       hasSkinning,
       boundingHeight: finalHeight,
     };
+  }
+
+  /**
+   * Fetches external sibling texture files (e.g. Textures/colormap.png referenced by Kenney GLBs)
+   * relative to the source GLB URL so external GLBs render with full palette colors.
+   */
+  static async resolveExternalTextures(parsed: GLBParseResult, sourceUrl: string): Promise<void> {
+    if (!parsed.externalImageUris || parsed.externalImageUris.length === 0) return;
+    await Promise.all(
+      parsed.externalImageUris.map(async (ext) => {
+        try {
+          const resolvedUrl = new URL(ext.uri, sourceUrl).href;
+          const res = await fetch(resolvedUrl);
+          if (!res.ok) return;
+          const bytes = new Uint8Array(await res.arrayBuffer());
+          const mimeType =
+            res.headers.get('content-type') ||
+            (/\.jpe?g$/i.test(ext.uri) ? 'image/jpeg' : 'image/png');
+          parsed.textures.push({
+            index: ext.index,
+            mimeType,
+            bytes,
+          });
+        } catch {
+          // Optional sibling texture fetch
+        }
+      })
+    );
   }
 }

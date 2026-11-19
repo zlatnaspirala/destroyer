@@ -54,12 +54,13 @@ struct EngineParams {
   morphWeight2: f32,
   bloomEnabled: f32,
   ssrEnabled: f32,
-  lightDir: vec4<f32>,    // w component is volumetricEnabled
-  lightColor: vec4<f32>,  // a component is lightIntensity
-  ambientColor: vec4<f32>,// a component is ambientIntensity
+  lightDir: vec4<f32>,       // w component is volumetricEnabled
+  lightColor: vec4<f32>,     // a component is lightIntensity
+  ambientColor: vec4<f32>,   // a component is ambientIntensity
+  skyHorizonColor: vec4<f32>,// rgb is linear sky fog color, a is nightEmissiveBoost
   exposure: f32,
-  pad1: f32,
-  pad2: f32,
+  shadowStrength: f32,
+  fogDensity: f32,
   pad3: f32,
 };
 
@@ -277,7 +278,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
   var albedo = mat.baseColor.rgb * texColor.rgb;
   var roughness = clamp(mat.roughness, 0.08, 1.0);
   var metallic = clamp(mat.metallic, 0.0, 1.0);
-  var emissive = mat.emissiveColor.rgb * clamp(mat.emissiveColor.a, 0.0, 4.0);
+  let emissiveBoost = clamp(engine.skyHorizonColor.a, 0.5, 3.2);
+  var emissive = mat.emissiveColor.rgb * clamp(mat.emissiveColor.a, 0.0, 4.0) * emissiveBoost;
 
   let isSkinnedVertex = (in.skinWeightDebug.x + in.skinWeightDebug.y + in.skinWeightDebug.z) > 0.01;
   let isGroundGrid = !isSkinnedVertex && (mat.flags & 4u) != 0u && abs(N.y) > 0.65;
@@ -365,18 +367,19 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
   var kD = vec3<f32>(1.0) - kS;
   kD *= (1.0 - metallic);
 
-  // Directional Light with soft PCF shadow
+  // Directional Light with soft PCF shadow & dynamic day/night shadow strength
   let shadow = calculateShadow(in.worldPos, N);
-  let shadowFactor = mix(0.28, 1.0, shadow); // Soft indoor bounce so interior NPC & lobby remain crisp
+  let shadowAmt = clamp(engine.shadowStrength, 0.15, 0.85);
+  let shadowFactor = mix(1.0 - shadowAmt, 1.0, shadow);
 
-  // Calibrated Direct Sunlight Radiance with Cast Shadows
-  let lightIntensity = clamp(engine.lightColor.a, 0.1, 4.0);
+  // Calibrated Direct Sunlight / Moonlight Radiance with Cast Shadows
+  let lightIntensity = clamp(engine.lightColor.a, 0.08, 4.0);
   let radiance = engine.lightColor.rgb * lightIntensity;
   let Lo = (kD * albedo / PI + specular) * radiance * NdotL * shadowFactor;
 
   // Rich Hemispheric Sky & Ground Ambient Light
-  let skyLight = engine.ambientColor.rgb * (clamp(N.y * 0.5 + 0.5, 0.0, 1.0) * engine.ambientColor.a * 0.6);
-  let groundBounce = vec3<f32>(0.12, 0.14, 0.18) * (clamp(-N.y * 0.5 + 0.5, 0.0, 1.0) * 0.25);
+  let skyLight = engine.ambientColor.rgb * (clamp(N.y * 0.5 + 0.5, 0.0, 1.0) * engine.ambientColor.a * 0.65);
+  let groundBounce = engine.ambientColor.rgb * 0.35 * (clamp(-N.y * 0.5 + 0.5, 0.0, 1.0) * 0.25);
   let ambient = (skyLight + groundBounce) * albedo * clamp(mat.ao, 0.1, 1.0);
 
   var color = ambient + Lo + emissive;
@@ -402,9 +405,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
   // 3. Screen-Space Ground Reflection (SSR)
   if (engine.ssrEnabled > 0.5 && N.y > 0.7) {
     let reflectVec = reflect(-V, N);
-    let refColor = albedo * 0.25 + vec3<f32>(0.04, 0.12, 0.2) * max(0.0, reflectVec.y);
+    let refColor = albedo * 0.25 + engine.skyHorizonColor.rgb * 0.45 * max(0.0, reflectVec.y);
     color = mix(color, refColor, 0.3 * (1.0 - roughness) * metallic);
   }
+
+  // 4. Atmospheric Distance Fog blending distant skyline smoothly into current sky horizon
+  let camDist = length(camera.camPos.xyz - in.worldPos);
+  let fogDensity = clamp(engine.fogDensity, 0.0, 0.02);
+  let fogAmt = clamp((1.0 - exp(-camDist * fogDensity)) * smoothstep(32.0, 110.0, camDist), 0.0, 0.72);
+  color = mix(color, engine.skyHorizonColor.rgb, fogAmt);
 
   // ACES Filmic Tone Mapping Curve (Cinematic contrast, deep shadow blacks, pristine highlights)
   let exposure = clamp(engine.exposure, 0.2, 3.0);

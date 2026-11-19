@@ -40,6 +40,22 @@ export interface CityCarSpawn {
   position: [number, number, number];
   rotationY: number;
   paintMat: string;
+  sector?: 'NORTH' | 'SOUTH';
+  alwaysPatrol?: boolean;
+}
+
+export interface CityCCTVCamSpawn {
+  id: string;
+  name: string;
+  pos: [number, number, number];
+  baseRotY: number;
+}
+
+export interface CityBillboardSpawn {
+  id: string;
+  name: string;
+  position: [number, number, number];
+  rotationY: number;
 }
 
 export interface CityWorldData {
@@ -48,6 +64,12 @@ export interface CityWorldData {
   placements: CityPlacement[];
   colliders: BuildingColliderSpec[];
   cars: CityCarSpawn[];
+  policeCars: CityCarSpawn[];
+  cctvCameras: CityCCTVCamSpawn[];
+  billboards: CityBillboardSpawn[];
+  gunShopCounterPos: [number, number, number];
+  policeJailCellPos: [number, number, number];
+  maxPrisonCellPos: [number, number, number];
   propSpawns: {
     kind: 'crate' | 'barrel' | 'octacrate' | 'cone' | 'bin';
     name: string;
@@ -71,6 +93,52 @@ export class CityBuilder {
         Math.abs(center[2]) + size[2]
       ) + 0.5;
     return { ...prim, boundingRadius: rad };
+  }
+
+  /**
+   * Builds a double-sided billboard screen box with upright canvas-aligned UVs (v=0 at top, v=1 at bottom)
+   * so dynamic WANTED posters & city ads render crisp and un-inverted.
+   */
+  private static createBillboardScreenMesh(
+    name: string,
+    centerY: number,
+    halfW: number,
+    halfH: number,
+    halfD: number
+  ): ParsedGLBPrimitive {
+    const positions = new Float32Array([
+      // Front (+Z): bottom-left, bottom-right, top-right, top-left
+      -halfW, centerY - halfH, halfD,
+       halfW, centerY - halfH, halfD,
+       halfW, centerY + halfH, halfD,
+      -halfW, centerY + halfH, halfD,
+      // Back (-Z): bottom-right(-X?), looking from -Z: right=+X is left edge, left=-X is right edge
+       halfW, centerY - halfH, -halfD,
+      -halfW, centerY - halfH, -halfD,
+      -halfW, centerY + halfH, -halfD,
+       halfW, centerY + halfH, -halfD,
+    ]);
+    const normals = new Float32Array([
+      0, 0, 1,  0, 0, 1,  0, 0, 1,  0, 0, 1,
+      0, 0, -1, 0, 0, -1, 0, 0, -1, 0, 0, -1,
+    ]);
+    // Canvas top is row 0 (v=0), canvas bottom is row H (v=1); inset slightly from 1.0 so WGSL fract() never wraps
+    const uvs = new Float32Array([
+      0.002, 0.998,  0.998, 0.998,  0.998, 0.002,  0.002, 0.002,
+      0.002, 0.998,  0.998, 0.998,  0.998, 0.002,  0.002, 0.002,
+    ]);
+    const indices = new Uint32Array([
+      0, 1, 2,  0, 2, 3,
+      4, 5, 6,  4, 6, 7,
+    ]);
+    return {
+      name,
+      positions,
+      normals,
+      uvs,
+      indices,
+      boundingRadius: Math.hypot(halfW, halfH, halfD) + 1.0,
+    };
   }
 
   /**
@@ -626,6 +694,145 @@ export class CityBuilder {
       alphaCutoff: 0.5,
     });
 
+    // Police Cruiser, Precinct, CCTV & Citizen Mobile Phone Materials
+    regMat('police_black', {
+      baseColor: [0.06, 0.08, 0.12, 1.0],
+      emissiveColor: [0, 0, 0, 0],
+      roughness: 0.20,
+      metallic: 0.78,
+      ao: 1.0,
+      alphaCutoff: 0.5,
+    });
+    regMat('police_white', {
+      baseColor: [0.94, 0.96, 0.99, 1.0],
+      emissiveColor: [0, 0, 0, 0],
+      roughness: 0.22,
+      metallic: 0.45,
+      ao: 1.0,
+      alphaCutoff: 0.5,
+    });
+    regMat('police_light_red', {
+      baseColor: [1.0, 0.12, 0.14, 1.0],
+      emissiveColor: [1.0, 0.12, 0.14, 2.4],
+      roughness: 0.14,
+      metallic: 0.1,
+      ao: 1.0,
+      alphaCutoff: 0.5,
+    });
+    regMat('police_light_blue', {
+      baseColor: [0.12, 0.48, 1.0, 1.0],
+      emissiveColor: [0.12, 0.52, 1.0, 2.5],
+      roughness: 0.14,
+      metallic: 0.1,
+      ao: 1.0,
+      alphaCutoff: 0.5,
+    });
+    regMat('police_sign_blue', {
+      baseColor: [0.14, 0.46, 0.95, 1.0],
+      emissiveColor: [0.08, 0.36, 0.90, 1.2],
+      roughness: 0.25,
+      metallic: 0.35,
+      ao: 1.0,
+      alphaCutoff: 0.5,
+    });
+    regMat('cctv_body', {
+      baseColor: [0.84, 0.87, 0.92, 1.0],
+      emissiveColor: [0, 0, 0, 0],
+      roughness: 0.32,
+      metallic: 0.65,
+      ao: 1.0,
+      alphaCutoff: 0.5,
+    });
+    regMat('cctv_lens', {
+      baseColor: [0.06, 0.08, 0.12, 1.0],
+      emissiveColor: [0.02, 0.06, 0.10, 0.25],
+      roughness: 0.10,
+      metallic: 0.92,
+      ao: 1.0,
+      alphaCutoff: 0.5,
+    });
+    regMat('cctv_led', {
+      baseColor: [1.0, 0.15, 0.15, 1.0],
+      emissiveColor: [1.0, 0.10, 0.10, 2.2],
+      roughness: 0.15,
+      metallic: 0.1,
+      ao: 1.0,
+      alphaCutoff: 0.5,
+    });
+    regMat('phone_screen', {
+      baseColor: [0.18, 0.72, 1.0, 1.0],
+      emissiveColor: [0.16, 0.68, 1.0, 1.8],
+      roughness: 0.12,
+      metallic: 0.35,
+      ao: 1.0,
+      alphaCutoff: 0.5,
+    });
+    // Gun Shop, Max Security Prison & Billboard Materials
+    regMat('gunshop_wall', {
+      baseColor: [0.22, 0.23, 0.27, 1.0],
+      emissiveColor: [0, 0, 0, 0],
+      roughness: 0.78,
+      metallic: 0.20,
+      ao: 1.0,
+      alphaCutoff: 0.5,
+    });
+    regMat('gunshop_red', {
+      baseColor: [0.85, 0.14, 0.12, 1.0],
+      emissiveColor: [0.75, 0.12, 0.08, 1.15],
+      roughness: 0.28,
+      metallic: 0.25,
+      ao: 1.0,
+      alphaCutoff: 0.5,
+    });
+    regMat('gun_metal', {
+      baseColor: [0.14, 0.16, 0.19, 1.0],
+      emissiveColor: [0, 0, 0, 0],
+      roughness: 0.30,
+      metallic: 0.88,
+      ao: 1.0,
+      alphaCutoff: 0.5,
+    });
+    regMat('gun_pad_glow', {
+      baseColor: [0.12, 0.90, 0.52, 1.0],
+      emissiveColor: [0.10, 0.88, 0.45, 1.8],
+      roughness: 0.22,
+      metallic: 0.20,
+      ao: 1.0,
+      alphaCutoff: 0.5,
+    });
+    regMat('prison_concrete', {
+      baseColor: [0.36, 0.37, 0.39, 1.0],
+      emissiveColor: [0, 0, 0, 0],
+      roughness: 0.88,
+      metallic: 0.08,
+      ao: 1.0,
+      alphaCutoff: 0.5,
+    });
+    regMat('prison_bars', {
+      baseColor: [0.20, 0.24, 0.28, 1.0],
+      emissiveColor: [0, 0, 0, 0],
+      roughness: 0.34,
+      metallic: 0.86,
+      ao: 1.0,
+      alphaCutoff: 0.5,
+    });
+    regMat('prison_beacon_amber', {
+      baseColor: [1.0, 0.52, 0.08, 1.0],
+      emissiveColor: [1.0, 0.48, 0.06, 2.3],
+      roughness: 0.16,
+      metallic: 0.15,
+      ao: 1.0,
+      alphaCutoff: 0.5,
+    });
+    regMat('billboard_steel', {
+      baseColor: [0.16, 0.18, 0.22, 1.0],
+      emissiveColor: [0, 0, 0, 0],
+      roughness: 0.45,
+      metallic: 0.82,
+      ao: 1.0,
+      alphaCutoff: 0.5,
+    });
+
     const getMatDef = (key: string): FlatMaterial =>
       materials.find((m) => m.key === key)?.material ?? materials[0].material;
 
@@ -1094,6 +1301,354 @@ export class CityBuilder {
       { id: 'car_cab', name: 'Car Roof', center: [0, 1.06, -0.25], size: [0.84, 0.34, 1.05], category: 'floor' },
     ];
 
+    // 2h. Police Cruiser Extra Livery (White Roof & Doors + Red/Blue Lightbar Pods)
+    addMesh(
+      'police_doors_roof',
+      ProceduralModels.combineBoxes(
+        [
+          { center: [0, 1.385, -0.35], size: [0.76, 0.025, 0.48] },  // White cruiser roof panel
+          { center: [-0.965, 0.54, 0.06], size: [0.02, 0.24, 0.74] }, // Left white door panel
+          { center: [0.965, 0.54, 0.06], size: [0.02, 0.24, 0.74] },  // Right white door panel
+        ],
+        'Police_Cruiser_White'
+      ),
+      'police_white'
+    );
+    addMesh(
+      'police_bar_red',
+      CityBuilder.createBoxMesh('Police_Lightbar_Red', [-0.30, 1.48, -0.28], [0.28, 0.065, 0.13]),
+      'police_light_red'
+    );
+    addMesh(
+      'police_bar_blue',
+      CityBuilder.createBoxMesh('Police_Lightbar_Blue', [0.30, 1.48, -0.28], [0.28, 0.065, 0.13]),
+      'police_light_blue'
+    );
+
+    // 2i. City 0 Police Station (20m wide x 16m deep, enterable lobby + dispatch desk + rooftop 3D sign, facing +Z)
+    const policeStationSpecs: { center: [number, number, number]; size: [number, number, number]; name: string; cat: 'wall' | 'floor' }[] = [
+      // Concrete foundation & front steps
+      { center: [0, 0.06, 0], size: [10.0, 0.06, 8.0], name: 'Precinct_FloorSlab', cat: 'floor' },
+      { center: [0, 0.06, 8.9], size: [3.2, 0.06, 0.9], name: 'Precinct_Steps', cat: 'floor' },
+      // Exterior walls (front has wide 3.4m double glass doorway centered X = -1.7..+1.7, Z = 7.8)
+      { center: [-5.75, 2.35, 7.8], size: [4.05, 2.35, 0.22], name: 'Precinct_Wall_FL', cat: 'wall' },
+      { center: [5.75, 2.35, 7.8], size: [4.05, 2.35, 0.22], name: 'Precinct_Wall_FR', cat: 'wall' },
+      { center: [0, 3.95, 7.8], size: [1.75, 0.75, 0.22], name: 'Precinct_Door_Header', cat: 'wall' },
+      { center: [0, 2.35, -7.8], size: [10.0, 2.35, 0.22], name: 'Precinct_Wall_Back', cat: 'wall' },
+      { center: [-9.78, 2.35, 0], size: [0.22, 2.35, 7.8], name: 'Precinct_Wall_Left', cat: 'wall' },
+      { center: [9.78, 2.35, 0], size: [0.22, 2.35, 7.8], name: 'Precinct_Wall_Right', cat: 'wall' },
+      // Interior Dispatch Desk & Holding Cell Partition
+      { center: [0, 0.62, -2.5], size: [3.6, 0.55, 0.55], name: 'Precinct_Dispatch_Desk', cat: 'wall' },
+      { center: [-5.8, 2.35, -2.2], size: [3.8, 2.35, 0.16], name: 'Precinct_Cell_Divider', cat: 'wall' },
+      // Second Story Command Deck & Roof Parapet
+      { center: [0, 4.85, 0], size: [10.35, 0.22, 8.35], name: 'Precinct_RoofDeck', cat: 'floor' },
+      { center: [0, 6.25, -2.0], size: [8.4, 1.25, 5.2], name: 'Precinct_UpperCommand', cat: 'wall' },
+      { center: [0, 7.62, -2.0], size: [8.65, 0.16, 5.45], name: 'Precinct_UpperRoof', cat: 'floor' },
+    ];
+    addMesh(
+      'police_station_shell',
+      ProceduralModels.combineBoxes(
+        policeStationSpecs.map((s) => ({ center: s.center, size: s.size })),
+        'PoliceStation_Shell'
+      ),
+      'tower_stone_gray'
+    );
+    addMesh(
+      'police_station_fascia',
+      ProceduralModels.combineBoxes(
+        [
+          { center: [0, 4.86, 8.42], size: [10.4, 0.26, 0.08] },
+          { center: [0, 4.86, -8.42], size: [10.4, 0.26, 0.08] },
+          { center: [-10.42, 4.86, 0], size: [0.08, 0.26, 8.4] },
+          { center: [10.42, 4.86, 0], size: [0.08, 0.26, 8.4] },
+          { center: [-2.2, 1.9, 8.08], size: [0.22, 1.9, 0.12] },
+          { center: [2.2, 1.9, 8.08], size: [0.22, 1.9, 0.12] },
+        ],
+        'PoliceStation_BlueFascia'
+      ),
+      'police_sign_blue'
+    );
+    addMesh(
+      'police_station_windows',
+      ProceduralModels.combineBoxes(
+        [
+          { center: [-5.8, 2.3, 8.05], size: [2.4, 1.1, 0.05] },
+          { center: [5.8, 2.3, 8.05], size: [2.4, 1.1, 0.05] },
+          { center: [0, 6.3, 3.24], size: [5.8, 0.72, 0.05] },
+          { center: [-10.02, 2.3, 0], size: [0.05, 1.1, 4.5] },
+          { center: [10.02, 2.3, 0], size: [0.05, 1.1, 4.5] },
+        ],
+        'PoliceStation_Windows'
+      ),
+      'tower_glass_blue'
+    );
+    addMesh(
+      'police_station_beacons',
+      ProceduralModels.combineBoxes(
+        [
+          { center: [-2.2, 3.92, 8.15], size: [0.22, 0.22, 0.22] },
+          { center: [4.2, 7.95, 2.9], size: [0.35, 0.24, 0.35] },
+        ],
+        'PoliceStation_BeaconBlue'
+      ),
+      'police_light_blue'
+    );
+    addMesh(
+      'police_station_beacons_red',
+      ProceduralModels.combineBoxes(
+        [
+          { center: [2.2, 3.92, 8.15], size: [0.22, 0.22, 0.22] },
+          { center: [-4.2, 7.95, 2.9], size: [0.35, 0.24, 0.35] },
+        ],
+        'PoliceStation_BeaconRed'
+      ),
+      'police_light_red'
+    );
+    addMesh(
+      'police_station_sign',
+      ProceduralModels.create3DTextMesh('POLICE', 0.85, 0.22, 'PoliceStation_Sign3D'),
+      'police_sign_blue'
+    );
+    // Steel Holding Cell Bars + Locking Cell Door inside Police Station NW quadrant (local X:-9.6..-5.6, Z:-7.8..-2.2)
+    addMesh(
+      'police_jail_bars',
+      ProceduralModels.combineBoxes(
+        [
+          { center: [-5.6, 1.85, -7.2], size: [0.07, 1.85, 0.07] },
+          { center: [-5.6, 1.85, -6.4], size: [0.07, 1.85, 0.07] },
+          { center: [-5.6, 1.85, -5.6], size: [0.07, 1.85, 0.07] },
+          { center: [-5.6, 1.85, -4.8], size: [0.07, 1.85, 0.07] },
+          { center: [-5.6, 1.85, -4.0], size: [0.07, 1.85, 0.07] },
+          { center: [-5.6, 1.85, -3.2], size: [0.07, 1.85, 0.07] },
+          { center: [-5.6, 1.85, -2.4], size: [0.07, 1.85, 0.07] },
+          // Cell bunk bed along back wall
+          { center: [-8.3, 0.42, -6.9], size: [1.1, 0.14, 0.5] },
+        ],
+        'PoliceStation_HoldingCell_Bars'
+      ),
+      'prison_bars'
+    );
+    addMesh(
+      'police_jail_gate',
+      ProceduralModels.combineBoxes(
+        [
+          { center: [-7.55, 1.85, -2.2], size: [0.05, 1.85, 0.05] },
+          { center: [-7.10, 1.85, -2.2], size: [0.05, 1.85, 0.05] },
+          { center: [-6.65, 1.85, -2.2], size: [0.05, 1.85, 0.05] },
+          { center: [-6.20, 1.85, -2.2], size: [0.05, 1.85, 0.05] },
+          { center: [-6.85, 1.85, -2.2], size: [1.05, 0.07, 0.07] },
+        ],
+        'PoliceStation_JailGate'
+      ),
+      'prison_bars'
+    );
+
+    // 2j. City 0 CCTV Surveillance Camera Meshes (Wall/Pole Bracket + Rotating Camera Head + Recording LED)
+    addMesh(
+      'cctv_mount',
+      ProceduralModels.combineBoxes(
+        [
+          { center: [0, 0, -0.35], size: [0.06, 0.06, 0.35] },
+          { center: [0, 0, -0.68], size: [0.14, 0.14, 0.05] },
+        ],
+        'City_CCTV_Bracket'
+      ),
+      'lamp_pole'
+    );
+    addMesh(
+      'cctv_cam_head',
+      CityBuilder.mergePrimitives(
+        [
+          CityBuilder.createBoxMesh('CCTV_Body', [0, 0, 0.14], [0.12, 0.11, 0.26]),
+          CityBuilder.createBoxMesh('CCTV_Sunhood', [0, 0.11, 0.22], [0.14, 0.025, 0.30]),
+        ],
+        'City_CCTV_Head'
+      ),
+      'cctv_body'
+    );
+    addMesh(
+      'cctv_cam_led',
+      ProceduralModels.combineBoxes(
+        [
+          { center: [0, 0, 0.42], size: [0.065, 0.065, 0.04] },
+          { center: [0.08, 0.08, 0.38], size: [0.025, 0.025, 0.025] },
+        ],
+        'City_CCTV_LED'
+      ),
+      'cctv_led'
+    );
+
+    // 2k. Citizen Handheld Mobile Phone & Equippable Pistol Meshes
+    addMesh(
+      'citizen_mobile_phone',
+      CityBuilder.createBoxMesh('Citizen_Smartphone', [0, 0, 0], [0.048, 0.088, 0.014]),
+      'phone_screen'
+    );
+    addMesh(
+      'weapon_pistol',
+      ProceduralModels.combineBoxes(
+        [
+          { center: [0, 0.035, 0.09], size: [0.022, 0.026, 0.12] },
+          { center: [0, -0.025, -0.01], size: [0.020, 0.055, 0.028] },
+        ],
+        'Downtown_Pistol'
+      ),
+      'gun_metal'
+    );
+
+    // 2l. Downtown Billboards (Steel Tower + Floodlight Frame + Upright UV Display Screen)
+    addMesh(
+      'billboard_frame',
+      ProceduralModels.combineBoxes(
+        [
+          { center: [0, 2.2, 0], size: [0.35, 2.2, 0.35] },
+          { center: [0, 6.2, 0], size: [4.35, 2.25, 0.18] },
+          { center: [-2.6, 8.58, 0.42], size: [0.22, 0.06, 0.42] },
+          { center: [2.6, 8.58, 0.42], size: [0.22, 0.06, 0.42] },
+        ],
+        'Downtown_Billboard_Frame'
+      ),
+      'billboard_steel'
+    );
+    addMesh(
+      'billboard_screen',
+      CityBuilder.createBillboardScreenMesh('Downtown_Billboard_Screen', 6.2, 4.10, 2.02, 0.21),
+      'wall_cream'
+    );
+
+    // 2m. Downtown Gun Shop (12m wide x 10m deep enterable tactical store + counter + weapon racks)
+    const gunShopSpecs: { center: [number, number, number]; size: [number, number, number]; name: string; cat: 'wall' | 'floor' }[] = [
+      { center: [0, 0.06, 0], size: [6.0, 0.06, 5.0], name: 'GunShop_Slab', cat: 'floor' },
+      { center: [-3.85, 2.25, 4.78], size: [2.15, 2.25, 0.22], name: 'GunShop_Wall_FL', cat: 'wall' },
+      { center: [3.85, 2.25, 4.78], size: [2.15, 2.25, 0.22], name: 'GunShop_Wall_FR', cat: 'wall' },
+      { center: [0, 3.85, 4.78], size: [1.75, 0.65, 0.22], name: 'GunShop_DoorHeader', cat: 'wall' },
+      { center: [0, 2.25, -4.78], size: [6.0, 2.25, 0.22], name: 'GunShop_Wall_Back', cat: 'wall' },
+      { center: [-5.78, 2.25, 0], size: [0.22, 2.25, 4.78], name: 'GunShop_Wall_Left', cat: 'wall' },
+      { center: [5.78, 2.25, 0], size: [0.22, 2.25, 4.78], name: 'GunShop_Wall_Right', cat: 'wall' },
+      { center: [0, 4.62, 0], size: [6.3, 0.20, 5.3], name: 'GunShop_Roof', cat: 'floor' },
+      { center: [0, 0.56, -1.5], size: [2.8, 0.52, 0.50], name: 'GunShop_Counter', cat: 'wall' },
+    ];
+    addMesh(
+      'gunshop_shell',
+      ProceduralModels.combineBoxes(
+        gunShopSpecs.map((s) => ({ center: s.center, size: s.size })),
+        'GunShop_Shell'
+      ),
+      'gunshop_wall'
+    );
+    addMesh(
+      'gunshop_accent',
+      ProceduralModels.combineBoxes(
+        [
+          { center: [0, 4.68, 5.45], size: [6.35, 0.26, 0.14] },
+          { center: [0, 3.35, 5.42], size: [6.15, 0.14, 0.68] },
+          { center: [-5.1, 1.85, 5.02], size: [0.16, 1.85, 0.08] },
+          { center: [5.1, 1.85, 5.02], size: [0.16, 1.85, 0.08] },
+        ],
+        'GunShop_CrimsonAccent'
+      ),
+      'gunshop_red'
+    );
+    addMesh(
+      'gunshop_weapons_display',
+      ProceduralModels.combineBoxes(
+        [
+          // Wall-mounted rifles & handguns inside counter wall
+          { center: [-2.4, 2.35, -4.45], size: [0.85, 0.09, 0.08] },
+          { center: [0.0, 2.35, -4.45], size: [0.85, 0.09, 0.08] },
+          { center: [2.4, 2.35, -4.45], size: [0.85, 0.09, 0.08] },
+          { center: [-1.4, 1.72, -4.45], size: [0.60, 0.08, 0.08] },
+          { center: [1.4, 1.72, -4.45], size: [0.60, 0.08, 0.08] },
+          // Counter display pistols
+          { center: [-0.8, 1.12, -1.5], size: [0.22, 0.05, 0.14] },
+          { center: [0.8, 1.12, -1.5], size: [0.22, 0.05, 0.14] },
+        ],
+        'GunShop_WeaponRacks'
+      ),
+      'gun_metal'
+    );
+    addMesh(
+      'gunshop_pickup_pad',
+      CityBuilder.createBoxMesh('GunShop_PickupPad', [0, 0.14, -0.35], [1.15, 0.03, 0.55]),
+      'gun_pad_glow'
+    );
+    addMesh(
+      'gunshop_sign',
+      ProceduralModels.create3DTextMesh('GUN SHOP', 0.78, 0.22, 'GunShop_Sign3D'),
+      'gunshop_red'
+    );
+
+    // 2n. Out-of-City Maximum Security Prison Compound (44m wide x 40m deep fortress, watchtowers & cellblock)
+    const maxPrisonSpecs: { center: [number, number, number]; size: [number, number, number]; name: string; cat: 'wall' | 'floor' }[] = [
+      // Outer compound concrete floor slab
+      { center: [0, 0.07, 0], size: [22.0, 0.07, 20.0], name: 'MaxPrison_YardSlab', cat: 'floor' },
+      // 7m High Perimeter Blast Walls (6m opening on South wall Z=+19.4 facing Civic Street)
+      { center: [-12.5, 3.6, 19.4], size: [9.5, 3.6, 0.55], name: 'MaxPrison_Wall_SL', cat: 'wall' },
+      { center: [12.5, 3.6, 19.4], size: [9.5, 3.6, 0.55], name: 'MaxPrison_Wall_SR', cat: 'wall' },
+      { center: [0, 6.2, 19.4], size: [3.4, 1.0, 0.55], name: 'MaxPrison_Gate_Arch', cat: 'wall' },
+      { center: [0, 3.6, -19.4], size: [22.0, 3.6, 0.55], name: 'MaxPrison_Wall_North', cat: 'wall' },
+      { center: [-21.4, 3.6, 0], size: [0.55, 3.6, 19.4], name: 'MaxPrison_Wall_West', cat: 'wall' },
+      { center: [21.4, 3.6, 0], size: [0.55, 3.6, 19.4], name: 'MaxPrison_Wall_East', cat: 'wall' },
+      // 4 Corner Guard Watchtowers (11m tall concrete shafts)
+      { center: [-20.5, 5.5, 18.5], size: [2.2, 5.5, 2.2], name: 'MaxPrison_Tower_SW', cat: 'wall' },
+      { center: [20.5, 5.5, 18.5], size: [2.2, 5.5, 2.2], name: 'MaxPrison_Tower_SE', cat: 'wall' },
+      { center: [-20.5, 5.5, -18.5], size: [2.2, 5.5, 2.2], name: 'MaxPrison_Tower_NW', cat: 'wall' },
+      { center: [20.5, 5.5, -18.5], size: [2.2, 5.5, 2.2], name: 'MaxPrison_Tower_NE', cat: 'wall' },
+      // Central Maximum Security Cellblock Hall (doorway at Z=+5.5 facing South yard)
+      { center: [-6.4, 2.9, 5.5], size: [4.6, 2.9, 0.35], name: 'MaxPrison_Block_FL', cat: 'wall' },
+      { center: [6.4, 2.9, 5.5], size: [4.6, 2.9, 0.35], name: 'MaxPrison_Block_FR', cat: 'wall' },
+      { center: [0, 4.9, 5.5], size: [2.0, 0.9, 0.35], name: 'MaxPrison_Block_Header', cat: 'wall' },
+      { center: [0, 2.9, -6.5], size: [11.0, 2.9, 0.35], name: 'MaxPrison_Block_Back', cat: 'wall' },
+      { center: [-10.65, 2.9, -0.5], size: [0.35, 2.9, 6.0], name: 'MaxPrison_Block_W', cat: 'wall' },
+      { center: [10.65, 2.9, -0.5], size: [0.35, 2.9, 6.0], name: 'MaxPrison_Block_E', cat: 'wall' },
+      { center: [0, 6.0, -0.5], size: [11.4, 0.25, 6.4], name: 'MaxPrison_Block_Roof', cat: 'floor' },
+    ];
+    addMesh(
+      'maxprison_shell',
+      ProceduralModels.combineBoxes(
+        maxPrisonSpecs.map((s) => ({ center: s.center, size: s.size })),
+        'MaxSecurityPrison_Shell'
+      ),
+      'prison_concrete'
+    );
+    addMesh(
+      'maxprison_bars_doors',
+      ProceduralModels.combineBoxes(
+        [
+          // Watchtower observation windows
+          { center: [-20.5, 9.6, 18.5], size: [2.5, 0.65, 2.5] },
+          { center: [20.5, 9.6, 18.5], size: [2.5, 0.65, 2.5] },
+          { center: [-20.5, 9.6, -18.5], size: [2.5, 0.65, 2.5] },
+          { center: [20.5, 9.6, -18.5], size: [2.5, 0.65, 2.5] },
+          // Cellblock interior steel bars
+          { center: [-6.0, 2.2, -1.0], size: [0.08, 2.1, 4.2] },
+          { center: [6.0, 2.2, -1.0], size: [0.08, 2.1, 4.2] },
+        ],
+        'MaxSecurityPrison_Steel'
+      ),
+      'prison_bars'
+    );
+    addMesh(
+      'maxprison_beacons',
+      ProceduralModels.combineBoxes(
+        [
+          { center: [-20.5, 11.4, 18.5], size: [0.55, 0.45, 0.55] },
+          { center: [20.5, 11.4, 18.5], size: [0.55, 0.45, 0.55] },
+          { center: [-20.5, 11.4, -18.5], size: [0.55, 0.45, 0.55] },
+          { center: [20.5, 11.4, -18.5], size: [0.55, 0.45, 0.55] },
+          { center: [-3.4, 7.6, 19.6], size: [0.40, 0.40, 0.40] },
+          { center: [3.4, 7.6, 19.6], size: [0.40, 0.40, 0.40] },
+        ],
+        'MaxSecurityPrison_Beacons'
+      ),
+      'prison_beacon_amber'
+    );
+    addMesh(
+      'maxprison_sign',
+      ProceduralModels.create3DTextMesh('MAX PRISON', 0.95, 0.24, 'MaxPrison_Sign3D'),
+      'prison_beacon_amber'
+    );
+
     // ==================== 3. PLACE MEGA CITY STREETS & SIDEWALKS ====================
     const placeRoad = (cx: number, cz: number, widthX: number, depthZ: number, name: string) => {
       // Subdivide long avenues/streets cleanly so frustum culling skips off-screen segments
@@ -1174,6 +1729,19 @@ export class CityBuilder {
           sphereRadius: 2.0,
         });
       }
+    }
+
+    // Highway spur extending Civic Street north out of city directly to Maximum Security Prison Gate (Z: -116..-194)
+    placeRoad(-32, -155, 13, 84, 'Prison_Access_Highway');
+    for (let z = -190; z <= -116; z += 8) {
+      placements.push({
+        meshKey: 'stripe_ns',
+        materialKey: 'road_yellow',
+        position: [-32, 0, z],
+        rotationY: 0,
+        name: `Prison_Hwy_Stripe_${z}`,
+        sphereRadius: 2.0,
+      });
     }
 
     // 7 Mega City North-South Streets (width = 13m: X = -160, -96, -32, +30, +96, +160, +224)
@@ -1485,9 +2053,9 @@ export class CityBuilder {
       // South-Central Block (across Main Boulevard beside Gas Station #1)
       { pos: [14, 0, 56], rotY: Math.PI, wallMat: 'wall_cream', roofMat: 'roof_slate', name: 'LivingHouse_Main_01' },
       { pos: [14, 0, 84], rotY: 0, wallMat: 'wall_sage', roofMat: 'roof_terracotta', name: 'LivingHouse_Main_02' },
-      // South-East Residential Block (across from Secondary Tower)
-      { pos: [50, 0, 56], rotY: Math.PI, wallMat: 'wall_slate', roofMat: 'roof_slate', name: 'LivingHouse_SE_01' },
-      { pos: [74, 0, 56], rotY: Math.PI, wallMat: 'wall_terracotta', roofMat: 'roof_slate', name: 'LivingHouse_SE_02' },
+      // South-East Residential Block (shifted cleanly east to give Downtown Gun Shop prime Main Blvd frontage)
+      { pos: [63, 0, 56], rotY: Math.PI, wallMat: 'wall_slate', roofMat: 'roof_slate', name: 'LivingHouse_SE_01' },
+      { pos: [80, 0, 56], rotY: Math.PI, wallMat: 'wall_terracotta', roofMat: 'roof_slate', name: 'LivingHouse_SE_02' },
       { pos: [50, 0, 84], rotY: 0, wallMat: 'wall_cream', roofMat: 'roof_terracotta', name: 'LivingHouse_SE_03' },
       { pos: [74, 0, 84], rotY: 0, wallMat: 'wall_slate', roofMat: 'roof_terracotta', name: 'LivingHouse_SE_04' },
       // North Residential Avenue (behind Business Towers)
@@ -1542,20 +2110,173 @@ export class CityBuilder {
       }
     }
 
-    // ==================== 8. HERO 3D CAR MODEL + CITY DRIVEABLE CARS ====================
+    // ==================== 8. CITY 0 POLICE STATION + HOLDING CELL (Block [-11, 0, 82]) ====================
+    const policeStationPos: [number, number, number] = [-11, 0, 82];
+    const policeJailCellPos: [number, number, number] = [-18.0, 0.14, 77.2];
+    placements.push(
+      { meshKey: 'police_station_shell', materialKey: 'tower_stone_gray', position: policeStationPos, rotationY: 0, name: 'City0_PoliceStation_Shell', sphereRadius: 15.0 },
+      { meshKey: 'police_station_fascia', materialKey: 'police_sign_blue', position: policeStationPos, rotationY: 0, name: 'City0_PoliceStation_Fascia', sphereRadius: 15.0 },
+      { meshKey: 'police_station_windows', materialKey: 'tower_glass_blue', position: policeStationPos, rotationY: 0, name: 'City0_PoliceStation_Windows', sphereRadius: 15.0 },
+      { meshKey: 'police_station_beacons', materialKey: 'police_light_blue', position: policeStationPos, rotationY: 0, name: 'City0_PoliceStation_BeaconBlue', sphereRadius: 15.0 },
+      { meshKey: 'police_station_beacons_red', materialKey: 'police_light_red', position: policeStationPos, rotationY: 0, name: 'City0_PoliceStation_BeaconRed', sphereRadius: 15.0 },
+      { meshKey: 'police_station_sign', materialKey: 'police_sign_blue', position: [-11, 5.55, 90.3], rotationY: 0, name: 'City0_PoliceStation_Sign3D', sphereRadius: 8.0 },
+      { meshKey: 'police_jail_bars', materialKey: 'prison_bars', position: policeStationPos, rotationY: 0, name: 'City0_PoliceStation_CellBars', sphereRadius: 12.0 }
+    );
+    for (let i = 0; i < policeStationSpecs.length; i++) {
+      const sp = policeStationSpecs[i];
+      colliders.push(
+        CityBuilder.transformCollider(
+          'City0_PoliceStation',
+          { id: `ps_${i}`, name: sp.name, center: sp.center, size: sp.size, category: sp.cat },
+          policeStationPos,
+          0
+        )
+      );
+    }
+    // Cell side bars & lockable jail cell gate (starts unlocked as trigger until arrested!)
+    colliders.push(
+      { id: 'City0_PoliceStation_CellBarsSide', name: 'Police Cell Side Bars', center: [-16.6, 1.85, 77.0], size: [0.15, 1.85, 2.8], category: 'wall' },
+      { id: 'City0_PoliceStation_JailGate', name: 'Police Jail Cell Gate', center: [-17.85, 1.85, 79.8], size: [1.3, 1.85, 0.16], category: 'wall', isTrigger: true }
+    );
+
+    // ==================== 8b. DOWNTOWN GUN SHOP ([44, 0, 52], facing Main Blvd) ====================
+    const gunShopPos: [number, number, number] = [44, 0, 52];
+    const gunShopCounterPos: [number, number, number] = [44, 0.12, 52.4];
+    placements.push(
+      { meshKey: 'gunshop_shell', materialKey: 'gunshop_wall', position: gunShopPos, rotationY: Math.PI, name: 'City0_GunShop_Shell', sphereRadius: 10.0 },
+      { meshKey: 'gunshop_accent', materialKey: 'gunshop_red', position: gunShopPos, rotationY: Math.PI, name: 'City0_GunShop_Accent', sphereRadius: 10.0 },
+      { meshKey: 'gunshop_weapons_display', materialKey: 'gun_metal', position: gunShopPos, rotationY: Math.PI, name: 'City0_GunShop_Weapons', sphereRadius: 9.0 },
+      { meshKey: 'gunshop_pickup_pad', materialKey: 'gun_pad_glow', position: gunShopPos, rotationY: Math.PI, name: 'City0_GunShop_PickupPad', sphereRadius: 4.0 },
+      { meshKey: 'gunshop_sign', materialKey: 'gunshop_red', position: [44, 5.25, 46.5], rotationY: Math.PI, name: 'City0_GunShop_Sign3D', sphereRadius: 7.0 }
+    );
+    for (let i = 0; i < gunShopSpecs.length; i++) {
+      const sp = gunShopSpecs[i];
+      colliders.push(
+        CityBuilder.transformCollider(
+          'City0_GunShop',
+          { id: `gs_shop_${i}`, name: sp.name, center: sp.center, size: sp.size, category: sp.cat },
+          gunShopPos,
+          Math.PI
+        )
+      );
+    }
+
+    // ==================== 8c. OUT-OF-CITY MAXIMUM SECURITY PRISON ([-32, 0, -220]) ====================
+    const maxPrisonPos: [number, number, number] = [-32, 0, -220];
+    const maxPrisonCellPos: [number, number, number] = [-32.0, 0.18, -221.5];
+    placements.push(
+      { meshKey: 'maxprison_shell', materialKey: 'prison_concrete', position: maxPrisonPos, rotationY: 0, name: 'MaxSecurityPrison_Shell', sphereRadius: 34.0 },
+      { meshKey: 'maxprison_bars_doors', materialKey: 'prison_bars', position: maxPrisonPos, rotationY: 0, name: 'MaxSecurityPrison_Steel', sphereRadius: 34.0 },
+      { meshKey: 'maxprison_beacons', materialKey: 'prison_beacon_amber', position: maxPrisonPos, rotationY: 0, name: 'MaxSecurityPrison_Beacons', sphereRadius: 34.0 },
+      { meshKey: 'maxprison_sign', materialKey: 'prison_beacon_amber', position: [-32, 7.65, -200.0], rotationY: 0, name: 'MaxSecurityPrison_Sign3D', sphereRadius: 12.0 }
+    );
+    for (let i = 0; i < maxPrisonSpecs.length; i++) {
+      const sp = maxPrisonSpecs[i];
+      colliders.push(
+        CityBuilder.transformCollider(
+          'MaxSecurityPrison',
+          { id: `mp_${i}`, name: sp.name, center: sp.center, size: sp.size, category: sp.cat },
+          maxPrisonPos,
+          0
+        )
+      );
+    }
+    colliders.push(
+      { id: 'MaxPrison_JailGate', name: 'Max Prison Cellblock Gate', center: [-32.0, 2.0, -214.5], size: [2.2, 2.0, 0.25], category: 'wall', isTrigger: true }
+    );
+
+    // ==================== 8d. DOWNTOWN BILLBOARDS (Switch to WANTED Poster on Big Crime) ====================
+    const billboards: CityBillboardSpawn[] = [
+      { id: 'bb_plaza', name: 'Billboard_MainBlvd_Plaza', position: [19.5, 0, 25.0], rotationY: -0.32 },
+      { id: 'bb_gas', name: 'Billboard_MainBlvd_GasStation', position: [-24.5, 0, 42.5], rotationY: 0.45 },
+      { id: 'bb_east', name: 'Billboard_SecondaryTower', position: [41.0, 0, 25.0], rotationY: -0.22 },
+      { id: 'bb_precinct', name: 'Billboard_PrecinctSouth', position: [-24.0, 0, 88.0], rotationY: 0.65 },
+    ];
+    for (const bb of billboards) {
+      placements.push({
+        meshKey: 'billboard_frame',
+        materialKey: 'billboard_steel',
+        position: bb.position,
+        rotationY: bb.rotationY,
+        name: `${bb.name}_Frame`,
+        sphereRadius: 9.0,
+      });
+      colliders.push({
+        id: `col_${bb.id}`,
+        name: `${bb.name} Pillar`,
+        center: [bb.position[0], 2.2, bb.position[2]],
+        size: [0.42, 2.2, 0.42],
+        category: 'wall',
+      });
+    }
+
+    // ==================== 9. CITY 0 VIDEO CAMERAS (18 Surveillance Units) ====================
+    const cctvCameras: CityCCTVCamSpawn[] = [
+      // Main Tower Courtyard & Entrances
+      { id: 'cctv_01', name: 'CCTV_MainTower_CourtyardL', pos: [-6.5, 4.6, 20.6], baseRotY: 0.25 },
+      { id: 'cctv_02', name: 'CCTV_MainTower_CourtyardR', pos: [6.5, 4.6, 20.6], baseRotY: -0.25 },
+      { id: 'cctv_03', name: 'CCTV_MainBlvd_Civic_NW', pos: [-25.5, 4.8, 26.8], baseRotY: 2.35 },
+      { id: 'cctv_04', name: 'CCTV_MainBlvd_Civic_SE', pos: [-38.5, 4.8, 41.2], baseRotY: -0.78 },
+      { id: 'cctv_05', name: 'CCTV_MainBlvd_Commerce_NE', pos: [23.5, 4.8, 26.8], baseRotY: -2.35 },
+      { id: 'cctv_06', name: 'CCTV_MainBlvd_Commerce_SW', pos: [36.5, 4.8, 41.2], baseRotY: 0.78 },
+      // Police Station Perimeter & South Blvd
+      { id: 'cctv_07', name: 'CCTV_PoliceStation_FrontL', pos: [-19.5, 4.7, 90.2], baseRotY: 0.3 },
+      { id: 'cctv_08', name: 'CCTV_PoliceStation_FrontR', pos: [-2.5, 4.7, 90.2], baseRotY: -0.3 },
+      { id: 'cctv_09', name: 'CCTV_SouthBlvd_Civic', pos: [-25.5, 4.8, 96.8], baseRotY: 0.7 },
+      { id: 'cctv_10', name: 'CCTV_SouthBlvd_Commerce', pos: [23.5, 4.8, 111.2], baseRotY: -2.3 },
+      // Gas Station #1 & Secondary Tower & Gun Shop
+      { id: 'cctv_11', name: 'CCTV_GasStation1_Canopy', pos: [-17.4, 4.7, 48.0], baseRotY: Math.PI },
+      { id: 'cctv_12', name: 'CCTV_GasStation1_PumpRow', pos: [-2.6, 4.7, 63.8], baseRotY: 0 },
+      { id: 'cctv_13', name: 'CCTV_SecondaryTower_Plaza', pos: [60.0, 4.6, 20.6], baseRotY: 0 },
+      { id: 'cctv_14', name: 'CCTV_GunShop_MainBlvd', pos: [44.0, 4.6, 46.8], baseRotY: Math.PI },
+      // North Avenue, West Avenue & Max Prison Gate Coverage
+      { id: 'cctv_15', name: 'CCTV_NorthAve_Civic', pos: [-25.5, 4.8, -26.8], baseRotY: -0.7 },
+      { id: 'cctv_16', name: 'CCTV_NorthAve_Commerce', pos: [36.5, 4.8, -41.2], baseRotY: 2.3 },
+      { id: 'cctv_17', name: 'CCTV_WestAve_MainBlvd', pos: [-89.5, 4.8, 26.8], baseRotY: 2.35 },
+      { id: 'cctv_18', name: 'CCTV_MaxPrison_MainGate', pos: [-32.0, 6.2, -199.5], baseRotY: 0 },
+    ];
+    for (const cam of cctvCameras) {
+      placements.push({
+        meshKey: 'cctv_mount',
+        materialKey: 'lamp_pole',
+        position: cam.pos,
+        rotationY: cam.baseRotY,
+        name: `${cam.name}_Mount`,
+        sphereRadius: 2.0,
+      });
+    }
+
+    // ==================== 10. HERO 3D CAR MODEL + CITY DRIVEABLE CARS ====================
     const cars: CityCarSpawn[] = [
-      // Featured Crimson Sports Sedan parked prominently right on Main Boulevard in front of Main Tower & Player Spawn!
       { id: 'car_hero_crimson', name: 'Crimson Sports Sedan', position: [-10.5, 0.06, 30.2], rotationY: Math.PI * 0.5, paintMat: 'car_paint_crimson' },
-      // Cobalt Blue Sedan fueling under Gas Station #1 Canopy
       { id: 'car_station_cobalt', name: 'Cobalt Fuel Sedan', position: [-10.0, 0.10, 52.5], rotationY: Math.PI * 0.5, paintMat: 'car_paint_cobalt' },
-      // Silver Sedan parked along Secondary Tower Boulevard
       { id: 'car_east_silver', name: 'Silver Metro Sedan', position: [48.0, 0.06, 37.8], rotationY: -Math.PI * 0.5, paintMat: 'car_paint_silver' },
-      // Crimson Sedan along Market Street East
       { id: 'car_market_crimson', name: 'Eastside Cruiser', position: [122.0, 0.10, 52.5], rotationY: Math.PI * 0.5, paintMat: 'car_paint_crimson' },
     ];
     void carColliders;
 
-    // ==================== 9. MOVEABLE ROADSIDE PROPS ====================
+    // ==================== 11. 15 POLICE CARS (2 ACTIVE PATROLS: 1 NORTH + 1 SOUTH, 13 RESERVE FOR BIG CRIME) ====================
+    const policeCars: CityCarSpawn[] = [
+      // ONLY 2 Active Street Patrols during calm state: 1 North Sector + 1 South Sector
+      { id: 'police_car_01', name: 'Police North Patrol #01', position: [-18.0, 0.06, -34.0], rotationY: Math.PI * 0.5, paintMat: 'police_black', sector: 'NORTH', alwaysPatrol: true },
+      { id: 'police_car_02', name: 'Police South Patrol #02', position: [16.0, 0.06, 37.0], rotationY: -Math.PI * 0.5, paintMat: 'police_black', sector: 'SOUTH', alwaysPatrol: true },
+      // 13 Parked Reserve Police Cruisers (Precinct + Substations + Max Prison) dispatched on Big Crime!
+      { id: 'police_car_03', name: 'Police Reserve #03 (Precinct Bay)', position: [-16.0, 0.06, 94.0], rotationY: 0, paintMat: 'police_black', sector: 'SOUTH', alwaysPatrol: false },
+      { id: 'police_car_04', name: 'Police Reserve #04 (Precinct Bay)', position: [-11.0, 0.06, 94.0], rotationY: 0, paintMat: 'police_black', sector: 'SOUTH', alwaysPatrol: false },
+      { id: 'police_car_05', name: 'Police Reserve #05 (Precinct Bay)', position: [-6.0, 0.06, 94.0], rotationY: 0, paintMat: 'police_black', sector: 'SOUTH', alwaysPatrol: false },
+      { id: 'police_car_06', name: 'Police Reserve #06 (Civic Post)', position: [-29.0, 0.06, 70.0], rotationY: 0, paintMat: 'police_black', sector: 'SOUTH', alwaysPatrol: false },
+      { id: 'police_car_07', name: 'Police Reserve #07 (Civic Post)', position: [-29.0, 0.06, 82.0], rotationY: Math.PI, paintMat: 'police_black', sector: 'SOUTH', alwaysPatrol: false },
+      { id: 'police_car_08', name: 'Police Reserve #08 (Main West)', position: [-64.0, 0.06, 31.0], rotationY: Math.PI * 0.5, paintMat: 'police_black', sector: 'SOUTH', alwaysPatrol: false },
+      { id: 'police_car_09', name: 'Police Reserve #09 (Commerce Unit)', position: [33.0, 0.06, 68.0], rotationY: 0, paintMat: 'police_black', sector: 'SOUTH', alwaysPatrol: false },
+      { id: 'police_car_10', name: 'Police Reserve #10 (North Substation)', position: [-35.0, 0.06, -12.0], rotationY: Math.PI, paintMat: 'police_black', sector: 'NORTH', alwaysPatrol: false },
+      { id: 'police_car_11', name: 'Police Reserve #11 (North East)', position: [99.0, 0.06, -16.0], rotationY: Math.PI, paintMat: 'police_black', sector: 'NORTH', alwaysPatrol: false },
+      { id: 'police_car_12', name: 'Police Reserve #12 (Parkway Post)', position: [14.0, 0.06, -31.0], rotationY: Math.PI * 0.5, paintMat: 'police_black', sector: 'NORTH', alwaysPatrol: false },
+      { id: 'police_car_13', name: 'Police Reserve #13 (Max Prison Gate L)', position: [-42.0, 0.06, -193.0], rotationY: 0, paintMat: 'police_black', sector: 'NORTH', alwaysPatrol: false },
+      { id: 'police_car_14', name: 'Police Reserve #14 (Max Prison Gate R)', position: [-22.0, 0.06, -193.0], rotationY: 0, paintMat: 'police_black', sector: 'NORTH', alwaysPatrol: false },
+      { id: 'police_car_15', name: 'Police Reserve #15 (South Ring Reserve)', position: [-42.0, 0.06, 171.0], rotationY: Math.PI * 0.5, paintMat: 'police_black', sector: 'SOUTH', alwaysPatrol: false },
+    ];
+
+    // ==================== 12. MOVEABLE ROADSIDE PROPS ====================
     const propSpawns: CityWorldData['propSpawns'] = [
       { kind: 'cone', name: 'GasStation1_Cone_01', pos: [-16.2, 0.54, 48.0], mass: 0.55, restitution: 0.45 },
       { kind: 'cone', name: 'GasStation1_Cone_02', pos: [-3.8, 0.54, 48.0], mass: 0.55, restitution: 0.45 },
@@ -1575,6 +2296,12 @@ export class CityBuilder {
       placements,
       colliders,
       cars,
+      policeCars,
+      cctvCameras,
+      billboards,
+      gunShopCounterPos,
+      policeJailCellPos,
+      maxPrisonCellPos,
       propSpawns,
     };
   }

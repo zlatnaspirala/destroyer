@@ -32,7 +32,9 @@ export const FreeAssetsModal: React.FC<FreeAssetsModalProps> = ({
   onUploadNpcGLB,
   activeNpcSource,
 }) => {
-  const [activeCategory, setActiveCategory] = useState<'All' | 'Office' | 'Furniture' | 'Courtyard'>('All');
+  const [activeCategory, setActiveCategory] = useState<
+    'All' | 'Vehicles' | 'People' | 'Office' | 'Furniture' | 'Courtyard'
+  >('All');
   const [loadingId, setLoadingId] = useState<string | null>(null);
   const [spawnedIds, setSpawnedIds] = useState<Record<string, boolean>>({});
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -168,20 +170,20 @@ export const FreeAssetsModal: React.FC<FreeAssetsModalProps> = ({
             </div>
           </section>
 
-          {/* Section 3: Verified Legal Online GLB Props (CC0 1.0 & CC-BY 4.0) */}
+          {/* Section 3: Verified Legal Online GLB Cars, People & Props */}
           <section className="border-t border-zinc-800/80 pt-5 space-y-3">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <div>
                 <h3 className="text-sm font-semibold text-white">
-                  Free Online 3D Props (Verified CC0 &amp; CC-BY 4.0)
+                  Free Online Cars, Ordinary People &amp; Props (CC0 / CC-BY 4.0 / MIT)
                 </h3>
                 <p className="text-xs text-zinc-400 mt-0.5">
-                  Downloaded on demand as binary GLB and wrapped in lightweight primitive AABB colliders.
+                  Spawn driveable trucks, coupes, bikes, switch to ordinary citizens, or drop GLB props cleanly into the city.
                 </p>
               </div>
 
-              <div className="flex items-center gap-1 p-1 bg-zinc-900 rounded-lg border border-zinc-800 self-start">
-                {(['All', 'Office', 'Furniture', 'Courtyard'] as const).map((cat) => (
+              <div className="flex flex-wrap items-center gap-1 p-1 bg-zinc-900 rounded-lg border border-zinc-800 self-start">
+                {(['All', 'Vehicles', 'People', 'Office', 'Furniture', 'Courtyard'] as const).map((cat) => (
                   <button
                     key={cat}
                     onClick={() => setActiveCategory(cat)}
@@ -254,12 +256,21 @@ export const FreeAssetsModal: React.FC<FreeAssetsModalProps> = ({
                           <ExternalLink className="w-3 h-3" />
                         </a>
                       </div>
+                      {entry.notes && (
+                        <div className="text-[11px] text-emerald-300/85">{entry.notes}</div>
+                      )}
                     </div>
 
                     <button
                       onClick={() => void handleSpawnRemote(entry)}
                       disabled={isBusy}
-                      className="px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:opacity-60 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 self-start sm:self-center"
+                      className={`px-4 py-2 rounded-lg disabled:opacity-60 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 self-start sm:self-center ${
+                        entry.spawnAs === 'vehicle'
+                          ? 'bg-emerald-600 hover:bg-emerald-500'
+                          : entry.spawnAs === 'player'
+                          ? 'bg-indigo-600 hover:bg-indigo-500'
+                          : 'bg-cyan-600 hover:bg-cyan-500'
+                      }`}
                     >
                       {isBusy ? (
                         <>
@@ -269,10 +280,22 @@ export const FreeAssetsModal: React.FC<FreeAssetsModalProps> = ({
                       ) : wasSpawned ? (
                         <>
                           <Check className="w-3.5 h-3.5" />
-                          <span>Spawn Again</span>
+                          <span>
+                            {entry.spawnAs === 'vehicle'
+                              ? 'Spawn Another Car'
+                              : entry.spawnAs === 'player'
+                              ? 'Character Equipped'
+                              : 'Spawn Again'}
+                          </span>
                         </>
                       ) : (
-                        <span>Spawn in Front</span>
+                        <span>
+                          {entry.spawnAs === 'vehicle'
+                            ? 'Spawn Driveable Car'
+                            : entry.spawnAs === 'player'
+                            ? 'Play as Character'
+                            : 'Spawn in Front'}
+                        </span>
                       )}
                     </button>
                   </div>

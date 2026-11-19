@@ -6,11 +6,14 @@ import {
   ChevronDown,
   ChevronUp,
   Cpu,
-  Film,
   Gamepad2,
   Layers,
+  Moon,
+  Pause,
+  PhoneCall,
   Play,
-  Upload,
+  ShieldAlert,
+  Sun,
   Zap,
 } from 'lucide-react';
 import { EngineStats } from '../engine/core/Types';
@@ -24,17 +27,15 @@ interface ViewportHUDProps {
   onJumpRequested?: () => void;
   onPunchRequested?: () => void;
   onToggleVehicleEntry?: () => void;
+  onToggleDayNightPause?: () => void;
   isRunning?: boolean;
   onToggleRunning?: () => void;
-  onLoadBVH?: (bvhText: string, name: string) => void;
-  onLoadPlayerGLB?: (buffer: ArrayBuffer, name: string) => void;
-  onSelectAnimation?: (clipName: string) => void;
-  availableAnimations?: string[];
-  activeAnimationName?: string;
-  activePlayerSource?: string;
   activeNpcSource?: string;
   elevatorTargetFloor?: number;
   onSelectElevatorFloor?: (floor: number) => void;
+  onReleaseFromJail?: () => void;
+  onGunShopInteract?: () => void;
+  onFireWeapon?: () => void;
 }
 
 export const ViewportHUD: React.FC<ViewportHUDProps> = ({
@@ -45,23 +46,21 @@ export const ViewportHUD: React.FC<ViewportHUDProps> = ({
   onJumpRequested,
   onPunchRequested,
   onToggleVehicleEntry,
+  onToggleDayNightPause,
   isRunning = false,
   onToggleRunning,
-  onLoadBVH,
-  onLoadPlayerGLB,
-  onSelectAnimation,
-  availableAnimations = [],
-  activeAnimationName = '',
-  activePlayerSource = 'Procedural Humanoid',
   activeNpcSource = 'Procedural Sitting Worker',
   elevatorTargetFloor = 0,
   onSelectElevatorFloor,
+  onReleaseFromJail,
+  onGunShopInteract,
+  onFireWeapon,
 }) => {
+  const totalMins = Math.round((stats.timeOfDayHours ?? 10.5) * 60) % (24 * 60);
+  const hh = String(Math.floor(totalMins / 60)).padStart(2, '0');
+  const mm = String(totalMins % 60).padStart(2, '0');
+  const phase = stats.dayNightPhase ?? 'DAY';
   const [isMinimized, setIsMinimized] = useState(false);
-  const [showBVHMenu, setShowBVHMenu] = useState(false);
-  const [bvhNotification, setBvhNotification] = useState<string | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const glbFileInputRef = useRef<HTMLInputElement>(null);
 
   // Touch joystick tracking (pinned by touch identifier for multi-touch safety)
   const joystickContainerRef = useRef<HTMLDivElement>(null);
@@ -149,40 +148,6 @@ export const ViewportHUD: React.FC<ViewportHUDProps> = ({
     if (onJoystickMove) {
       onJoystickMove(dx / maxRadius, dy / maxRadius);
     }
-  };
-
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const text = event.target?.result as string;
-      if (text && onLoadBVH) {
-        onLoadBVH(text, file.name);
-        setBvhNotification(`Loaded BVH: ${file.name}`);
-        setTimeout(() => setBvhNotification(null), 4000);
-      }
-    };
-    reader.readAsText(file);
-    e.target.value = '';
-  };
-
-  const handleGLBUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const buf = event.target?.result;
-      if (buf instanceof ArrayBuffer && onLoadPlayerGLB) {
-        onLoadPlayerGLB(buf, file.name);
-        setBvhNotification(`Player GLB Loaded: ${file.name}`);
-        setTimeout(() => setBvhNotification(null), 4000);
-      }
-    };
-    reader.readAsArrayBuffer(file);
-    e.target.value = '';
   };
 
   return (
@@ -298,6 +263,58 @@ export const ViewportHUD: React.FC<ViewportHUDProps> = ({
                 </span>
               </div>
 
+              <div className="flex justify-between items-center text-zinc-400 pt-0.5 border-t border-zinc-800/60">
+                <span>Citizens / CCTV</span>
+                <span className="text-zinc-200 font-semibold text-[10px]">
+                  {stats.cityCitizenCount} / {stats.cctvCameraCount}
+                </span>
+              </div>
+
+              <div className="flex justify-between items-center text-zinc-400 pt-0.5 border-t border-zinc-800/60">
+                <span>Police Patrols</span>
+                <span className={`font-semibold text-[10px] ${stats.bigCrimeActive ? 'text-rose-400' : 'text-sky-300'}`}>
+                  {stats.activePatrolCount} / 15 {stats.bigCrimeActive ? '(ALL)' : '(N+S)'}
+                </span>
+              </div>
+
+              <div className="flex justify-between items-center text-zinc-400 pt-0.5 border-t border-zinc-800/60">
+                <span className="flex items-center gap-1">
+                  {phase === 'NIGHT' ? (
+                    <Moon className="w-3 h-3 text-indigo-400" />
+                  ) : (
+                    <Sun className="w-3 h-3 text-amber-400" />
+                  )}
+                  <span>Time</span>
+                </span>
+                <div className="flex items-center gap-1.5">
+                  <span
+                    className={`px-1 rounded text-[9px] font-bold ${
+                      phase === 'NIGHT'
+                        ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30'
+                        : phase === 'SUNSET' || phase === 'DAWN'
+                        ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                        : 'bg-sky-500/15 text-sky-300 border border-sky-500/30'
+                    }`}
+                  >
+                    {hh}:{mm} {phase}
+                  </span>
+                  {onToggleDayNightPause && (
+                    <button
+                      type="button"
+                      onClick={onToggleDayNightPause}
+                      className="p-0.5 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-300"
+                      title={stats.dayNightPaused ? 'Resume Day-Night Cycle' : 'Pause Day-Night Cycle'}
+                    >
+                      {stats.dayNightPaused ? (
+                        <Play className="w-2.5 h-2.5 text-emerald-400" />
+                      ) : (
+                        <Pause className="w-2.5 h-2.5 text-amber-300" />
+                      )}
+                    </button>
+                  )}
+                </div>
+              </div>
+
               <div className="pt-1.5 border-t border-zinc-800/60 flex items-center justify-between">
                 <span className="text-[10px] text-zinc-400 flex items-center gap-1">
                   <CameraIcon className="w-3 h-3 text-cyan-400" /> Cam Mode
@@ -323,124 +340,8 @@ export const ViewportHUD: React.FC<ViewportHUDProps> = ({
         </div>
       </div>
 
-      {/* Top Right: Player GLB, BVH Motion Capture Menu, and 3rd Person Controls */}
+      {/* Top Right: 3rd Person Action Controls (GLB & BVH moved to Editor popup) */}
       <div className="absolute top-2 right-2 z-20 pointer-events-auto flex items-center gap-2 select-none">
-        {/* Direct Player GLB Upload Button */}
-        <button
-          onClick={() => glbFileInputRef.current?.click()}
-          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-mono font-bold transition-all shadow-xl active:scale-95 ${
-            activePlayerSource.startsWith('GLB:')
-              ? 'bg-emerald-500/20 hover:bg-emerald-500/30 border-emerald-400/60 text-emerald-300 backdrop-blur-md'
-              : 'bg-emerald-600 hover:bg-emerald-500 border-emerald-400 text-white shadow-emerald-600/30'
-          }`}
-          title="Load or replace player character (.glb) — or drag & drop .glb onto viewport"
-        >
-          <Upload className="w-3.5 h-3.5" />
-          <span>{activePlayerSource.startsWith('GLB:') ? activePlayerSource : 'LOAD PLAYER .GLB'}</span>
-        </button>
-
-        {/* BVH Motion Capture Dropdown Button */}
-        <div className="relative">
-          <button
-            onClick={() => setShowBVHMenu(!showBVHMenu)}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-mono font-bold transition-all shadow-xl active:scale-95 ${
-              showBVHMenu
-                ? 'bg-cyan-500 text-zinc-950 border-cyan-400 shadow-cyan-500/30'
-                : 'bg-zinc-900/90 hover:bg-zinc-800 border-zinc-700 text-cyan-300 backdrop-blur-md'
-            }`}
-            title="Biovision Hierarchy (BVH) Motion Capture Animations"
-          >
-            <Film className="w-3.5 h-3.5 text-cyan-400" />
-            <span>BVH MOCAP</span>
-            <ChevronDown className={`w-3 h-3 transition-transform ${showBVHMenu ? 'rotate-180' : ''}`} />
-          </button>
-
-          {/* BVH Popup Panel */}
-          {showBVHMenu && (
-            <div className="absolute right-0 mt-2 w-64 bg-zinc-950/95 backdrop-blur-xl border border-zinc-800 rounded-xl shadow-2xl p-3 z-50 text-xs font-mono animate-in fade-in slide-in-from-top-2 duration-150">
-              <div className="flex items-center justify-between pb-2 mb-2 border-b border-zinc-800">
-                <span className="font-bold text-white flex items-center gap-1.5">
-                  <Film className="w-3.5 h-3.5 text-cyan-400" /> BVH Mocap Player
-                </span>
-                <span className="text-[10px] text-zinc-400">Biovision Format</span>
-              </div>
-
-              <div className="space-y-1.5 mb-3">
-                <div className="text-[10px] uppercase tracking-wider text-zinc-400 font-semibold mb-1">
-                  Active Clips on Mesh
-                </div>
-                {availableAnimations.map((animName) => {
-                  const isActive = activeAnimationName === animName;
-                  return (
-                    <button
-                      key={animName}
-                      onClick={() => {
-                        if (onSelectAnimation) onSelectAnimation(animName);
-                      }}
-                      className={`w-full text-left px-2.5 py-1.5 rounded-lg flex items-center justify-between transition-colors ${
-                        isActive
-                          ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 font-bold'
-                          : 'bg-zinc-900/80 hover:bg-zinc-800/90 text-zinc-300 border border-zinc-800/60'
-                      }`}
-                    >
-                      <span className="truncate flex items-center gap-1.5">
-                        <Play className={`w-3 h-3 ${isActive ? 'text-cyan-400 fill-cyan-400' : 'text-zinc-500'}`} />
-                        {animName}
-                      </span>
-                      {animName.includes('Jump') && (
-                        <span className="text-[9px] px-1 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-800/50">
-                          SPACE
-                        </span>
-                      )}
-                      {animName.includes('Punch') && (
-                        <span className="text-[9px] px-1 py-0.5 rounded bg-orange-950 text-orange-300 border border-orange-800/50">
-                          F
-                        </span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-
-              {/* Upload Player GLB & BVH Buttons */}
-              <div className="pt-2 border-t border-zinc-800 space-y-2">
-                <div className="text-[10px] text-zinc-400 truncate">
-                  Active Rig: <span className="text-zinc-200 font-semibold">{activePlayerSource}</span>
-                </div>
-
-                <input
-                  ref={glbFileInputRef}
-                  type="file"
-                  accept=".glb"
-                  onChange={handleGLBUpload}
-                  className="hidden"
-                />
-                <button
-                  onClick={() => glbFileInputRef.current?.click()}
-                  className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-lg shadow-emerald-600/30 transition-all active:scale-95"
-                >
-                  <Upload className="w-3.5 h-3.5" />
-                  <span>Load Player .GLB</span>
-                </button>
-
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept=".bvh"
-                  onChange={handleFileUpload}
-                  className="hidden"
-                />
-                <button
-                  onClick={() => fileInputRef.current?.click()}
-                  className="w-full flex items-center justify-center gap-2 py-1.5 px-3 rounded-lg bg-cyan-600/90 hover:bg-cyan-500 text-white font-bold text-xs shadow transition-all active:scale-95"
-                >
-                  <Upload className="w-3.5 h-3.5" />
-                  <span>Load .BVH Motion</span>
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
 
         {/* Toggle Running HUD Button */}
         <button
@@ -521,6 +422,22 @@ export const ViewportHUD: React.FC<ViewportHUDProps> = ({
           <span className="text-[9px] bg-cyan-900/80 px-1 rounded text-cyan-200">SPACE</span>
         </button>
 
+        {/* Shoot Weapon HUD Button (when Pistol equipped from Downtown Gun Shop) */}
+        {stats.hasWeapon && !stats.isDriving && !stats.isJailed && (
+          <button
+            type="button"
+            onPointerDown={(e) => {
+              e.stopPropagation();
+              if (onFireWeapon) onFireWeapon();
+            }}
+            className="touch-none select-none flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-rose-500/60 bg-rose-950/85 hover:bg-rose-900/85 text-rose-200 text-xs font-mono font-bold transition-all shadow-xl active:scale-95 backdrop-blur-md"
+            title="Fire equipped pistol (Key G)"
+          >
+            <span>SHOOT ({stats.weaponAmmo})</span>
+            <span className="text-[9px] bg-rose-900/90 px-1 rounded text-rose-100">G</span>
+          </button>
+        )}
+
         <div className="hidden md:flex items-center gap-2 bg-zinc-950/85 backdrop-blur-md border border-zinc-800/80 rounded-lg px-3 py-1.5 shadow-2xl text-[11px] font-mono text-zinc-300 pointer-events-none">
           <Gamepad2 className="w-4 h-4 text-emerald-400 shrink-0" />
           <span><strong className="text-white">W:</strong> Forward</span>
@@ -532,11 +449,37 @@ export const ViewportHUD: React.FC<ViewportHUDProps> = ({
           <span><strong className="text-white">SPACE:</strong> Jump</span>
           <span className="text-zinc-600">|</span>
           <span><strong className="text-white">F:</strong> Punch</span>
+          {stats.hasWeapon && (
+            <>
+              <span className="text-zinc-600">|</span>
+              <span><strong className="text-rose-300">G:</strong> Shoot</span>
+            </>
+          )}
         </div>
       </div>
 
-      {/* 3D In-World Vehicle / Elevator Interaction Hint */}
-      {stats.isDriving ? (
+      {/* 3D In-World Jail / Gun Shop / Vehicle / Elevator Interaction Hint */}
+      {stats.isJailed ? (
+        <div className="absolute top-28 left-1/2 -translate-x-1/2 z-40 pointer-events-auto flex flex-col sm:flex-row items-center gap-3 bg-zinc-950/95 border-2 border-rose-500/80 rounded-xl px-4 py-3 shadow-2xl font-mono text-xs backdrop-blur-md max-w-lg w-[92%] sm:w-auto">
+          <ShieldAlert className="w-5 h-5 text-rose-400 animate-pulse shrink-0" />
+          <div className="flex-1 text-center sm:text-left">
+            <div className="font-bold text-rose-300 tracking-wide">ARRESTED · {stats.jailLocationName.toUpperCase()}</div>
+            <div className="text-[11px] text-zinc-300 mt-0.5">
+              Charge: {stats.jailReason || 'Police Arrest'} · Release in{' '}
+              <strong className="text-amber-300">{stats.jailTimeLeft.toFixed(1)}s</strong>
+            </div>
+          </div>
+          {onReleaseFromJail && (
+            <button
+              type="button"
+              onClick={onReleaseFromJail}
+              className="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-bold text-[11px] active:scale-95 transition-all shadow shrink-0"
+            >
+              PAY BAIL / RELEASE
+            </button>
+          )}
+        </div>
+      ) : stats.isDriving ? (
         <div className="absolute bottom-14 left-1/2 -translate-x-1/2 z-20 pointer-events-auto flex items-center gap-3 bg-zinc-950/90 border border-emerald-500/60 rounded-full px-4 py-1.5 shadow-2xl text-xs font-mono text-zinc-100 backdrop-blur-md">
           <Car className="w-4 h-4 text-emerald-400 shrink-0" />
           <span className="font-bold text-emerald-300">{stats.vehicleSpeedKmh} KM/H</span>
@@ -560,6 +503,18 @@ export const ViewportHUD: React.FC<ViewportHUDProps> = ({
             className="px-2 py-0.5 rounded bg-rose-500/25 hover:bg-rose-500/40 border border-rose-400/60 text-rose-200 font-bold text-[11px] active:scale-95 transition-all"
           >
             EXIT CAR [E]
+          </button>
+        </div>
+      ) : stats.gunShopNearby ? (
+        <div className="absolute bottom-14 left-1/2 -translate-x-1/2 z-20 pointer-events-auto flex items-center gap-2.5 bg-zinc-950/92 border border-rose-400/75 rounded-full px-4 py-1.5 shadow-2xl text-xs font-mono text-rose-100 backdrop-blur-md">
+          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+          <span className="font-bold text-rose-300">DOWNTOWN GUN SHOP</span>
+          <button
+            type="button"
+            onClick={() => onGunShopInteract && onGunShopInteract()}
+            className="px-2.5 py-0.5 rounded bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-bold text-[11px] active:scale-95 transition-all shadow"
+          >
+            {stats.hasWeapon ? 'REFILL AMMO [E]' : 'EQUIP PISTOL [E]'}
           </button>
         </div>
       ) : stats.nearbyVehicleName ? (
@@ -592,11 +547,42 @@ export const ViewportHUD: React.FC<ViewportHUDProps> = ({
         </div>
       )}
 
-      {/* Toast Notification for BVH Loading */}
-      {bvhNotification && (
-        <div className="absolute top-14 right-4 z-40 bg-cyan-950/95 border border-cyan-500/70 text-cyan-200 px-3.5 py-2 rounded-lg shadow-2xl font-mono text-xs flex items-center gap-2 backdrop-blur-md animate-in fade-in slide-in-from-top-2">
-          <Film className="w-4 h-4 text-cyan-400" />
-          <span>{bvhNotification}</span>
+      {/* Police Car Blocking Siren Countdown Alert */}
+      {stats.policeSirenWarningActive && !stats.isJailed && (
+        <div className="absolute top-24 left-1/2 -translate-x-1/2 z-30 pointer-events-none flex items-center gap-2.5 bg-zinc-950/95 border-2 border-sky-400 rounded-xl px-4 py-2 shadow-2xl font-mono text-xs backdrop-blur-md animate-pulse">
+          <ShieldAlert className="w-4 h-4 text-rose-400 shrink-0" />
+          <span className="font-bold text-amber-300">
+            POLICE SIREN: STEP ASIDE FROM CRUISER — ARREST IN{' '}
+            <span className="text-rose-400">{stats.policeSirenCountdown.toFixed(1)}s</span>
+          </span>
+        </div>
+      )}
+
+      {/* 911 Police Dispatch & Surveillance Alert Banner */}
+      {stats.policeAlertActive && (
+        <div className="absolute top-14 left-1/2 -translate-x-1/2 z-30 pointer-events-none flex items-center gap-3 bg-zinc-950/92 border border-rose-500/70 rounded-xl px-3.5 py-2 shadow-2xl font-mono text-xs backdrop-blur-md">
+          <div className="flex items-center gap-1.5 text-rose-400 font-bold animate-pulse">
+            <ShieldAlert className="w-4 h-4 text-rose-400" />
+            <span>{stats.bigCrimeActive ? 'BIG CRIME · WANTED' : '911 DISPATCH'}</span>
+          </div>
+          <span className="text-amber-300 font-bold tracking-widest">
+            {'★'.repeat(Math.max(1, Math.min(5, stats.policeWantedLevel)))}
+          </span>
+          {stats.bigCrimeActive && (
+            <span className="px-1.5 py-0.5 rounded bg-rose-600 text-white font-bold text-[10px]">
+              BILLBOARDS ACTIVE
+            </span>
+          )}
+          <span className="text-zinc-600">|</span>
+          <span className="flex items-center gap-1 text-sky-300">
+            <PhoneCall className="w-3.5 h-3.5 text-sky-400" />
+            <span className="truncate max-w-[190px]">{stats.policeCallerInfo || 'Mobile 911 Report'}</span>
+          </span>
+          <span className="text-zinc-600 hidden sm:inline">|</span>
+          <span className="text-rose-200 hidden sm:inline">
+            Units: <strong>{stats.policeDispatchCount}</strong> · ETA{' '}
+            <strong className="text-amber-300">{stats.policeEtaSeconds}s</strong> ({stats.policeNearestDistMeters}m)
+          </span>
         </div>
       )}
 

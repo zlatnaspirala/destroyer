@@ -133,6 +133,29 @@ export interface EngineStats {
   activeVehicleHealth: number;
   nearbyVehicleName: string;
   nearbyVehicleHealth: number;
+  timeOfDayHours: number;
+  dayNightPhase: 'DAWN' | 'DAY' | 'SUNSET' | 'NIGHT';
+  dayNightPaused: boolean;
+  dayNightSpeed: number;
+  policeAlertActive: boolean;
+  policeWantedLevel: number;
+  policeDispatchCount: number;
+  policeNearestDistMeters: number;
+  policeEtaSeconds: number;
+  policeCallerInfo: string;
+  cityCitizenCount: number;
+  cctvCameraCount: number;
+  bigCrimeActive: boolean;
+  policeSirenWarningActive: boolean;
+  policeSirenCountdown: number;
+  isJailed: boolean;
+  jailTimeLeft: number;
+  jailLocationName: string;
+  jailReason: string;
+  hasWeapon: boolean;
+  weaponAmmo: number;
+  gunShopNearby: boolean;
+  activePatrolCount: number;
 }
 
 export interface DriveableVehicle {
