@@ -3,9 +3,12 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "tsx server.ts",
-    "build": "vite build",
+    "build": "vite build && esbuild server.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/server.js",
     "lint": "tsc --noEmit",
     "start": "node dist/server.js"
   },
@@ -30,6 +33,7 @@
     "@types/ws": "^8.5.14",
     "@vitejs/plugin-react": "^4.3.4",
     "@webgpu/types": "^0.1.53",
+    "esbuild": "^0.25.0",
     "tsx": "^4.23.15",
     "typescript": "^5.7.3",
     "vite": "^6.1.0"
