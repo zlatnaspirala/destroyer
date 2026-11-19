@@ -30,7 +30,7 @@
     "@types/ws": "^8.5.14",
     "@vitejs/plugin-react": "^4.3.4",
     "@webgpu/types": "^0.1.53",
-    "tsx": "^4.19.2",
+    "tsx": "^4.23.15",
     "typescript": "^5.7.3",
     "vite": "^6.1.0"
   }
