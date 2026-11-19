@@ -8,9 +8,9 @@
   },
   "scripts": {
     "dev": "tsx server.ts",
-    "build": "vite build && esbuild server.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/server.js",
+    "build": "vite build",
     "lint": "tsc --noEmit",
-    "start": "node dist/server.js"
+    "start": "tsx server.ts"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.0.0",
@@ -23,6 +23,7 @@
     "tailwind-merge": "^3.0.1",
     "tailwindcss": "^4.0.0",
     "three": "^0.187.0",
+    "tsx": "^4.23.15",
     "ws": "^8.18.0"
   },
   "devDependencies": {
@@ -33,8 +34,6 @@
     "@types/ws": "^8.5.14",
     "@vitejs/plugin-react": "^4.3.4",
     "@webgpu/types": "^0.1.53",
-    "esbuild": "^0.25.0",
-    "tsx": "^4.23.15",
     "typescript": "^5.7.3",
     "vite": "^6.1.0"
   }
