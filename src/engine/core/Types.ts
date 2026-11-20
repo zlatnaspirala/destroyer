@@ -152,6 +152,14 @@ export interface EngineStats {
   jailTimeLeft: number;
   jailLocationName: string;
   jailReason: string;
+  custodyStage: 'NONE' | 'SLOWED' | 'ESCORT_TO_CAR' | 'DRIVING_TO_STATION' | 'WALKING_TO_CELL' | 'JAILED' | 'RELEASE_PAPER';
+  custodyDistLeft: number;
+  offenseCount: number;
+  firstHooliganEligible: boolean;
+  socialWorkActive: boolean;
+  socialWorkCollected: number;
+  socialWorkRequired: number;
+  garbageNearby: boolean;
   hasWeapon: boolean;
   weaponAmmo: number;
   gunShopNearby: boolean;

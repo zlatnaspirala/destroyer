@@ -113,6 +113,14 @@ export class DestroyerEngine {
     weaponAmmo: 0,
     gunShopNearby: false,
     activePatrolCount: 2,
+    custodyStage: 'NONE',
+    custodyDistLeft: 0,
+    offenseCount: 0,
+    firstHooliganEligible: false,
+    socialWorkActive: false,
+    socialWorkCollected: 0,
+    socialWorkRequired: 5,
+    garbageNearby: false,
   };
 
   private currentCanvas: HTMLCanvasElement | null = null;
@@ -146,13 +154,14 @@ export class DestroyerEngine {
   private npcBasePos: [number, number, number] = [-2.5, 0.45, 16.82];
   public activeNpcSourceLabel = 'Procedural Sitting Worker';
 
-  // Scaled & Colored Remy Street Citizens + 6 Police Officers + 15 Police Cars + 18 CCTV Cameras (zero alloc)
+  // Scaled & Colored Remy Street Citizens + Police Officers + 15 Police Cars + 18 CCTV Cameras (zero alloc)
   private citizenJointOffset = 0;
   private citizenJointCount = 0;
   private citizenHasSkinning = false;
-  private citizenTrackCount = 5; // 0:WalkA, 1:WalkB, 2:WalkFast, 3:PhoneCall, 4:PoliceWalk
+  private citizenTrackCount = 6; // 0:WalkA, 1:WalkB, 2:WalkFast, 3:PhoneCall, 4:PoliceWalk, 5:PolicePunch
   private citizenWalkClipName: string | null = null;
   private citizenPhoneClipName: string | null = null;
+  private citizenPunchClipName: string | null = null;
   private citizenSimTime = 0;
   private citizenAgents: {
     id: string;
@@ -192,8 +201,16 @@ export class DestroyerEngine {
     scaleXZ: number;
     scaleY: number;
     trackOffset: number;
+    punchTrackOffset: number;
+    usingPunchTrack: boolean;
     stumbleTimer: number;
     kickCooldown: number;
+    firstPunchLanded: boolean;
+    cuffWindupTimer: number;
+    punchAnimTimer: number;
+    isCruiserUnit: boolean;
+    activeInScene: boolean;
+    assignedCarIdx: number;
     punchTarget: import('./physics/JoltPhysics').NPCPunchTarget;
   }[] = [];
   private policeCarAgents: {
@@ -212,6 +229,7 @@ export class DestroyerEngine {
     evadeSign: number;
     ramCooldown: number;
     dispatched: boolean;
+    deployedThisAlert: boolean;
     sector: 'NORTH' | 'SOUTH';
     alwaysPatrol: boolean;
     homeX: number;
@@ -233,7 +251,7 @@ export class DestroyerEngine {
     alertCooldown: number;
   }[] = [];
 
-  // Police Dispatch, Arrest, Jail, Billboards & Gun Shop Weapon State
+  // Police Dispatch, Continuous Visual Arrest, Police Station Jail (2:00), Obligations & Periphery Garbage
   private policeAlertActive = false;
   private policeAlertTimer = 0;
   private policeWantedLevel = 0;
@@ -249,9 +267,7 @@ export class DestroyerEngine {
   private jailTimeLeft = 0;
   private jailLocationName = '';
   private jailReason = '';
-  private jailReleasePos: [number, number, number] = [-11.0, 0.0, 91.5];
-  private policeJailCellPos: [number, number, number] = [-18.0, 0.14, 77.2];
-  private maxPrisonCellPos: [number, number, number] = [-32.0, 0.18, -221.5];
+  private policeJailCellPos: [number, number, number] = [-17.6, 0.14, 77.2];
   private gunShopCounterPos: [number, number, number] = [44.0, 0.12, 52.4];
   private hasWeapon = false;
   private weaponAmmo = 0;
@@ -264,6 +280,42 @@ export class DestroyerEngine {
   private billboardWantedMatId = 0;
   private audioCtx: AudioContext | null = null;
   private sirenAudioCooldown = 0;
+
+  private custodyStage: EngineStats['custodyStage'] = 'NONE';
+  public custodyCameraTarget: [number, number, number] = [0, 1.4, 25.0];
+  private custodyCarIdx = -1;
+  private custodyOfficerIdx = -1;
+  private custodyEscortTimer = 0;
+  private custodyCarDoorX = 0;
+  private custodyCarDoorZ = 0;
+  private custodyDriveWaypointsX = new Float64Array(8);
+  private custodyDriveWaypointsZ = new Float64Array(8);
+  private custodyDriveWaypointCount = 0;
+  private custodyDriveWaypointIdx = 0;
+  private custodyDriveStuckTimer = 0;
+  private custodyWalkWaypointsX = new Float64Array(6);
+  private custodyWalkWaypointsZ = new Float64Array(6);
+  private custodyWalkWaypointCount = 0;
+  private custodyWalkWaypointIdx = 0;
+  private custodyDistLeft = 0;
+  private offenseCount = 0;
+  private firstHooliganEligible = false;
+  private socialWorkActive = false;
+  private socialWorkCollected = 0;
+  private readonly socialWorkRequired = 5;
+  private garbageNearby = false;
+  private nearestGarbageIdx = -1;
+  private garbageItems: {
+    id: string;
+    name: string;
+    entityId: number;
+    x: number;
+    y: number;
+    z: number;
+    collected: boolean;
+  }[] = [];
+  private policeJailGateEntityId = -1;
+  private policeJailGateOpenFactor = 1.0;
 
   // Zero-alloc scratch helpers for citizens, police officers, CCTV & dispatch
   private tempCitizenMat = Mat4.create();
@@ -586,6 +638,10 @@ export class DestroyerEngine {
         }
       }
 
+      // Continuous custody sequence (Escort to cruiser -> Live street transport -> Walk into real cell -> 2:00 sentence -> Paper)
+      this.citizenSimTime += deltaSec;
+      this.updateCustodySequence(deltaSec);
+
       // Camera update
       this.camera.update(deltaSec);
 
@@ -593,7 +649,7 @@ export class DestroyerEngine {
       this.playerController.update(deltaSec);
 
       // Vertex animation update (skipped when inside a car to save CPU skinning work)
-      if (this.playerController.activeVehicleIndex >= 0) {
+      if (this.playerController.activeVehicleIndex >= 0 || this.custodyStage === 'DRIVING_TO_STATION') {
         // Player character hidden inside vehicle
       } else if (this.userLockedClip) {
         this.animController.update(deltaSec);
@@ -692,8 +748,7 @@ export class DestroyerEngine {
         }
       }
 
-      // Scaled & Colored Remy Citizens + Mobile Phones + 6 Police Officers + 15 Police Patrol Cars + 18 CCTV Cameras (zero alloc)
-      this.citizenSimTime += deltaSec;
+      // Scaled & Colored Remy Citizens + Mobile Phones + Police Officers + 15 Police Cars + 18 CCTV Cameras (zero alloc)
       this.updateCitizensPoliceAndCCTV(deltaSec, currentTime * 0.001);
 
       // Update Smart Floor/Interior Culling before uploading entity flags to GPU
@@ -768,6 +823,14 @@ export class DestroyerEngine {
       this.stats.weaponAmmo = this.weaponAmmo;
       this.stats.gunShopNearby = this.gunShopNearby;
       this.stats.activePatrolCount = this.activePatrolCount;
+      this.stats.custodyStage = this.custodyStage;
+      this.stats.custodyDistLeft = Math.max(0, Math.round(this.custodyDistLeft));
+      this.stats.offenseCount = this.offenseCount;
+      this.stats.firstHooliganEligible = this.firstHooliganEligible;
+      this.stats.socialWorkActive = this.socialWorkActive;
+      this.stats.socialWorkCollected = this.socialWorkCollected;
+      this.stats.socialWorkRequired = this.socialWorkRequired;
+      this.stats.garbageNearby = this.garbageNearby;
     } catch (err) {
       console.warn('Loop frame error:', err);
     }
@@ -1556,8 +1619,41 @@ export class DestroyerEngine {
     this.onBigCrimeCommitted(pos[0], pos[1], pos[2], hitPoliceCar ? 'Gunfire at Police Cruiser' : 'Downtown Gunshots');
   }
 
+  public isCustodyLocked(): boolean {
+    return (
+      this.custodyStage === 'ESCORT_TO_CAR' ||
+      this.custodyStage === 'DRIVING_TO_STATION' ||
+      this.custodyStage === 'WALKING_TO_CELL'
+    );
+  }
+
+  public isCustodyPlayerVisible(): boolean {
+    return this.custodyStage === 'ESCORT_TO_CAR' || this.custodyStage === 'WALKING_TO_CELL';
+  }
+
+  public isCustodyDrivingStage(): boolean {
+    return this.custodyStage === 'DRIVING_TO_STATION';
+  }
+
   public onPoliceCarPunched(): void {
-    this.arrestPlayer('Punched Police Cruiser', false);
+    if (this.isCustodyLocked() || this.isJailed || this.custodyStage === 'RELEASE_PAPER') return;
+    const p = this.playerController.position;
+    let bestCarIdx = -1;
+    let bestDist = Infinity;
+    for (let i = 0; i < this.policeCarAgents.length; i++) {
+      const pa = this.policeCarAgents[i];
+      if (pa.vehicle.health <= 0 || pa.vehicleIndex === this.playerController.activeVehicleIndex) continue;
+      const d = Math.hypot(pa.vehicle.position[0] - p[0], pa.vehicle.position[2] - p[2]);
+      if (d < bestDist) {
+        bestDist = d;
+        bestCarIdx = i;
+      }
+    }
+    this.onCrimeReported(p[0], p[1], p[2], 'Punched Police Cruiser');
+    if (bestCarIdx >= 0 && bestDist <= 12.0) {
+      this.policeCarAgents[bestCarIdx].deployedThisAlert = true;
+      this.deployOfficersFromCruiser(bestCarIdx, 1);
+    }
   }
 
   public onBigCrimeCommitted(cx: number, cy: number, cz: number, callerLabel: string): void {
@@ -1567,36 +1663,136 @@ export class DestroyerEngine {
     this.onCrimeReported(cx, cy, cz, callerLabel);
   }
 
-  public arrestPlayer(reason: string, isBigCrimeArrest = false): void {
-    if (this.isJailed) return;
+  private deployOfficersFromCruiser(carIdx: number, count: number): void {
+    if (carIdx < 0 || carIdx >= this.policeCarAgents.length) return;
+    const pa = this.policeCarAgents[carIdx];
+    const car = pa.vehicle;
+    car.speed = 0;
+    car.velX = 0;
+    car.velZ = 0;
+
+    const sinR = Math.sin(car.rotationY);
+    const cosR = Math.cos(car.rotationY);
+    let deployed = 0;
+    for (let i = 0; i < this.policeOfficers.length && deployed < count; i++) {
+      const off = this.policeOfficers[i];
+      if (!off.isCruiserUnit || off.activeInScene) continue;
+
+      const sideSign = deployed === 0 ? -1.45 : 1.45;
+      const rawX = car.position[0] + cosR * sideSign + sinR * 0.25;
+      const rawZ = car.position[2] - sinR * sideSign + cosR * 0.25;
+      this.scratchAgentPos[0] = rawX;
+      this.scratchAgentPos[1] = 0;
+      this.scratchAgentPos[2] = rawZ;
+      this.scratchAgentDisp[0] = cosR * sideSign * 0.2;
+      this.scratchAgentDisp[1] = 0;
+      this.scratchAgentDisp[2] = -sinR * sideSign * 0.2;
+      const res = this.physics.updateCharacterPhysics(this.scratchAgentPos, this.scratchAgentDisp, 0.4, 1.8);
+
+      off.x = res.newPos[0];
+      off.y = Math.max(0, res.newPos[1]);
+      off.z = res.newPos[2];
+      off.rotY = Math.atan2(this.playerController.position[0] - off.x, this.playerController.position[2] - off.z);
+      off.firstPunchLanded = false;
+      off.cuffWindupTimer = 0;
+      off.punchAnimTimer = 0;
+      off.stumbleTimer = 0;
+      off.kickCooldown = 0;
+      off.activeInScene = true;
+      off.assignedCarIdx = carIdx;
+
+      for (let p = 0; p < off.entityIds.length; p++) {
+        this.entityManager.setEntityVisible(off.entityIds[p], true);
+      }
+      const halfY = off.rotY * 0.5;
+      Mat4.fromTRSValues(
+        off.x, off.y, off.z,
+        0, Math.sin(halfY), 0, Math.cos(halfY),
+        off.scaleXZ, off.scaleY, off.scaleXZ,
+        this.tempCitizenMat
+      );
+      for (let p = 0; p < off.entityIds.length; p++) {
+        this.entityManager.updateEntityMatrixXYZ(off.entityIds[p], this.tempCitizenMat, off.x, off.y + 0.95, off.z, 1.9);
+      }
+      deployed++;
+    }
+  }
+
+  private planPoliceDriveRoute(startX: number, startZ: number): void {
+    // Clean City 0 street centerlines (zero building/prop collision path to Police Station curb [-11, 94.5])
+    const avenues = [-104, -34, 34, 104, 174];
+    const streets = [-160, -96, -32, 30, 96, 160, 224];
+
+    let bestAveZ = 34;
+    let bestAveDist = Infinity;
+    for (let i = 0; i < avenues.length; i++) {
+      const d = Math.abs(startZ - avenues[i]);
+      if (d < bestAveDist) {
+        bestAveDist = d;
+        bestAveZ = avenues[i];
+      }
+    }
+
+    let bestStX = -32;
+    let bestStDist = Infinity;
+    for (let i = 0; i < streets.length; i++) {
+      const d = Math.abs(startX - streets[i]);
+      if (d < bestStDist) {
+        bestStDist = d;
+        bestStX = streets[i];
+      }
+    }
+
+    let count = 0;
+    const pushWp = (wx: number, wz: number) => {
+      if (count >= 8) return;
+      if (count > 0 && Math.hypot(wx - this.custodyDriveWaypointsX[count - 1], wz - this.custodyDriveWaypointsZ[count - 1]) < 3.0) {
+        return;
+      }
+      this.custodyDriveWaypointsX[count] = wx;
+      this.custodyDriveWaypointsZ[count] = wz;
+      count++;
+    };
+
+    // If very close to South Boulevard near Police Station, merge directly onto South_Blvd -> Curb
+    if (Math.abs(startZ - 104) < 16 && startX >= -46 && startX <= 42) {
+      pushWp(startX, 104.0);
+      pushWp(-11.0, 104.0);
+      pushWp(-11.0, 94.5);
+    } else if (bestAveDist <= bestStDist) {
+      // Snap out onto nearest EW Avenue -> drive to Civic Street (-32) -> South Blvd (104) -> Police Station Curb (-11, 94.5)
+      pushWp(startX, bestAveZ);
+      pushWp(-32.0, bestAveZ);
+      pushWp(-32.0, 104.0);
+      pushWp(-11.0, 104.0);
+      pushWp(-11.0, 94.5);
+    } else {
+      // Snap out onto nearest NS Street -> drive to South Blvd (104) -> Police Station Curb (-11, 94.5)
+      pushWp(bestStX, startZ);
+      pushWp(bestStX, 104.0);
+      pushWp(-11.0, 104.0);
+      pushWp(-11.0, 94.5);
+    }
+
+    this.custodyDriveWaypointCount = count;
+    this.custodyDriveWaypointIdx = 0;
+    this.custodyDriveStuckTimer = 0;
+  }
+
+  public startVisualArrestSequence(reason: string, officerIdx: number): void {
+    if (this.isCustodyLocked() || this.isJailed || this.custodyStage === 'RELEASE_PAPER') return;
+
     if (this.playerController.activeVehicleIndex >= 0) {
       this.playerController.activeVehicleIndex = -1;
       this.setPlayerEntitiesVisible(true);
     }
 
-    const useMaxPrison = isBigCrimeArrest || this.bigCrimeActive || this.policeWantedLevel >= 3;
-    const targetCell = useMaxPrison ? this.maxPrisonCellPos : this.policeJailCellPos;
+    this.offenseCount += 1;
+    // Note: Central Max Security Prison is NOT used right now; always jail in Police Station Prison (2 min).
+    this.firstHooliganEligible = this.offenseCount === 1 && !this.bigCrimeActive;
 
-    if (useMaxPrison) {
-      this.physics.setColliderTrigger('MaxPrison_JailGate', false);
-      this.physics.setColliderTrigger('City0_PoliceStation_JailGate', true);
-      this.jailReleasePos[0] = -32.0;
-      this.jailReleasePos[1] = 0.0;
-      this.jailReleasePos[2] = -196.0;
-      this.jailLocationName = 'Maximum Security Prison';
-      this.jailTimeLeft = 12.0;
-    } else {
-      this.physics.setColliderTrigger('City0_PoliceStation_JailGate', false);
-      this.physics.setColliderTrigger('MaxPrison_JailGate', true);
-      this.jailReleasePos[0] = -11.0;
-      this.jailReleasePos[1] = 0.0;
-      this.jailReleasePos[2] = 91.5;
-      this.jailLocationName = 'City 0 Police Station Jail';
-      this.jailTimeLeft = 8.0;
-    }
-
-    this.isJailed = true;
     this.jailReason = reason;
+    this.jailLocationName = 'City 0 Police Station Prison';
     this.policeAlertActive = false;
     this.policeAlertTimer = 0;
     this.bigCrimeActive = false;
@@ -1608,18 +1804,46 @@ export class DestroyerEngine {
     this.policeSirenWarningActive = false;
     this.policeSirenCountdown = 0;
     this.setBillboardWantedMode(false);
-
+    this.hasWeapon = false;
+    this.weaponAmmo = 0;
     if (this.pistolEntityId >= 0) {
       this.entityManager.setEntityVisible(this.pistolEntityId, false);
     }
 
-    // Clear active pursuits and return reserve police cars to parked posts
+    // Select a police cruiser to escort into (prefer officer's cruiser or nearest non-wrecked cruiser)
+    const pPos = this.playerController.position;
+    let chosenCarIdx = -1;
+    if (officerIdx >= 0 && officerIdx < this.policeOfficers.length) {
+      const candIdx = this.policeOfficers[officerIdx].assignedCarIdx;
+      if (candIdx >= 0 && candIdx < this.policeCarAgents.length && this.policeCarAgents[candIdx].vehicle.health > 0) {
+        chosenCarIdx = candIdx;
+      }
+    }
+    if (chosenCarIdx < 0) {
+      let bestDist = Infinity;
+      for (let i = 0; i < this.policeCarAgents.length; i++) {
+        const pa = this.policeCarAgents[i];
+        if (pa.vehicle.health <= 0 || pa.vehicleIndex === this.playerController.activeVehicleIndex) continue;
+        const d = Math.hypot(pa.vehicle.position[0] - pPos[0], pa.vehicle.position[2] - pPos[2]);
+        if (d < bestDist) {
+          bestDist = d;
+          chosenCarIdx = i;
+        }
+      }
+    }
+    if (chosenCarIdx < 0 && this.policeCarAgents.length > 0) {
+      chosenCarIdx = 0;
+      this.policeCarAgents[0].vehicle.health = 100;
+    }
+
+    // Disengage other units and return idle reserve units cleanly
     for (let i = 0; i < this.policeCarAgents.length; i++) {
       const pa = this.policeCarAgents[i];
       pa.dispatched = false;
+      pa.deployedThisAlert = false;
       pa.blockedTimer = 0;
       pa.evadeTimer = 0;
-      if (!pa.alwaysPatrol && pa.vehicle.health > 0) {
+      if (i !== chosenCarIdx && !pa.alwaysPatrol && pa.vehicle.health > 0) {
         pa.vehicle.position[0] = pa.homeX;
         pa.vehicle.position[1] = pa.homeY;
         pa.vehicle.position[2] = pa.homeZ;
@@ -1634,46 +1858,441 @@ export class DestroyerEngine {
       }
     }
 
-    this.playerController.position[0] = targetCell[0];
-    this.playerController.position[1] = targetCell[1];
-    this.playerController.position[2] = targetCell[2];
+    for (let i = 0; i < this.policeOfficers.length; i++) {
+      const off = this.policeOfficers[i];
+      off.firstPunchLanded = false;
+      off.cuffWindupTimer = 0;
+      off.punchAnimTimer = 0;
+      if (i !== officerIdx && off.isCruiserUnit) {
+        off.activeInScene = false;
+        off.x = 0;
+        off.y = -50;
+        off.z = 0;
+        off.punchTarget.position[1] = -50;
+        for (let p = 0; p < off.entityIds.length; p++) {
+          this.entityManager.setEntityVisible(off.entityIds[p], false);
+        }
+      }
+    }
+
+    this.custodyCarIdx = chosenCarIdx;
+    this.custodyOfficerIdx = officerIdx >= 0 ? officerIdx : 0;
+    this.custodyEscortTimer = 0;
+
+    if (chosenCarIdx >= 0) {
+      const pa = this.policeCarAgents[chosenCarIdx];
+      const car = pa.vehicle;
+      car.speed = 0;
+      const sinR = Math.sin(car.rotationY);
+      const cosR = Math.cos(car.rotationY);
+      this.custodyCarDoorX = car.position[0] - cosR * 1.55 - sinR * 0.55;
+      this.custodyCarDoorZ = car.position[2] + sinR * 1.55 - cosR * 0.55;
+      this.custodyDistLeft = Math.hypot(this.custodyCarDoorX - pPos[0], this.custodyCarDoorZ - pPos[2]);
+    } else {
+      this.custodyCarDoorX = pPos[0];
+      this.custodyCarDoorZ = pPos[2];
+      this.custodyDistLeft = 0;
+    }
+
     this.playerController.velocityY = 0;
     this.playerController.currentSpeed = 0;
-    this.playerController.isGrounded = true;
+    this.playerController.isPunching = false;
     this.playerController.knockbackVelX = 0;
     this.playerController.knockbackVelZ = 0;
+    this.playerController.isMoving = true;
+    this.playerController.isRunning = false;
+    this.custodyCameraTarget[0] = pPos[0];
+    this.custodyCameraTarget[1] = pPos[1] + 1.35;
+    this.custodyCameraTarget[2] = pPos[2];
+    this.custodyStage = 'ESCORT_TO_CAR';
+  }
 
-    this.camera.target[0] = targetCell[0];
-    this.camera.target[1] = targetCell[1] + 1.4;
-    this.camera.target[2] = targetCell[2];
-    this.camera.updatePositionFromSpherical();
+  private enterPoliceStationCell(): void {
+    this.physics.setColliderTrigger('City0_PoliceStation_JailGate', false);
+    this.physics.setColliderTrigger('MaxPrison_JailGate', true);
+
+    this.isJailed = true;
+    this.jailTimeLeft = 120.0; // Always 2:00 minutes inside Police Station Prison
+    this.jailLocationName = 'City 0 Police Station Prison';
+    this.custodyStage = 'JAILED';
+    this.custodyDistLeft = 0;
+
+    this.playerController.isMoving = false;
+    this.playerController.isRunning = false;
+    this.playerController.velocityY = 0;
+    this.playerController.currentSpeed = 0;
+
+    // Step arresting officer out of cell doorway cleanly (station guard remains outside or returns to cruiser pool)
+    if (this.custodyOfficerIdx >= 0 && this.custodyOfficerIdx < this.policeOfficers.length) {
+      const off = this.policeOfficers[this.custodyOfficerIdx];
+      if (off.isCruiserUnit) {
+        off.activeInScene = false;
+        off.x = 0;
+        off.y = -50;
+        off.z = 0;
+        off.punchTarget.position[1] = -50;
+        for (let p = 0; p < off.entityIds.length; p++) {
+          this.entityManager.setEntityVisible(off.entityIds[p], false);
+        }
+      } else {
+        off.x = off.homeX;
+        off.y = 0;
+        off.z = off.homeZ;
+      }
+    }
+    this.custodyOfficerIdx = -1;
+    this.custodyCarIdx = -1;
+  }
+
+  public requestFirstHooliganDirectRelease(): void {
+    if (this.custodyStage !== 'JAILED' || !this.firstHooliganEligible) return;
+    this.isJailed = false;
+    this.jailTimeLeft = 0;
+    this.custodyStage = 'RELEASE_PAPER';
+  }
+
+  public signReleasePaperAndExit(): void {
+    if (this.custodyStage !== 'RELEASE_PAPER') return;
+    this.isJailed = false;
+    this.jailTimeLeft = 0;
+    this.custodyStage = 'NONE';
+    this.firstHooliganEligible = false;
+    this.jailReason = '';
+    // Unlock and slide open the cell gate so the player physically walks out — never teleport!
+    this.physics.setColliderTrigger('City0_PoliceStation_JailGate', true);
+    this.physics.setColliderTrigger('MaxPrison_JailGate', true);
+    // Assign real-world community service obligation to pick up periphery garbage
+    if (!this.socialWorkActive) {
+      this.socialWorkActive = true;
+      this.socialWorkCollected = 0;
+    }
   }
 
   public releaseFromJail(): void {
-    if (!this.isJailed) return;
-    this.isJailed = false;
-    this.jailTimeLeft = 0;
-    this.jailReason = '';
-    this.physics.setColliderTrigger('City0_PoliceStation_JailGate', true);
-    this.physics.setColliderTrigger('MaxPrison_JailGate', true);
+    if (this.custodyStage === 'JAILED') {
+      if (this.firstHooliganEligible || this.jailTimeLeft <= 0) {
+        this.isJailed = false;
+        this.jailTimeLeft = 0;
+        this.custodyStage = 'RELEASE_PAPER';
+      }
+    } else if (this.custodyStage === 'RELEASE_PAPER') {
+      this.signReleasePaperAndExit();
+    }
+  }
 
-    this.playerController.position[0] = this.jailReleasePos[0];
-    this.playerController.position[1] = this.jailReleasePos[1];
-    this.playerController.position[2] = this.jailReleasePos[2];
-    this.playerController.velocityY = 0;
-    this.playerController.currentSpeed = 0;
-    this.playerController.isGrounded = true;
-    this.playerController.knockbackVelX = 0;
-    this.playerController.knockbackVelZ = 0;
+  public tryPickUpGarbage(): boolean {
+    if (this.isCustodyLocked() || this.isJailed || this.custodyStage === 'RELEASE_PAPER') return false;
+    if (this.playerController.activeVehicleIndex >= 0) return false;
+    if (this.nearestGarbageIdx < 0 || this.nearestGarbageIdx >= this.garbageItems.length) return false;
+    const item = this.garbageItems[this.nearestGarbageIdx];
+    if (item.collected) return false;
+    const p = this.playerController.position;
+    if (Math.hypot(item.x - p[0], item.z - p[2]) > 3.2) return false;
 
-    if (this.pistolEntityId >= 0) {
-      this.entityManager.setEntityVisible(this.pistolEntityId, this.hasWeapon);
+    item.collected = true;
+    if (item.entityId >= 0) {
+      this.entityManager.setEntityVisible(item.entityId, false);
+    }
+    this.garbageNearby = false;
+    this.nearestGarbageIdx = -1;
+    if (this.socialWorkActive) {
+      this.socialWorkCollected = Math.min(this.socialWorkRequired, this.socialWorkCollected + 1);
+      if (this.socialWorkCollected >= this.socialWorkRequired) {
+        this.socialWorkActive = false;
+      }
+    }
+    return true;
+  }
+
+  private updateCustodySequence(deltaSec: number): void {
+    const dt = Math.min(deltaSec, 0.05);
+
+    // Smoothly slide Police Station cell gate open (factor=1) or locked closed (factor=0)
+    const gateShouldOpen =
+      this.custodyStage === 'WALKING_TO_CELL' ||
+      (this.custodyStage !== 'JAILED' && this.custodyStage !== 'RELEASE_PAPER');
+    const targetOpen = gateShouldOpen ? 1.0 : 0.0;
+    if (Math.abs(this.policeJailGateOpenFactor - targetOpen) > 0.002) {
+      const rate = 2.8 * dt;
+      if (this.policeJailGateOpenFactor < targetOpen) {
+        this.policeJailGateOpenFactor = Math.min(targetOpen, this.policeJailGateOpenFactor + rate);
+      } else {
+        this.policeJailGateOpenFactor = Math.max(targetOpen, this.policeJailGateOpenFactor - rate);
+      }
+      if (this.policeJailGateEntityId >= 0) {
+        const gx = -11.0 - 2.15 * this.policeJailGateOpenFactor;
+        Mat4.fromTranslationXYZ(gx, 0, 82, this.tempDynamicMat);
+        this.entityManager.updateEntityMatrixXYZ(this.policeJailGateEntityId, this.tempDynamicMat, gx - 6.85, 1.8, 79.8, 3.5);
+      }
     }
 
-    this.camera.target[0] = this.jailReleasePos[0];
-    this.camera.target[1] = this.jailReleasePos[1] + 1.4;
-    this.camera.target[2] = this.jailReleasePos[2];
-    this.camera.updatePositionFromSpherical();
+    const pPos = this.playerController.position;
+
+    if (this.custodyStage === 'ESCORT_TO_CAR') {
+      this.custodyEscortTimer += dt;
+      const pa = this.custodyCarIdx >= 0 && this.custodyCarIdx < this.policeCarAgents.length
+        ? this.policeCarAgents[this.custodyCarIdx]
+        : null;
+      if (pa) {
+        pa.vehicle.speed = 0;
+      }
+
+      const dx = this.custodyCarDoorX - pPos[0];
+      const dz = this.custodyCarDoorZ - pPos[2];
+      const dist = Math.hypot(dx, dz);
+      this.custodyDistLeft = dist;
+
+      if (dist <= 0.85 || this.custodyEscortTimer >= 14.0 || !pa) {
+        if (pa) {
+          this.planPoliceDriveRoute(pa.vehicle.position[0], pa.vehicle.position[2]);
+          pPos[0] = pa.vehicle.position[0];
+          pPos[1] = pa.vehicle.position[1];
+          pPos[2] = pa.vehicle.position[2];
+          this.custodyCameraTarget[0] = pa.vehicle.position[0];
+          this.custodyCameraTarget[1] = pa.vehicle.position[1] + 1.5;
+          this.custodyCameraTarget[2] = pa.vehicle.position[2];
+        } else {
+          this.planPoliceDriveRoute(pPos[0], pPos[2]);
+        }
+
+        this.setPlayerEntitiesVisible(false);
+        if (this.custodyOfficerIdx >= 0 && this.custodyOfficerIdx < this.policeOfficers.length) {
+          const off = this.policeOfficers[this.custodyOfficerIdx];
+          off.activeInScene = false;
+          off.y = -50;
+          off.punchTarget.position[1] = -50;
+          for (let p = 0; p < off.entityIds.length; p++) {
+            this.entityManager.setEntityVisible(off.entityIds[p], false);
+          }
+        }
+        this.playerController.isMoving = false;
+        this.custodyStage = 'DRIVING_TO_STATION';
+        return;
+      }
+
+      const escortSpeed = 4.6;
+      const step = Math.min(dist, escortSpeed * dt);
+      const nx = dx / Math.max(0.001, dist);
+      const nz = dz / Math.max(0.001, dist);
+      this.scratchAgentPos[0] = pPos[0];
+      this.scratchAgentPos[1] = pPos[1];
+      this.scratchAgentPos[2] = pPos[2];
+      this.scratchAgentDisp[0] = nx * step;
+      this.scratchAgentDisp[1] = 0;
+      this.scratchAgentDisp[2] = nz * step;
+      const res = this.physics.updateCharacterPhysics(this.scratchAgentPos, this.scratchAgentDisp, 0.4, 1.8);
+      pPos[0] = res.newPos[0];
+      pPos[1] = res.newPos[1];
+      pPos[2] = res.newPos[2];
+      this.playerController.rotationY = Math.atan2(nx, nz);
+      this.playerController.isMoving = true;
+      this.playerController.isRunning = false;
+
+      if (this.custodyOfficerIdx >= 0 && this.custodyOfficerIdx < this.policeOfficers.length) {
+        const off = this.policeOfficers[this.custodyOfficerIdx];
+        off.activeInScene = true;
+        off.x = pPos[0] - nx * 0.85 + nz * 0.45;
+        off.y = Math.max(0, pPos[1]);
+        off.z = pPos[2] - nz * 0.85 - nx * 0.45;
+        off.rotY = this.playerController.rotationY;
+      }
+
+      this.custodyCameraTarget[0] = pPos[0];
+      this.custodyCameraTarget[1] = pPos[1] + 1.35;
+      this.custodyCameraTarget[2] = pPos[2];
+      return;
+    }
+
+    if (this.custodyStage === 'DRIVING_TO_STATION') {
+      const pa = this.custodyCarIdx >= 0 && this.custodyCarIdx < this.policeCarAgents.length
+        ? this.policeCarAgents[this.custodyCarIdx]
+        : null;
+      if (!pa || this.custodyDriveWaypointIdx >= this.custodyDriveWaypointCount) {
+        // Arrived at Police Station front curb [-11.0, 94.5] -> exit cruiser and walk inside into holding cell
+        if (pa) {
+          pa.vehicle.speed = 0;
+          pa.vehicle.rotationY = Math.PI;
+          this.physics.updateVehicleCollider(pa.vehicle.colliderId, pa.vehicle.position[0], pa.vehicle.position[1], pa.vehicle.position[2], pa.vehicle.rotationY);
+        }
+        pPos[0] = -12.4;
+        pPos[1] = 0.02;
+        pPos[2] = 93.2;
+        this.playerController.rotationY = Math.PI;
+        this.playerController.isMoving = true;
+        this.playerController.isRunning = false;
+        this.setPlayerEntitiesVisible(true);
+
+        if (this.custodyOfficerIdx >= 0 && this.custodyOfficerIdx < this.policeOfficers.length) {
+          const off = this.policeOfficers[this.custodyOfficerIdx];
+          off.activeInScene = true;
+          off.x = -10.1;
+          off.y = 0.02;
+          off.z = 93.2;
+          off.rotY = Math.PI;
+          for (let p = 0; p < off.entityIds.length; p++) {
+            this.entityManager.setEntityVisible(off.entityIds[p], true);
+          }
+        }
+
+        // Open Police Station Jail Gate ahead of walk-in
+        this.physics.setColliderTrigger('City0_PoliceStation_JailGate', true);
+        this.policeJailGateOpenFactor = 1.0;
+        if (this.policeJailGateEntityId >= 0) {
+          const gx = -11.0 - 2.15;
+          Mat4.fromTranslationXYZ(gx, 0, 82, this.tempDynamicMat);
+          this.entityManager.updateEntityMatrixXYZ(this.policeJailGateEntityId, this.tempDynamicMat, gx - 6.85, 1.8, 79.8, 3.5);
+        }
+
+        this.custodyWalkWaypointsX[0] = -11.0; this.custodyWalkWaypointsZ[0] = 89.8;
+        this.custodyWalkWaypointsX[1] = -11.0; this.custodyWalkWaypointsZ[1] = 83.0;
+        this.custodyWalkWaypointsX[2] = -17.85; this.custodyWalkWaypointsZ[2] = 81.8;
+        this.custodyWalkWaypointsX[3] = this.policeJailCellPos[0]; this.custodyWalkWaypointsZ[3] = this.policeJailCellPos[2];
+        this.custodyWalkWaypointCount = 4;
+        this.custodyWalkWaypointIdx = 0;
+        this.custodyDistLeft = Math.hypot(pPos[0] - this.policeJailCellPos[0], pPos[2] - this.policeJailCellPos[2]);
+        this.custodyCameraTarget[0] = pPos[0];
+        this.custodyCameraTarget[1] = pPos[1] + 1.35;
+        this.custodyCameraTarget[2] = pPos[2];
+        this.custodyStage = 'WALKING_TO_CELL';
+        return;
+      }
+
+      const car = pa.vehicle;
+      const wpX = this.custodyDriveWaypointsX[this.custodyDriveWaypointIdx];
+      const wpZ = this.custodyDriveWaypointsZ[this.custodyDriveWaypointIdx];
+      const dx = wpX - car.position[0];
+      const dz = wpZ - car.position[2];
+      const wpDist = Math.hypot(dx, dz);
+
+      // Total remaining distance to curb
+      let totalRem = wpDist;
+      for (let k = this.custodyDriveWaypointIdx; k + 1 < this.custodyDriveWaypointCount; k++) {
+        totalRem += Math.hypot(
+          this.custodyDriveWaypointsX[k + 1] - this.custodyDriveWaypointsX[k],
+          this.custodyDriveWaypointsZ[k + 1] - this.custodyDriveWaypointsZ[k]
+        );
+      }
+      this.custodyDistLeft = totalRem;
+      this.playPoliceSirenBeep();
+
+      if (wpDist <= 1.65) {
+        this.custodyDriveWaypointIdx++;
+        this.custodyDriveStuckTimer = 0;
+        return;
+      }
+
+      const desiredYaw = Math.atan2(dx, dz);
+      let yawDiff = desiredYaw - car.rotationY;
+      while (yawDiff > Math.PI) yawDiff -= Math.PI * 2;
+      while (yawDiff < -Math.PI) yawDiff += Math.PI * 2;
+      const maxTurn = 3.4 * dt;
+      car.rotationY += Math.max(-maxTurn, Math.min(maxTurn, yawDiff));
+
+      const driveSpeed = totalRem < 10.0 ? 8.5 : 16.5;
+      car.speed = driveSpeed;
+      const dispX = Math.sin(car.rotationY) * driveSpeed * dt;
+      const dispZ = Math.cos(car.rotationY) * driveSpeed * dt;
+
+      const prevX = car.position[0];
+      const prevZ = car.position[2];
+      const res = this.physics.resolveVehicleMovement(
+        car.position[0], car.position[1], car.position[2],
+        dispX, dispZ,
+        car.rotationY,
+        car.colliderId,
+        driveSpeed,
+        car
+      );
+      car.position[0] = res.x;
+      car.position[1] = car.position[1] + (res.y - car.position[1]) * Math.min(1.0, dt * 16.0);
+      car.position[2] = res.z;
+
+      const movedDist = Math.hypot(car.position[0] - prevX, car.position[2] - prevZ);
+      if (movedDist < 0.08 * dt) {
+        this.custodyDriveStuckTimer += dt;
+        // Gently steer toward street waypoint if clipped by a parked vehicle/curb
+        if (this.custodyDriveStuckTimer > 0.35) {
+          const stepFallback = Math.min(wpDist, 9.0 * dt);
+          car.position[0] += (dx / Math.max(0.001, wpDist)) * stepFallback;
+          car.position[2] += (dz / Math.max(0.001, wpDist)) * stepFallback;
+          car.rotationY = desiredYaw;
+        }
+      } else {
+        this.custodyDriveStuckTimer = Math.max(0, this.custodyDriveStuckTimer - dt);
+      }
+
+      this.physics.updateVehicleCollider(car.colliderId, car.position[0], car.position[1], car.position[2], car.rotationY);
+      const cy = Math.cos(car.rotationY * 0.5), sy = Math.sin(car.rotationY * 0.5);
+      Mat4.fromTRSValues(car.position[0], car.position[1], car.position[2], 0, sy, 0, cy, 1, 1, 1, this.tempPropMat);
+      for (let eIdx = 0; eIdx < car.entityIds.length; eIdx++) {
+        this.entityManager.updateEntityMatrixXYZ(car.entityIds[eIdx], this.tempPropMat, car.position[0], car.position[1], car.position[2], 3.2);
+      }
+
+      // Sync hidden player & camera target continuously onto moving cruiser
+      pPos[0] = car.position[0];
+      pPos[1] = car.position[1];
+      pPos[2] = car.position[2];
+      this.custodyCameraTarget[0] = car.position[0];
+      this.custodyCameraTarget[1] = car.position[1] + 1.5;
+      this.custodyCameraTarget[2] = car.position[2];
+      return;
+    }
+
+    if (this.custodyStage === 'WALKING_TO_CELL') {
+      if (this.custodyWalkWaypointIdx >= this.custodyWalkWaypointCount) {
+        this.enterPoliceStationCell();
+        return;
+      }
+
+      const wx = this.custodyWalkWaypointsX[this.custodyWalkWaypointIdx];
+      const wz = this.custodyWalkWaypointsZ[this.custodyWalkWaypointIdx];
+      const dx = wx - pPos[0];
+      const dz = wz - pPos[2];
+      const dist = Math.hypot(dx, dz);
+
+      let rem = dist;
+      for (let k = this.custodyWalkWaypointIdx; k + 1 < this.custodyWalkWaypointCount; k++) {
+        rem += Math.hypot(
+          this.custodyWalkWaypointsX[k + 1] - this.custodyWalkWaypointsX[k],
+          this.custodyWalkWaypointsZ[k + 1] - this.custodyWalkWaypointsZ[k]
+        );
+      }
+      this.custodyDistLeft = rem;
+
+      if (dist <= 0.35) {
+        this.custodyWalkWaypointIdx++;
+        if (this.custodyWalkWaypointIdx >= this.custodyWalkWaypointCount) {
+          pPos[0] = this.policeJailCellPos[0];
+          pPos[1] = this.policeJailCellPos[1];
+          pPos[2] = this.policeJailCellPos[2];
+          this.enterPoliceStationCell();
+        }
+        return;
+      }
+
+      const nx = dx / Math.max(0.001, dist);
+      const nz = dz / Math.max(0.001, dist);
+      const walkStep = Math.min(dist, 3.4 * dt);
+      pPos[0] += nx * walkStep;
+      pPos[2] += nz * walkStep;
+      pPos[1] = pPos[2] < 89.2 ? 0.14 : 0.04;
+      this.playerController.rotationY = Math.atan2(nx, nz);
+      this.playerController.isMoving = true;
+      this.playerController.isRunning = false;
+
+      if (this.custodyOfficerIdx >= 0 && this.custodyOfficerIdx < this.policeOfficers.length) {
+        const off = this.policeOfficers[this.custodyOfficerIdx];
+        off.activeInScene = true;
+        off.x = pPos[0] - nx * 0.95 + nz * 0.35;
+        off.y = pPos[1];
+        off.z = pPos[2] - nz * 0.95 - nx * 0.35;
+        off.rotY = this.playerController.rotationY;
+      }
+
+      this.custodyCameraTarget[0] = pPos[0];
+      this.custodyCameraTarget[1] = pPos[1] + 1.35;
+      this.custodyCameraTarget[2] = pPos[2];
+    }
   }
 
   public onCrimeReported(cx: number, _cy: number, cz: number, callerLabel: string): void {
@@ -1923,6 +2542,21 @@ export class DestroyerEngine {
     this.playerController.activeVehicleIndex = -1;
     this.playerController.nearbyVehicleIndex = -1;
     this.npcHitTimer = 0;
+    this.citizenPunchClipName = null;
+    this.custodyStage = 'NONE';
+    this.custodyCarIdx = -1;
+    this.custodyOfficerIdx = -1;
+    this.custodyEscortTimer = 0;
+    this.custodyDistLeft = 0;
+    this.offenseCount = 0;
+    this.firstHooliganEligible = false;
+    this.socialWorkActive = false;
+    this.socialWorkCollected = 0;
+    this.garbageNearby = false;
+    this.nearestGarbageIdx = -1;
+    this.garbageItems = [];
+    this.policeJailGateEntityId = -1;
+    this.policeJailGateOpenFactor = 1.0;
 
     const device = this.deviceManager.getDevice();
 
@@ -1937,8 +2571,9 @@ export class DestroyerEngine {
       const cityData = CityBuilder.buildWholeCity();
       this.gunShopCounterPos = [...cityData.gunShopCounterPos];
       this.policeJailCellPos = [...cityData.policeJailCellPos];
-      this.maxPrisonCellPos = [...cityData.maxPrisonCellPos];
       this.physics.addCityColliders(cityData.colliders);
+      this.physics.setColliderTrigger('City0_PoliceStation_JailGate', true);
+      this.physics.setColliderTrigger('MaxPrison_JailGate', true);
 
       // Lightweight legal free online city vehicles (kept alongside all existing procedural sedans!)
       const autoOnlineCarDefs: {
@@ -2408,6 +3043,9 @@ export class DestroyerEngine {
         this.citizenPhoneClipName =
           remyCitizenRig.clips.find((c) => /phone|call/i.test(c.name))?.name ||
           this.citizenWalkClipName;
+        this.citizenPunchClipName =
+          remyCitizenRig.clips.find((c) => /punch|jab|hit|attack/i.test(c.name))?.name ||
+          this.citizenWalkClipName;
       }
 
       // Queue ALL Geometries & Register Meshes in exact synchronized order
@@ -2730,6 +3368,7 @@ export class DestroyerEngine {
           evadeSign: (pIdx % 2 === 0 ? 1 : -1),
           ramCooldown: 0,
           dispatched: false,
+          deployedThisAlert: false,
           sector: carSpec.sector ?? 'SOUTH',
           alwaysPatrol: !!carSpec.alwaysPatrol,
           homeX: carSpec.position[0],
@@ -2740,11 +3379,12 @@ export class DestroyerEngine {
         });
       }
 
-      // Spawn Lockable Holding Cell Gate (Police Station) & Max Prison Gate
+      // Spawn Lockable Holding Cell Gate (Police Station — starts slid open until arrest/lockup)
       const policeGateMeshId = cityMeshMap.get('police_jail_gate');
       const prisonBarsMatId = cityMatMap.get('prison_bars') ?? metalTrimMatId;
       if (policeGateMeshId !== undefined) {
-        Mat4.fromTranslation([-11, 0, 82], cityRotMat);
+        const openGateX = -11 - 2.15 * this.policeJailGateOpenFactor;
+        Mat4.fromTranslation([openGateX, 0, 82], cityRotMat);
         const pgEntId = this.entityManager.addEntity({
           meshId: policeGateMeshId,
           materialId: prisonBarsMatId,
@@ -2753,7 +3393,43 @@ export class DestroyerEngine {
           flags: 1,
           name: 'City0_PoliceStation_JailGate_Mesh',
         });
-        if (pgEntId >= 0) this.cityEntityIds.push(pgEntId);
+        if (pgEntId >= 0) {
+          this.cityEntityIds.push(pgEntId);
+          this.policeJailGateEntityId = pgEntId;
+        }
+      }
+
+      // Spawn Periphery & Rear-Alley Collectable Garbage Piles
+      const bagMeshId = cityMeshMap.get('garbage_bag_pile');
+      const cratePileMeshId = cityMeshMap.get('garbage_crate_pile');
+      const bagMatId = cityMatMap.get('garbage_bag') ?? concreteMatId;
+      const cardboardMatId = cityMatMap.get('garbage_cardboard') ?? concreteMatId;
+      for (let gIdx = 0; gIdx < cityData.garbageSpawns.length; gIdx++) {
+        const g = cityData.garbageSpawns[gIdx];
+        const mId = g.kind === 'bag' ? bagMeshId : cratePileMeshId;
+        const gMat = g.kind === 'bag' ? bagMatId : cardboardMatId;
+        if (mId === undefined) continue;
+        Mat4.fromTranslation(g.position, cityRotMat);
+        const gEntId = this.entityManager.addEntity({
+          meshId: mId,
+          materialId: gMat,
+          worldMatrix: cityRotMat,
+          sphereCenter: [g.position[0], g.position[1] + 0.3, g.position[2], 1.3],
+          flags: 1,
+          name: g.name,
+        });
+        if (gEntId >= 0) {
+          this.cityEntityIds.push(gEntId);
+          this.garbageItems.push({
+            id: g.id,
+            name: g.name,
+            entityId: gEntId,
+            x: g.position[0],
+            y: g.position[1],
+            z: g.position[2],
+            collected: false,
+          });
+        }
       }
 
       // Spawn Downtown Billboards (dynamic material switches to WANTED poster on Big Crime!)
@@ -3305,15 +3981,19 @@ export class DestroyerEngine {
           });
         }
 
-        // 7 Uniformed Police Officers (walk speed = Player walkSpeedForward = 8.5 m/s; FIRST punch = JAILED!)
-        const officerSpawns: { name: string; x: number; z: number; axis: 'x' | 'z'; range: number }[] = [
-          { name: 'Officer_Precinct_FrontL', x: -15.5, z: 92.0, axis: 'x', range: 6.0 },
-          { name: 'Officer_Precinct_FrontR', x: -6.5, z: 92.0, axis: 'x', range: 6.0 },
-          { name: 'Officer_MainBlvd_Civic', x: -25.0, z: 30.0, axis: 'z', range: 9.0 },
-          { name: 'Officer_MainBlvd_Plaza', x: 18.0, z: 27.5, axis: 'x', range: 10.0 },
-          { name: 'Officer_GasStation1_Beat', x: -20.5, z: 62.0, axis: 'z', range: 8.0 },
-          { name: 'Officer_SouthBlvd_Beat', x: 12.0, z: 96.5, axis: 'x', range: 12.0 },
-          { name: 'Officer_MaxPrison_Gate', x: -32.0, z: -203.0, axis: 'x', range: 7.5 },
+        // 7 Uniformed Police Officers + 3 Pooled Cruiser Officers (exit patrol cars during pursuit!)
+        const policePunchTrackOffset = this.citizenJointOffset + 5 * this.citizenJointCount;
+        const officerSpawns: { name: string; x: number; z: number; axis: 'x' | 'z'; range: number; isCruiserUnit: boolean }[] = [
+          { name: 'Officer_Precinct_FrontL', x: -15.5, z: 92.0, axis: 'x', range: 6.0, isCruiserUnit: false },
+          { name: 'Officer_Precinct_FrontR', x: -6.5, z: 92.0, axis: 'x', range: 6.0, isCruiserUnit: false },
+          { name: 'Officer_MainBlvd_Civic', x: -25.0, z: 30.0, axis: 'z', range: 9.0, isCruiserUnit: false },
+          { name: 'Officer_MainBlvd_Plaza', x: 18.0, z: 27.5, axis: 'x', range: 10.0, isCruiserUnit: false },
+          { name: 'Officer_GasStation1_Beat', x: -20.5, z: 62.0, axis: 'z', range: 8.0, isCruiserUnit: false },
+          { name: 'Officer_SouthBlvd_Beat', x: 12.0, z: 96.5, axis: 'x', range: 12.0, isCruiserUnit: false },
+          { name: 'Officer_MaxPrison_Gate', x: -32.0, z: -203.0, axis: 'x', range: 7.5, isCruiserUnit: false },
+          { name: 'Cruiser_Officer_A', x: 0, z: 0, axis: 'x', range: 1.0, isCruiserUnit: true },
+          { name: 'Cruiser_Officer_B', x: 0, z: 0, axis: 'x', range: 1.0, isCruiserUnit: true },
+          { name: 'Cruiser_Officer_C', x: 0, z: 0, axis: 'x', range: 1.0, isCruiserUnit: true },
         ];
         for (let i = 0; i < officerSpawns.length; i++) {
           const os = officerSpawns[i];
@@ -3321,15 +4001,16 @@ export class DestroyerEngine {
           const halfY = rotY * 0.5;
           const sXZ = 1.03;
           const sY = 1.05;
-          Mat4.fromTRSValues(os.x, 0, os.z, 0, Math.sin(halfY), 0, Math.cos(halfY), sXZ, sY, sXZ, spawnMat);
+          const sy = os.isCruiserUnit ? -50 : 0;
+          Mat4.fromTRSValues(os.x, sy, os.z, 0, Math.sin(halfY), 0, Math.cos(halfY), sXZ, sY, sXZ, spawnMat);
           const entIds: number[] = [];
           for (let pIdx = 0; pIdx < citizenMeshIds.length; pIdx++) {
             const entId = this.entityManager.addEntity({
               meshId: citizenMeshIds[pIdx],
               materialId: policeOutfitMatList[pIdx] ?? policeOutfitMatList[0] ?? defaultNpcMatId,
               worldMatrix: spawnMat,
-              sphereCenter: [os.x, 0.95, os.z, 1.9],
-              flags: 1,
+              sphereCenter: [os.x, sy + 0.95, os.z, 1.9],
+              flags: os.isCruiserUnit ? 0 : 1,
               animOffset: policeTrackOffset,
               name: pIdx === 0 ? os.name : `${os.name}_Part_${pIdx}`,
             });
@@ -3342,7 +4023,7 @@ export class DestroyerEngine {
           const target: import('./physics/JoltPhysics').NPCPunchTarget = {
             id: offId,
             name: os.name,
-            position: [os.x, 0, os.z],
+            position: [os.x, sy, os.z],
             radius: 0.75,
             height: 1.82,
           };
@@ -3352,7 +4033,7 @@ export class DestroyerEngine {
             name: os.name,
             entityIds: entIds,
             x: os.x,
-            y: 0,
+            y: sy,
             z: os.z,
             rotY,
             homeX: os.x,
@@ -3363,8 +4044,16 @@ export class DestroyerEngine {
             scaleXZ: sXZ,
             scaleY: sY,
             trackOffset: policeTrackOffset,
+            punchTrackOffset: policePunchTrackOffset,
+            usingPunchTrack: false,
             stumbleTimer: 0,
             kickCooldown: 0,
+            firstPunchLanded: false,
+            cuffWindupTimer: 0,
+            punchAnimTimer: 0,
+            isCruiserUnit: os.isCruiserUnit,
+            activeInScene: !os.isCruiserUnit,
+            assignedCarIdx: -1,
             punchTarget: target,
           });
         }
@@ -3489,7 +4178,8 @@ export class DestroyerEngine {
     if (this.isJailed) {
       this.jailTimeLeft = Math.max(0, this.jailTimeLeft - dt);
       if (this.jailTimeLeft <= 0) {
-        this.releaseFromJail();
+        this.isJailed = false;
+        this.custodyStage = 'RELEASE_PAPER';
       }
     }
 
@@ -3497,16 +4187,35 @@ export class DestroyerEngine {
     const playerX = pPos[0];
     const playerZ = pPos[2];
     const isDriving = this.playerController.activeVehicleIndex >= 0;
+    const custodyLocked = this.isCustodyLocked();
 
-    // Update Gun Shop proximity & held pistol transform (zero alloc)
+    // Update Gun Shop & Periphery Garbage proximity (zero alloc)
     this.gunShopNearby =
+      !custodyLocked &&
       !this.isJailed &&
+      this.custodyStage !== 'RELEASE_PAPER' &&
       !isDriving &&
       Math.abs(pPos[1] - this.gunShopCounterPos[1]) < 3.0 &&
       Math.hypot(playerX - this.gunShopCounterPos[0], playerZ - this.gunShopCounterPos[2]) <= 4.2;
 
+    let gBestIdx = -1;
+    let gBestDist = 3.2;
+    if (!custodyLocked && !this.isJailed && this.custodyStage !== 'RELEASE_PAPER' && !isDriving) {
+      for (let i = 0; i < this.garbageItems.length; i++) {
+        const g = this.garbageItems[i];
+        if (g.collected) continue;
+        const d = Math.hypot(g.x - playerX, g.z - playerZ);
+        if (d < gBestDist && Math.abs(g.y - pPos[1]) < 2.2) {
+          gBestDist = d;
+          gBestIdx = i;
+        }
+      }
+    }
+    this.nearestGarbageIdx = gBestIdx;
+    this.garbageNearby = gBestIdx >= 0;
+
     if (this.pistolEntityId >= 0) {
-      const showPistol = this.hasWeapon && !this.isJailed && !isDriving;
+      const showPistol = this.hasWeapon && !this.isJailed && !custodyLocked && this.custodyStage !== 'RELEASE_PAPER' && !isDriving;
       this.entityManager.setEntityVisible(this.pistolEntityId, showPistol);
       if (showPistol) {
         const yaw = this.playerController.cameraTheta + Math.PI;
@@ -3521,11 +4230,19 @@ export class DestroyerEngine {
       }
     }
 
-    // 1. Evaluate 5 shared skeleton tracks into jointMatrices (ZERO heap alloc)
+    // 1. Evaluate 6 shared skeleton tracks into jointMatrices (ZERO heap alloc)
+    let activePunchTime = 0;
+    for (let i = 0; i < this.policeOfficers.length; i++) {
+      const off = this.policeOfficers[i];
+      if (off.punchAnimTimer > 0) {
+        activePunchTime = Math.max(activePunchTime, 0.45 - off.punchAnimTimer);
+      }
+    }
     if (this.citizenHasSkinning && this.citizenJointCount > 0 && this.citizenAnimController.joints.length > 0) {
       const jm = this.entityManager.jointMatrices;
       const walkName = this.citizenWalkClipName;
       const phoneName = this.citizenPhoneClipName;
+      const punchName = this.citizenPunchClipName;
       const jc = this.citizenJointCount;
       const base = this.citizenJointOffset;
       const simT = this.citizenSimTime;
@@ -3538,6 +4255,9 @@ export class DestroyerEngine {
       }
       if (phoneName) {
         this.citizenAnimController.evaluateClipAtTime(phoneName, simT, jm, base + 3 * jc);
+      }
+      if (punchName) {
+        this.citizenAnimController.evaluateClipAtTime(punchName, activePunchTime, jm, base + 5 * jc);
       }
     }
 
@@ -3565,11 +4285,9 @@ export class DestroyerEngine {
           c.rotY = c.dir > 0 ? 0 : Math.PI;
         }
       } else if (isCalling && c.stumbleTimer <= 0) {
-        // Face generally toward the criminal incident while on 911 call
         c.rotY = Math.atan2(playerX - c.x, playerZ - c.z);
       }
 
-      // Swap GPU animOffset only when transitioning walk <-> phone call
       if (isCalling !== c.usingPhoneTrack) {
         c.usingPhoneTrack = isCalling;
         const targetOffset = isCalling ? c.phoneTrackOffset : c.walkTrackOffset;
@@ -3587,23 +4305,15 @@ export class DestroyerEngine {
       const yc = Math.cos(yawH), ys = Math.sin(yawH);
       const wc = Math.cos(wobH), ws = Math.sin(wobH);
       Mat4.fromTRSValues(
-        c.x,
-        0,
-        c.z,
-        ws * yc,
-        ys * wc,
-        ws * ys,
-        yc * wc,
-        c.scaleXZ,
-        c.scaleY,
-        c.scaleXZ,
+        c.x, 0, c.z,
+        ws * yc, ys * wc, ws * ys, yc * wc,
+        c.scaleXZ, c.scaleY, c.scaleXZ,
         this.tempCitizenMat
       );
       for (let p = 0; p < c.entityIds.length; p++) {
         this.entityManager.updateEntityMatrixXYZ(c.entityIds[p], this.tempCitizenMat, c.x, 0.9 * c.scaleY, c.z, 1.9);
       }
 
-      // Position Citizen's Handheld Mobile Phone (held to right ear during 911 call, at right side otherwise)
       if (c.phoneEntityId >= 0) {
         const sinR = Math.sin(c.rotY);
         const cosR = Math.cos(c.rotY);
@@ -3628,10 +4338,25 @@ export class DestroyerEngine {
         this.policeNearestDistMeters = 0;
         this.policeEtaSeconds = 0;
         this.policeCallerInfo = '';
+        if (this.custodyStage === 'SLOWED') this.custodyStage = 'NONE';
         this.setBillboardWantedMode(false);
+        for (let i = 0; i < this.policeOfficers.length; i++) {
+          const off = this.policeOfficers[i];
+          off.firstPunchLanded = false;
+          off.cuffWindupTimer = 0;
+          if (off.isCruiserUnit && i !== this.custodyOfficerIdx) {
+            off.activeInScene = false;
+            off.y = -50;
+            off.punchTarget.position[1] = -50;
+            for (let p = 0; p < off.entityIds.length; p++) {
+              this.entityManager.setEntityVisible(off.entityIds[p], false);
+            }
+          }
+        }
         for (let i = 0; i < this.policeCarAgents.length; i++) {
           const pa = this.policeCarAgents[i];
           pa.dispatched = false;
+          pa.deployedThisAlert = false;
           pa.blockedTimer = 0;
           if (!pa.alwaysPatrol && pa.vehicle.health > 0 && pa.vehicleIndex !== this.playerController.activeVehicleIndex) {
             pa.vehicle.position[0] = pa.homeX;
@@ -3648,17 +4373,23 @@ export class DestroyerEngine {
           }
         }
       }
+    } else if (this.custodyStage === 'SLOWED' && this.playerController.arrestSlowdownTimer <= 0) {
+      this.custodyStage = 'NONE';
     }
 
-    // 4. Update Police Officers On Foot (FIRST PUNCH / STRIKE FROM POLICE = IMMEDIATELY JAILED!)
+    // 4. Update Police Officers On Foot: FIRST PUNCH slows player down, second close catch triggers continuous escort & cruiser transport!
     const officerSpeed = this.playerController.walkSpeedForward;
     for (let i = 0; i < this.policeOfficers.length; i++) {
       const off = this.policeOfficers[i];
+      if (!off.activeInScene) continue;
       if (off.stumbleTimer > 0) off.stumbleTimer = Math.max(0, off.stumbleTimer - dt);
       if (off.kickCooldown > 0) off.kickCooldown = Math.max(0, off.kickCooldown - dt);
+      if (off.cuffWindupTimer > 0) off.cuffWindupTimer = Math.max(0, off.cuffWindupTimer - dt);
+      if (off.punchAnimTimer > 0) off.punchAnimTimer = Math.max(0, off.punchAnimTimer - dt);
 
-      if (off.stumbleTimer <= 0) {
-        if (this.policeAlertActive && !this.isJailed) {
+      const isCustodyEscortOfficer = custodyLocked && i === this.custodyOfficerIdx;
+      if (!isCustodyEscortOfficer && off.stumbleTimer <= 0) {
+        if ((this.policeAlertActive || off.isCruiserUnit) && !this.isJailed && !custodyLocked && this.custodyStage !== 'RELEASE_PAPER') {
           const dx = playerX - off.x;
           const dz = playerZ - off.z;
           const dist = Math.hypot(dx, dz);
@@ -3678,13 +4409,22 @@ export class DestroyerEngine {
             off.z = res.newPos[2];
           }
 
-          // First strike / catch from a Police Officer jails the criminal immediately!
-          if (!isDriving && dist <= 1.85) {
-            off.kickCooldown = 2.0;
-            this.arrestPlayer(`${off.name} First Strike Takedown`, this.bigCrimeActive);
+          // First punch slows suspect down; follow-up catch puts handcuffs on & walks player to waiting cruiser!
+          if (!isDriving && dist <= 1.95) {
+            if (!off.firstPunchLanded) {
+              off.firstPunchLanded = true;
+              off.punchAnimTimer = 0.45;
+              off.cuffWindupTimer = 0.72;
+              off.kickCooldown = 0.72;
+              this.playerController.applyPoliceSlowdown(4.0);
+              this.playerController.applyPoliceKnockback(dx, dz, 5.5);
+              this.custodyStage = 'SLOWED';
+            } else if (off.cuffWindupTimer <= 0 && dist <= 2.45) {
+              off.punchAnimTimer = 0.42;
+              this.startVisualArrestSequence(`${off.name} Street Takedown`, i);
+            }
           }
-        } else {
-          // Gentle precinct / downtown foot patrol around home post
+        } else if (!off.isCruiserUnit) {
           const calmSpeed = 1.45;
           if (off.patrolAxis === 'x') {
             off.x += off.patrolDir * calmSpeed * dt;
@@ -3700,21 +4440,23 @@ export class DestroyerEngine {
         }
       }
 
+      const wantPunchTrack = off.punchAnimTimer > 0;
+      if (wantPunchTrack !== off.usingPunchTrack) {
+        off.usingPunchTrack = wantPunchTrack;
+        const targetOff = wantPunchTrack ? off.punchTrackOffset : off.trackOffset;
+        for (let p = 0; p < off.entityIds.length; p++) {
+          this.entityManager.setEntityAnimOffset(off.entityIds[p], targetOff);
+        }
+      }
+
       off.punchTarget.position[0] = off.x;
       off.punchTarget.position[1] = off.y;
       off.punchTarget.position[2] = off.z;
       const halfY = off.rotY * 0.5;
       Mat4.fromTRSValues(
-        off.x,
-        off.y,
-        off.z,
-        0,
-        Math.sin(halfY),
-        0,
-        Math.cos(halfY),
-        off.scaleXZ,
-        off.scaleY,
-        off.scaleXZ,
+        off.x, off.y, off.z,
+        0, Math.sin(halfY), 0, Math.cos(halfY),
+        off.scaleXZ, off.scaleY, off.scaleXZ,
         this.tempCitizenMat
       );
       for (let p = 0; p < off.entityIds.length; p++) {
@@ -3722,20 +4464,29 @@ export class DestroyerEngine {
       }
     }
 
-    // 5. Update 15 Police Cruisers (Only 2 Patrol N+S Normally; 13 Stay Parked Unless Big Crime; Blocking Car = Siren -> Arrest!)
+    // 5. Update 15 Police Cruisers (Only 2 Patrol N+S Normally; pull up & deploy foot cop instead of instant teleport!)
     this.policeLightbarTimer += dt;
     const redOn = Math.floor(this.policeLightbarTimer * 8.0) % 2 === 0;
     const activeVeh = this.playerController.activeVehicleIndex;
     let liveNearestDist = Infinity;
     let liveBestSpeed = 19.0;
     let anyBlocked = false;
-    let minBlockedRemaining = 3.5;
+    let minBlockedRemaining = 3.2;
     let activePatrolCounter = 0;
 
     for (let i = 0; i < this.policeCarAgents.length; i++) {
       const pa = this.policeCarAgents[i];
       const car = pa.vehicle;
       if (pa.ramCooldown > 0) pa.ramCooldown = Math.max(0, pa.ramCooldown - dt);
+
+      const isCustodyTransportCar = custodyLocked && i === this.custodyCarIdx;
+      if (isCustodyTransportCar) {
+        const transportStrobe = this.custodyStage === 'DRIVING_TO_STATION';
+        if (pa.barRedEntityId >= 0) this.entityManager.setEntityVisible(pa.barRedEntityId, transportStrobe ? redOn : true);
+        if (pa.barBlueEntityId >= 0) this.entityManager.setEntityVisible(pa.barBlueEntityId, transportStrobe ? !redOn : true);
+        activePatrolCounter++;
+        continue;
+      }
 
       const isActiveDuty = pa.alwaysPatrol || (this.policeAlertActive && pa.dispatched);
       const isBlockingPlayer = pa.blockedTimer > 0.01;
@@ -3764,9 +4515,8 @@ export class DestroyerEngine {
         }
       }
 
-      // Check if player is standing right in front of a moving/patrolling police cruiser
       let blockedNow = false;
-      if (isActiveDuty && !isDriving && !this.isJailed) {
+      if (isActiveDuty && !isDriving && !this.isJailed && !custodyLocked && this.custodyStage !== 'RELEASE_PAPER') {
         const dxP = playerX - car.position[0];
         const dzP = playerZ - car.position[2];
         const sinR = Math.sin(car.rotationY);
@@ -3783,22 +4533,22 @@ export class DestroyerEngine {
       let targetSpeed = 0;
 
       if (blockedNow) {
-        // Sound siren and give player 3.5s warning countdown to step out of cruiser's path before arrest
         pa.blockedTimer += dt;
         anyBlocked = true;
-        const rem = Math.max(0, 3.5 - pa.blockedTimer);
+        const rem = Math.max(0, 3.2 - pa.blockedTimer);
         if (rem < minBlockedRemaining) minBlockedRemaining = rem;
         this.playPoliceSirenBeep();
         targetSpeed = 0;
-        if (pa.blockedTimer >= 3.5) {
-          this.arrestPlayer('Blocked Police Cruiser Path', false);
-          break;
+        if (pa.blockedTimer >= 3.2 && !pa.deployedThisAlert) {
+          pa.blockedTimer = 0;
+          pa.deployedThisAlert = true;
+          this.onCrimeReported(car.position[0], car.position[1], car.position[2], 'Blocked Police Cruiser');
+          this.deployOfficersFromCruiser(i, 1);
         }
       } else {
         pa.blockedTimer = Math.max(0, pa.blockedTimer - dt * 1.5);
 
         if (!isActiveDuty) {
-          // 13 Reserve Cruisers remain parked stationary at Police Station / Substations / Max Prison
           targetSpeed = 0;
         } else if (pa.evadeTimer > 0) {
           pa.evadeTimer = Math.max(0, pa.evadeTimer - dt);
@@ -3806,12 +4556,12 @@ export class DestroyerEngine {
           targetSpeed = -7.5;
           moveVx = Math.sin(car.rotationY) * targetSpeed;
           moveVz = Math.cos(car.rotationY) * targetSpeed;
-        } else if (this.policeAlertActive && pa.dispatched) {
+        } else if (this.policeAlertActive && pa.dispatched && !custodyLocked && !this.isJailed) {
           const dx = playerX - car.position[0];
           const dz = playerZ - car.position[2];
           const dist = Math.hypot(dx, dz);
 
-          if (dist > 3.2) {
+          if (dist > 8.2) {
             const desiredYaw = Math.atan2(dx, dz);
             let yawDiff = desiredYaw - car.rotationY;
             while (yawDiff > Math.PI) yawDiff -= Math.PI * 2;
@@ -3822,16 +4572,19 @@ export class DestroyerEngine {
             moveVx = Math.sin(car.rotationY) * targetSpeed;
             moveVz = Math.cos(car.rotationY) * targetSpeed;
           } else {
+            // Pull up beside suspect -> police officer jumps out of cruiser to chase & arrest on foot!
             targetSpeed = 0;
-          }
-
-          // Kick / arrest if pursuing car closes onto criminal on foot
-          if (!isDriving && !this.isJailed && dist <= 2.35 && pa.ramCooldown <= 0 && this.playerController.knockbackCooldown <= 0) {
-            this.playerController.applyPoliceKnockback(dx, dz, 14.0);
-            pa.ramCooldown = 1.45;
+            if (!pa.deployedThisAlert) {
+              if (isDriving && activeVeh >= 0 && Math.abs(this.vehicles[activeVeh].speed) < 6.0) {
+                this.playerController.toggleVehicleEntry();
+              }
+              if (!isDriving || (activeVeh >= 0 && Math.abs(this.vehicles[activeVeh].speed) < 6.0)) {
+                pa.deployedThisAlert = true;
+                this.deployOfficersFromCruiser(i, 1);
+              }
+            }
           }
         } else if (pa.alwaysPatrol) {
-          // ONLY 2 Patrols during calm: Patrol #01 strictly in NORTH sector (Z=-34), Patrol #02 strictly in SOUTH sector (Z=37)
           if (pa.patrolAxis === 'x') {
             car.position[2] += (pa.laneCoord - car.position[2]) * Math.min(1.0, dt * 2.0);
             if (car.position[0] > pa.maxCoord) pa.patrolDir = -1;
@@ -3855,11 +4608,8 @@ export class DestroyerEngine {
       const dispZ = moveVz * dt;
       if (Math.abs(dispX) > 1e-5 || Math.abs(dispZ) > 1e-5) {
         const res = this.physics.resolveVehicleMovement(
-          car.position[0],
-          car.position[1],
-          car.position[2],
-          dispX,
-          dispZ,
+          car.position[0], car.position[1], car.position[2],
+          dispX, dispZ,
           car.rotationY,
           car.colliderId,
           targetSpeed,
@@ -3896,7 +4646,7 @@ export class DestroyerEngine {
     }
 
     this.activePatrolCount = activePatrolCounter;
-    this.policeSirenWarningActive = anyBlocked && !this.isJailed;
+    this.policeSirenWarningActive = anyBlocked && !this.isJailed && !custodyLocked;
     this.policeSirenCountdown = anyBlocked ? Math.round(minBlockedRemaining * 10) * 0.1 : 0;
 
     if (this.policeAlertActive && Number.isFinite(liveNearestDist)) {
@@ -3922,6 +4672,37 @@ export class DestroyerEngine {
     }
   }
 
+  private enforcePoolAndItemVisibility(): void {
+    const hidePlayer = this.playerController.activeVehicleIndex >= 0 || this.custodyStage === 'DRIVING_TO_STATION';
+    if (hidePlayer) {
+      this.setPlayerEntitiesVisible(false);
+    }
+    if (this.pistolEntityId >= 0) {
+      this.entityManager.setEntityVisible(
+        this.pistolEntityId,
+        this.hasWeapon &&
+          !this.isJailed &&
+          !this.isCustodyLocked() &&
+          this.custodyStage !== 'RELEASE_PAPER' &&
+          this.playerController.activeVehicleIndex < 0
+      );
+    }
+    for (let i = 0; i < this.garbageItems.length; i++) {
+      const g = this.garbageItems[i];
+      if (g.collected && g.entityId >= 0) {
+        this.entityManager.setEntityVisible(g.entityId, false);
+      }
+    }
+    for (let i = 0; i < this.policeOfficers.length; i++) {
+      const off = this.policeOfficers[i];
+      if (!off.activeInScene) {
+        for (let p = 0; p < off.entityIds.length; p++) {
+          this.entityManager.setEntityVisible(off.entityIds[p], false);
+        }
+      }
+    }
+  }
+
   /**
    * Smart Floor / Interior Culling System:
    * - Exterior: renders all buildings (floors 0..10), banners, doors, elevator, and props.
@@ -3935,15 +4716,7 @@ export class DestroyerEngine {
       for (let i = 0; i < totalCount; i++) {
         this.entityManager.setEntityVisible(i, true);
       }
-      if (this.playerController.activeVehicleIndex >= 0) {
-        this.setPlayerEntitiesVisible(false);
-      }
-      if (this.pistolEntityId >= 0) {
-        this.entityManager.setEntityVisible(
-          this.pistolEntityId,
-          this.hasWeapon && !this.isJailed && this.playerController.activeVehicleIndex < 0
-        );
-      }
+      this.enforcePoolAndItemVisibility();
       this.stats.smartCullingEnabled = false;
       this.stats.smartCullMode = 'EXTERIOR';
       this.stats.smartCullBuilding = -1;
@@ -3958,7 +4731,7 @@ export class DestroyerEngine {
     const px = pPos[0], py = pPos[1], pz = pPos[2];
     let activeBuilding: -1 | 0 | 1 = -1;
 
-    if (this.playerController.activeVehicleIndex < 0 && py >= -0.5 && py < 43.8 && Math.abs(pz) <= 19.6) {
+    if (this.playerController.activeVehicleIndex < 0 && this.custodyStage !== 'DRIVING_TO_STATION' && py >= -0.5 && py < 43.8 && Math.abs(pz) <= 19.6) {
       if (Math.abs(px) <= 19.6) {
         activeBuilding = 0;
       } else if (Math.abs(px - 60.0) <= 19.6) {
@@ -3970,15 +4743,7 @@ export class DestroyerEngine {
       for (let i = 0; i < totalCount; i++) {
         this.entityManager.setEntityVisible(i, true);
       }
-      if (this.playerController.activeVehicleIndex >= 0) {
-        this.setPlayerEntitiesVisible(false);
-      }
-      if (this.pistolEntityId >= 0) {
-        this.entityManager.setEntityVisible(
-          this.pistolEntityId,
-          this.hasWeapon && !this.isJailed && this.playerController.activeVehicleIndex < 0
-        );
-      }
+      this.enforcePoolAndItemVisibility();
       this.stats.smartCullingEnabled = true;
       this.stats.smartCullMode = 'EXTERIOR';
       this.stats.smartCullBuilding = -1;
@@ -4000,12 +4765,7 @@ export class DestroyerEngine {
     for (let i = 0; i < this.playerEntityIds.length; i++) {
       this.entityManager.setEntityVisible(this.playerEntityIds[i], true);
     }
-    if (this.pistolEntityId >= 0) {
-      this.entityManager.setEntityVisible(
-        this.pistolEntityId,
-        this.hasWeapon && !this.isJailed && this.playerController.activeVehicleIndex < 0
-      );
-    }
+    this.enforcePoolAndItemVisibility();
 
     // Cull exterior city blocks while player is inside a multi-story skyscraper
     for (let i = 0; i < this.cityEntityIds.length; i++) {

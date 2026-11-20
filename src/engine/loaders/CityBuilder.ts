@@ -58,6 +58,14 @@ export interface CityBillboardSpawn {
   rotationY: number;
 }
 
+export interface CityGarbageSpawn {
+  id: string;
+  name: string;
+  kind: 'bag' | 'crate';
+  position: [number, number, number];
+  rotationY: number;
+}
+
 export interface CityWorldData {
   meshes: CityMeshDef[];
   materials: CityMaterialDef[];
@@ -67,6 +75,7 @@ export interface CityWorldData {
   policeCars: CityCarSpawn[];
   cctvCameras: CityCCTVCamSpawn[];
   billboards: CityBillboardSpawn[];
+  garbageSpawns: CityGarbageSpawn[];
   gunShopCounterPos: [number, number, number];
   policeJailCellPos: [number, number, number];
   maxPrisonCellPos: [number, number, number];
@@ -832,6 +841,54 @@ export class CityBuilder {
       ao: 1.0,
       alphaCutoff: 0.5,
     });
+    regMat('prison_mattress', {
+      baseColor: [0.80, 0.84, 0.88, 1.0],
+      emissiveColor: [0, 0, 0, 0],
+      roughness: 0.88,
+      metallic: 0.02,
+      ao: 1.0,
+      alphaCutoff: 0.5,
+    });
+    regMat('prison_stainless', {
+      baseColor: [0.76, 0.80, 0.85, 1.0],
+      emissiveColor: [0, 0, 0, 0],
+      roughness: 0.24,
+      metallic: 0.92,
+      ao: 1.0,
+      alphaCutoff: 0.5,
+    });
+    regMat('prison_fence_wire', {
+      baseColor: [0.58, 0.62, 0.68, 1.0],
+      emissiveColor: [0, 0, 0, 0],
+      roughness: 0.36,
+      metallic: 0.85,
+      ao: 1.0,
+      alphaCutoff: 0.5,
+    });
+    regMat('cell_light_glow', {
+      baseColor: [1.0, 0.94, 0.78, 1.0],
+      emissiveColor: [1.0, 0.90, 0.68, 2.2],
+      roughness: 0.18,
+      metallic: 0.05,
+      ao: 1.0,
+      alphaCutoff: 0.5,
+    });
+    regMat('garbage_bag', {
+      baseColor: [0.10, 0.12, 0.14, 1.0],
+      emissiveColor: [0.02, 0.04, 0.02, 0.12],
+      roughness: 0.68,
+      metallic: 0.08,
+      ao: 1.0,
+      alphaCutoff: 0.5,
+    });
+    regMat('garbage_cardboard', {
+      baseColor: [0.58, 0.45, 0.28, 1.0],
+      emissiveColor: [0.04, 0.03, 0.01, 0.10],
+      roughness: 0.90,
+      metallic: 0.02,
+      ao: 1.0,
+      alphaCutoff: 0.5,
+    });
 
     const getMatDef = (key: string): FlatMaterial =>
       materials.find((m) => m.key === key)?.material ?? materials[0].material;
@@ -1337,9 +1394,11 @@ export class CityBuilder {
       { center: [0, 2.35, -7.8], size: [10.0, 2.35, 0.22], name: 'Precinct_Wall_Back', cat: 'wall' },
       { center: [-9.78, 2.35, 0], size: [0.22, 2.35, 7.8], name: 'Precinct_Wall_Left', cat: 'wall' },
       { center: [9.78, 2.35, 0], size: [0.22, 2.35, 7.8], name: 'Precinct_Wall_Right', cat: 'wall' },
-      // Interior Dispatch Desk & Holding Cell Partition
+      // Interior Dispatch Desk & Holding Cell Partition (clean 2.1m doorway gap at X=-7.9..-5.8 for gate!)
       { center: [0, 0.62, -2.5], size: [3.6, 0.55, 0.55], name: 'Precinct_Dispatch_Desk', cat: 'wall' },
-      { center: [-5.8, 2.35, -2.2], size: [3.8, 2.35, 0.16], name: 'Precinct_Cell_Divider', cat: 'wall' },
+      { center: [-8.85, 2.35, -2.2], size: [0.95, 2.35, 0.16], name: 'Precinct_Cell_Divider_L', cat: 'wall' },
+      { center: [-3.90, 2.35, -2.2], size: [1.90, 2.35, 0.16], name: 'Precinct_Cell_Divider_R', cat: 'wall' },
+      { center: [-6.85, 4.15, -2.2], size: [1.05, 0.55, 0.16], name: 'Precinct_Cell_Header', cat: 'wall' },
       // Second Story Command Deck & Roof Parapet
       { center: [0, 4.85, 0], size: [10.35, 0.22, 8.35], name: 'Precinct_RoofDeck', cat: 'floor' },
       { center: [0, 6.25, -2.0], size: [8.4, 1.25, 5.2], name: 'Precinct_UpperCommand', cat: 'wall' },
@@ -1409,11 +1468,12 @@ export class CityBuilder {
       ProceduralModels.create3DTextMesh('POLICE', 0.85, 0.22, 'PoliceStation_Sign3D'),
       'police_sign_blue'
     );
-    // Steel Holding Cell Bars + Locking Cell Door inside Police Station NW quadrant (local X:-9.6..-5.6, Z:-7.8..-2.2)
+    // Upgraded Holding Cell Details inside City 0 Police Station (Steel Bars, Bunk, Window Grille, Dispatch PCs)
     addMesh(
       'police_jail_bars',
       ProceduralModels.combineBoxes(
         [
+          // Vertical cell separation bars & horizontal cross-braces
           { center: [-5.6, 1.85, -7.2], size: [0.07, 1.85, 0.07] },
           { center: [-5.6, 1.85, -6.4], size: [0.07, 1.85, 0.07] },
           { center: [-5.6, 1.85, -5.6], size: [0.07, 1.85, 0.07] },
@@ -1421,22 +1481,74 @@ export class CityBuilder {
           { center: [-5.6, 1.85, -4.0], size: [0.07, 1.85, 0.07] },
           { center: [-5.6, 1.85, -3.2], size: [0.07, 1.85, 0.07] },
           { center: [-5.6, 1.85, -2.4], size: [0.07, 1.85, 0.07] },
-          // Cell bunk bed along back wall
-          { center: [-8.3, 0.42, -6.9], size: [1.1, 0.14, 0.5] },
+          { center: [-5.6, 1.35, -5.0], size: [0.08, 0.06, 2.8] },
+          { center: [-5.6, 2.65, -5.0], size: [0.08, 0.06, 2.8] },
+          // Cell doorway frame posts & electronic lockbox keypad
+          { center: [-7.9, 1.85, -2.2], size: [0.10, 1.85, 0.20] },
+          { center: [-5.8, 1.85, -2.2], size: [0.10, 1.85, 0.20] },
+          { center: [-5.45, 1.45, -1.98], size: [0.14, 0.20, 0.08] },
+          // Heavy welded steel bedframe + desk stool + table
+          { center: [-8.3, 0.42, -6.9], size: [1.15, 0.14, 0.52] },
+          { center: [-6.45, 0.52, -3.55], size: [0.35, 0.42, 0.26] }, // Steel cell desk
+          { center: [-6.45, 0.28, -4.35], size: [0.20, 0.24, 0.20] }, // Fixed stool
+          // Rear cell high barred window grille
+          { center: [-7.7, 2.95, -7.56], size: [0.85, 0.42, 0.05] },
+          // Booking desk computers in lobby
+          { center: [-1.4, 1.48, -2.45], size: [0.34, 0.24, 0.06] },
+          { center: [1.4, 1.48, -2.45], size: [0.34, 0.24, 0.06] },
         ],
         'PoliceStation_HoldingCell_Bars'
       ),
       'prison_bars'
     );
     addMesh(
+      'police_cell_mattress',
+      ProceduralModels.combineBoxes(
+        [
+          { center: [-8.3, 0.62, -6.9], size: [1.05, 0.08, 0.46] }, // White foam mattress
+          { center: [-9.0, 0.74, -6.9], size: [0.24, 0.06, 0.36] }, // Pillow
+        ],
+        'PoliceStation_Cell_Bedding'
+      ),
+      'prison_mattress'
+    );
+    addMesh(
+      'police_cell_fixtures',
+      ProceduralModels.combineBoxes(
+        [
+          // Stainless steel prison toilet & sink combo along left cell wall
+          { center: [-9.25, 0.32, -4.3], size: [0.32, 0.30, 0.28] },
+          { center: [-9.40, 0.72, -4.3], size: [0.16, 0.28, 0.26] },
+          { center: [-9.28, 0.88, -5.2], size: [0.26, 0.12, 0.28] },
+          { center: [-9.48, 1.06, -5.2], size: [0.06, 0.12, 0.06] },
+        ],
+        'PoliceStation_Cell_Plumbing'
+      ),
+      'prison_stainless'
+    );
+    addMesh(
+      'police_cell_light',
+      ProceduralModels.combineBoxes(
+        [
+          { center: [-7.6, 4.58, -5.0], size: [0.55, 0.06, 0.22] }, // Cell overhead light
+          { center: [0, 4.58, 1.2], size: [1.4, 0.06, 0.28] },     // Lobby ceiling light
+        ],
+        'PoliceStation_Cell_Lights'
+      ),
+      'cell_light_glow'
+    );
+    addMesh(
       'police_jail_gate',
       ProceduralModels.combineBoxes(
         [
-          { center: [-7.55, 1.85, -2.2], size: [0.05, 1.85, 0.05] },
-          { center: [-7.10, 1.85, -2.2], size: [0.05, 1.85, 0.05] },
-          { center: [-6.65, 1.85, -2.2], size: [0.05, 1.85, 0.05] },
-          { center: [-6.20, 1.85, -2.2], size: [0.05, 1.85, 0.05] },
-          { center: [-6.85, 1.85, -2.2], size: [1.05, 0.07, 0.07] },
+          { center: [-7.65, 1.85, -2.2], size: [0.05, 1.85, 0.05] },
+          { center: [-7.25, 1.85, -2.2], size: [0.05, 1.85, 0.05] },
+          { center: [-6.85, 1.85, -2.2], size: [0.05, 1.85, 0.05] },
+          { center: [-6.45, 1.85, -2.2], size: [0.05, 1.85, 0.05] },
+          { center: [-6.05, 1.85, -2.2], size: [0.05, 1.85, 0.05] },
+          { center: [-6.85, 3.55, -2.2], size: [1.02, 0.08, 0.08] },
+          { center: [-6.85, 1.85, -2.2], size: [1.02, 0.07, 0.07] },
+          { center: [-6.85, 0.22, -2.2], size: [1.02, 0.08, 0.08] },
         ],
         'PoliceStation_JailGate'
       ),
@@ -1620,9 +1732,28 @@ export class CityBuilder {
           { center: [20.5, 9.6, 18.5], size: [2.5, 0.65, 2.5] },
           { center: [-20.5, 9.6, -18.5], size: [2.5, 0.65, 2.5] },
           { center: [20.5, 9.6, -18.5], size: [2.5, 0.65, 2.5] },
-          // Cellblock interior steel bars
+          // Perimeter Razor-Wire Top Fence Stanchions along all 4 Blast Walls
+          { center: [-12.5, 7.65, 19.4], size: [9.5, 0.42, 0.14] },
+          { center: [12.5, 7.65, 19.4], size: [9.5, 0.42, 0.14] },
+          { center: [0, 7.65, -19.4], size: [22.0, 0.42, 0.14] },
+          { center: [-21.4, 7.65, 0], size: [0.14, 0.42, 19.4] },
+          { center: [21.4, 7.65, 0], size: [0.14, 0.42, 19.4] },
+          // Courtyard Exercise Frame, Workout Benches & Basketball Hoop
+          { center: [13.5, 1.4, 12.0], size: [0.12, 1.4, 0.12] },
+          { center: [15.5, 1.4, 12.0], size: [0.12, 1.4, 0.12] },
+          { center: [14.5, 2.7, 12.0], size: [1.1, 0.08, 0.08] },
+          { center: [-14.0, 0.55, 12.0], size: [1.4, 0.16, 0.45] },
+          { center: [-14.0, 0.55, 14.5], size: [1.4, 0.16, 0.45] },
+          { center: [16.5, 2.1, -10.0], size: [0.14, 2.1, 0.14] }, // Basketball post
+          { center: [15.8, 3.6, -10.0], size: [0.08, 0.55, 0.85] }, // Backboard
+          // Cellblock interior steel bars, 4 cell partitions & catwalk railing
           { center: [-6.0, 2.2, -1.0], size: [0.08, 2.1, 4.2] },
           { center: [6.0, 2.2, -1.0], size: [0.08, 2.1, 4.2] },
+          { center: [-8.2, 2.2, 0.5], size: [2.2, 2.1, 0.12] },
+          { center: [8.2, 2.2, 0.5], size: [2.2, 2.1, 0.12] },
+          { center: [-8.2, 2.2, -3.2], size: [2.2, 2.1, 0.12] },
+          { center: [8.2, 2.2, -3.2], size: [2.2, 2.1, 0.12] },
+          { center: [0, 3.25, 6.2], size: [10.4, 0.08, 0.08] }, // Exterior cellblock catwalk rail
         ],
         'MaxSecurityPrison_Steel'
       ),
@@ -1638,6 +1769,10 @@ export class CityBuilder {
           { center: [20.5, 11.4, -18.5], size: [0.55, 0.45, 0.55] },
           { center: [-3.4, 7.6, 19.6], size: [0.40, 0.40, 0.40] },
           { center: [3.4, 7.6, 19.6], size: [0.40, 0.40, 0.40] },
+          // Yard floodlights & interior cellblock lights
+          { center: [-11.5, 6.8, 18.6], size: [0.65, 0.25, 0.25] },
+          { center: [11.5, 6.8, 18.6], size: [0.65, 0.25, 0.25] },
+          { center: [0, 5.65, -0.5], size: [1.8, 0.08, 0.35] },
         ],
         'MaxSecurityPrison_Beacons'
       ),
@@ -1647,6 +1782,33 @@ export class CityBuilder {
       'maxprison_sign',
       ProceduralModels.create3DTextMesh('MAX PRISON', 0.95, 0.24, 'MaxPrison_Sign3D'),
       'prison_beacon_amber'
+    );
+
+    // 2o. Periphery Street & Alley Garbage Collection Meshes (Trash Bags & Crushed Cardboard Piles)
+    addMesh(
+      'garbage_bag_pile',
+      ProceduralModels.combineBoxes(
+        [
+          { center: [0, 0.24, 0], size: [0.34, 0.24, 0.32] },
+          { center: [0.32, 0.18, 0.18], size: [0.24, 0.18, 0.22] },
+          { center: [-0.26, 0.20, -0.18], size: [0.22, 0.20, 0.20] },
+          { center: [0.05, 0.52, -0.02], size: [0.10, 0.06, 0.10] }, // Tied bag knot
+        ],
+        'City_Garbage_Bags'
+      ),
+      'garbage_bag'
+    );
+    addMesh(
+      'garbage_crate_pile',
+      ProceduralModels.combineBoxes(
+        [
+          { center: [0, 0.20, 0], size: [0.38, 0.20, 0.30] },
+          { center: [-0.28, 0.14, 0.24], size: [0.24, 0.14, 0.22] },
+          { center: [0.22, 0.44, -0.05], size: [0.20, 0.08, 0.18] },
+        ],
+        'City_Garbage_Crates'
+      ),
+      'garbage_cardboard'
     );
 
     // ==================== 3. PLACE MEGA CITY STREETS & SIDEWALKS ====================
@@ -2120,7 +2282,10 @@ export class CityBuilder {
       { meshKey: 'police_station_beacons', materialKey: 'police_light_blue', position: policeStationPos, rotationY: 0, name: 'City0_PoliceStation_BeaconBlue', sphereRadius: 15.0 },
       { meshKey: 'police_station_beacons_red', materialKey: 'police_light_red', position: policeStationPos, rotationY: 0, name: 'City0_PoliceStation_BeaconRed', sphereRadius: 15.0 },
       { meshKey: 'police_station_sign', materialKey: 'police_sign_blue', position: [-11, 5.55, 90.3], rotationY: 0, name: 'City0_PoliceStation_Sign3D', sphereRadius: 8.0 },
-      { meshKey: 'police_jail_bars', materialKey: 'prison_bars', position: policeStationPos, rotationY: 0, name: 'City0_PoliceStation_CellBars', sphereRadius: 12.0 }
+      { meshKey: 'police_jail_bars', materialKey: 'prison_bars', position: policeStationPos, rotationY: 0, name: 'City0_PoliceStation_CellBars', sphereRadius: 12.0 },
+      { meshKey: 'police_cell_mattress', materialKey: 'prison_mattress', position: policeStationPos, rotationY: 0, name: 'City0_PoliceStation_CellBedding', sphereRadius: 10.0 },
+      { meshKey: 'police_cell_fixtures', materialKey: 'prison_stainless', position: policeStationPos, rotationY: 0, name: 'City0_PoliceStation_CellPlumbing', sphereRadius: 10.0 },
+      { meshKey: 'police_cell_light', materialKey: 'cell_light_glow', position: policeStationPos, rotationY: 0, name: 'City0_PoliceStation_CellLight', sphereRadius: 10.0 }
     );
     for (let i = 0; i < policeStationSpecs.length; i++) {
       const sp = policeStationSpecs[i];
@@ -2261,9 +2426,9 @@ export class CityBuilder {
       { id: 'police_car_01', name: 'Police North Patrol #01', position: [-18.0, 0.06, -34.0], rotationY: Math.PI * 0.5, paintMat: 'police_black', sector: 'NORTH', alwaysPatrol: true },
       { id: 'police_car_02', name: 'Police South Patrol #02', position: [16.0, 0.06, 37.0], rotationY: -Math.PI * 0.5, paintMat: 'police_black', sector: 'SOUTH', alwaysPatrol: true },
       // 13 Parked Reserve Police Cruisers (Precinct + Substations + Max Prison) dispatched on Big Crime!
-      { id: 'police_car_03', name: 'Police Reserve #03 (Precinct Bay)', position: [-16.0, 0.06, 94.0], rotationY: 0, paintMat: 'police_black', sector: 'SOUTH', alwaysPatrol: false },
-      { id: 'police_car_04', name: 'Police Reserve #04 (Precinct Bay)', position: [-11.0, 0.06, 94.0], rotationY: 0, paintMat: 'police_black', sector: 'SOUTH', alwaysPatrol: false },
-      { id: 'police_car_05', name: 'Police Reserve #05 (Precinct Bay)', position: [-6.0, 0.06, 94.0], rotationY: 0, paintMat: 'police_black', sector: 'SOUTH', alwaysPatrol: false },
+      { id: 'police_car_03', name: 'Police Reserve #03 (Precinct Bay)', position: [-18.5, 0.06, 94.0], rotationY: 0, paintMat: 'police_black', sector: 'SOUTH', alwaysPatrol: false },
+      { id: 'police_car_04', name: 'Police Reserve #04 (Precinct Bay)', position: [-2.0, 0.06, 94.0], rotationY: 0, paintMat: 'police_black', sector: 'SOUTH', alwaysPatrol: false },
+      { id: 'police_car_05', name: 'Police Reserve #05 (Precinct Bay)', position: [4.5, 0.06, 94.0], rotationY: 0, paintMat: 'police_black', sector: 'SOUTH', alwaysPatrol: false },
       { id: 'police_car_06', name: 'Police Reserve #06 (Civic Post)', position: [-29.0, 0.06, 70.0], rotationY: 0, paintMat: 'police_black', sector: 'SOUTH', alwaysPatrol: false },
       { id: 'police_car_07', name: 'Police Reserve #07 (Civic Post)', position: [-29.0, 0.06, 82.0], rotationY: Math.PI, paintMat: 'police_black', sector: 'SOUTH', alwaysPatrol: false },
       { id: 'police_car_08', name: 'Police Reserve #08 (Main West)', position: [-64.0, 0.06, 31.0], rotationY: Math.PI * 0.5, paintMat: 'police_black', sector: 'SOUTH', alwaysPatrol: false },
@@ -2276,7 +2441,36 @@ export class CityBuilder {
       { id: 'police_car_15', name: 'Police Reserve #15 (South Ring Reserve)', position: [-42.0, 0.06, 171.0], rotationY: Math.PI * 0.5, paintMat: 'police_black', sector: 'SOUTH', alwaysPatrol: false },
     ];
 
-    // ==================== 12. MOVEABLE ROADSIDE PROPS ====================
+    // ==================== 12. PERIPHERY & REAR-ALLEY GARBAGE SPAWNS (Strictly Outside Downtown Core) ====================
+    const garbageSpawns: CityGarbageSpawn[] = [
+      // Rear alleys behind outer buildings & Precinct backyard
+      { id: 'garb_01', name: 'Precinct Rear Alley Garbage', kind: 'bag', position: [-22.5, 0, 72.5], rotationY: 0.4 },
+      { id: 'garb_02', name: 'Gas Station #1 Rear Dump', kind: 'crate', position: [-18.5, 0, 65.5], rotationY: 1.1 },
+      { id: 'garb_03', name: 'South-Central Backyard Litter', kind: 'bag', position: [21.5, 0, 72.0], rotationY: -0.6 },
+      { id: 'garb_04', name: 'SmallHouse SW Alley Trash', kind: 'bag', position: [-82.0, 0, 69.0], rotationY: 0.2 },
+      // Far West Periphery Streets (X = -152..-168)
+      { id: 'garb_05', name: 'West Perimeter Hwy Curb #1', kind: 'bag', position: [-153.2, 0, 26.5], rotationY: 0.8 },
+      { id: 'garb_06', name: 'West Perimeter Hwy Curb #2', kind: 'crate', position: [-166.5, 0, 62.0], rotationY: -0.5 },
+      { id: 'garb_07', name: 'Far-West Suburb Trash #1', kind: 'bag', position: [-144.0, 0, 96.5], rotationY: 1.5 },
+      { id: 'garb_08', name: 'Far-West Suburb Alley #2', kind: 'crate', position: [-138.0, 0, 134.0], rotationY: 0.3 },
+      // South Ring / Metro South Periphery (Z = 148..180)
+      { id: 'garb_09', name: 'Metro Ring South Curb #1', kind: 'bag', position: [-68.0, 0, 166.8], rotationY: 2.1 },
+      { id: 'garb_10', name: 'Metro Ring South Curb #2', kind: 'crate', position: [-16.0, 0, 166.8], rotationY: -0.9 },
+      { id: 'garb_11', name: 'Metro Ring South Curb #3', kind: 'bag', position: [44.0, 0, 181.2], rotationY: 0.7 },
+      { id: 'garb_12', name: 'Metro Ring South Curb #4', kind: 'bag', position: [118.0, 0, 166.8], rotationY: -1.2 },
+      { id: 'garb_13', name: 'East South Periphery Litter', kind: 'crate', position: [194.0, 0, 136.0], rotationY: 0.5 },
+      // Harbor East Periphery (X = 166..231)
+      { id: 'garb_14', name: 'Harbor Expressway Curb #1', kind: 'bag', position: [216.8, 0, 48.0], rotationY: 1.8 },
+      { id: 'garb_15', name: 'Harbor Expressway Curb #2', kind: 'crate', position: [231.2, 0, 18.0], rotationY: -0.4 },
+      { id: 'garb_16', name: 'Harbor Backyard Litter', kind: 'bag', position: [204.0, 0, -64.0], rotationY: 0.9 },
+      // Far North Parkway Periphery (Z = -97..-112)
+      { id: 'garb_17', name: 'Far North Parkway Curb #1', kind: 'bag', position: [-78.0, 0, -96.8], rotationY: 1.3 },
+      { id: 'garb_18', name: 'Far North Parkway Curb #2', kind: 'crate', position: [24.0, 0, -111.2], rotationY: -0.7 },
+      { id: 'garb_19', name: 'Far North Parkway Curb #3', kind: 'bag', position: [118.0, 0, -96.8], rotationY: 2.4 },
+      { id: 'garb_20', name: 'NW Gas Station Rear Litter', kind: 'bag', position: [-140.0, 0, -124.0], rotationY: 0.1 },
+    ];
+
+    // ==================== 13. MOVEABLE ROADSIDE PROPS ====================
     const propSpawns: CityWorldData['propSpawns'] = [
       { kind: 'cone', name: 'GasStation1_Cone_01', pos: [-16.2, 0.54, 48.0], mass: 0.55, restitution: 0.45 },
       { kind: 'cone', name: 'GasStation1_Cone_02', pos: [-3.8, 0.54, 48.0], mass: 0.55, restitution: 0.45 },
@@ -2299,6 +2493,7 @@ export class CityBuilder {
       policeCars,
       cctvCameras,
       billboards,
+      garbageSpawns,
       gunShopCounterPos,
       policeJailCellPos,
       maxPrisonCellPos,

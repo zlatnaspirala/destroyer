@@ -34,9 +34,19 @@ interface ViewportHUDProps {
   elevatorTargetFloor?: number;
   onSelectElevatorFloor?: (floor: number) => void;
   onReleaseFromJail?: () => void;
+  onDirectHooliganRelease?: () => void;
+  onSignReleasePaper?: () => void;
+  onPickUpGarbage?: () => void;
   onGunShopInteract?: () => void;
   onFireWeapon?: () => void;
 }
+
+const formatMmSs = (sec: number): string => {
+  const s = Math.max(0, Math.ceil(sec));
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  return `${m}:${String(rem).padStart(2, '0')}`;
+};
 
 export const ViewportHUD: React.FC<ViewportHUDProps> = ({
   stats,
@@ -53,6 +63,9 @@ export const ViewportHUD: React.FC<ViewportHUDProps> = ({
   elevatorTargetFloor = 0,
   onSelectElevatorFloor,
   onReleaseFromJail,
+  onDirectHooliganRelease,
+  onSignReleasePaper,
+  onPickUpGarbage,
   onGunShopInteract,
   onFireWeapon,
 }) => {
@@ -61,6 +74,10 @@ export const ViewportHUD: React.FC<ViewportHUDProps> = ({
   const mm = String(totalMins % 60).padStart(2, '0');
   const phase = stats.dayNightPhase ?? 'DAY';
   const [isMinimized, setIsMinimized] = useState(false);
+  const isCustodyLocked =
+    stats.custodyStage === 'ESCORT_TO_CAR' ||
+    stats.custodyStage === 'DRIVING_TO_STATION' ||
+    stats.custodyStage === 'WALKING_TO_CELL';
 
   // Touch joystick tracking (pinned by touch identifier for multi-touch safety)
   const joystickContainerRef = useRef<HTMLDivElement>(null);
@@ -340,142 +357,228 @@ export const ViewportHUD: React.FC<ViewportHUDProps> = ({
         </div>
       </div>
 
-      {/* Top Right: 3rd Person Action Controls (GLB & BVH moved to Editor popup) */}
-      <div className="absolute top-2 right-2 z-20 pointer-events-auto flex items-center gap-2 select-none">
-
-        {/* Toggle Running HUD Button */}
-        <button
-          type="button"
-          onTouchStart={(e) => {
-            e.stopPropagation();
-            triggerToggleRunImmediate();
-          }}
-          onPointerDown={(e) => {
-            if (e.pointerType === 'touch') return;
-            e.preventDefault();
-            e.stopPropagation();
-            triggerToggleRunImmediate();
-          }}
-          onClick={() => {
-            if (performance.now() - lastRunTriggerRef.current > 400) {
-              triggerToggleRunImmediate();
-            }
-          }}
-          className={`touch-none select-none flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-mono font-bold transition-all shadow-xl active:scale-95 ${
-            isRunning
-              ? 'bg-amber-500/90 hover:bg-amber-400 border-amber-300 text-zinc-950 shadow-amber-500/30'
-              : 'bg-zinc-900/90 hover:bg-zinc-800 border-zinc-700 text-zinc-300 backdrop-blur-md'
-          }`}
-          title="Toggle between Walking and Running mode (or hold SHIFT)"
-        >
-          <Zap className={`w-3.5 h-3.5 ${isRunning ? 'text-zinc-950 fill-zinc-950' : 'text-amber-400'}`} />
-          <span>{isRunning ? 'RUN (ON)' : 'WALK (OFF)'}</span>
-        </button>
-
-        {/* Punch Button in Desktop HUD */}
-        <button
-          type="button"
-          onTouchStart={(e) => {
-            e.stopPropagation();
-            triggerPunchImmediate();
-          }}
-          onPointerDown={(e) => {
-            if (e.pointerType === 'touch') return;
-            e.preventDefault();
-            e.stopPropagation();
-            triggerPunchImmediate();
-          }}
-          onClick={() => {
-            if (performance.now() - lastPunchTriggerRef.current > 400) {
-              triggerPunchImmediate();
-            }
-          }}
-          className="touch-none select-none flex items-center gap-1 px-3 py-1.5 rounded-lg border border-orange-500/50 bg-orange-950/80 hover:bg-orange-900/80 text-orange-300 text-xs font-mono font-bold transition-all shadow-xl active:scale-95 backdrop-blur-md"
-          title="Punch moveable crates and barrels in front of player (Key F)"
-        >
-          <span>PUNCH</span>
-          <span className="text-[9px] bg-orange-900/80 px-1 rounded text-orange-200">F</span>
-        </button>
-
-        {/* Jump Button in Desktop HUD */}
-        <button
-          type="button"
-          onTouchStart={(e) => {
-            e.stopPropagation();
-            triggerJumpImmediate();
-          }}
-          onPointerDown={(e) => {
-            if (e.pointerType === 'touch') return;
-            e.preventDefault();
-            e.stopPropagation();
-            triggerJumpImmediate();
-          }}
-          onClick={() => {
-            if (performance.now() - lastJumpTriggerRef.current > 400) {
-              triggerJumpImmediate();
-            }
-          }}
-          className="touch-none select-none flex items-center gap-1 px-3 py-1.5 rounded-lg border border-cyan-500/50 bg-cyan-950/80 hover:bg-cyan-900/80 text-cyan-300 text-xs font-mono font-bold transition-all shadow-xl active:scale-95 backdrop-blur-md"
-          title="Perform Jump with character animation"
-        >
-          <span>JUMP</span>
-          <span className="text-[9px] bg-cyan-900/80 px-1 rounded text-cyan-200">SPACE</span>
-        </button>
-
-        {/* Shoot Weapon HUD Button (when Pistol equipped from Downtown Gun Shop) */}
-        {stats.hasWeapon && !stats.isDriving && !stats.isJailed && (
-          <button
-            type="button"
-            onPointerDown={(e) => {
-              e.stopPropagation();
-              if (onFireWeapon) onFireWeapon();
-            }}
-            className="touch-none select-none flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-rose-500/60 bg-rose-950/85 hover:bg-rose-900/85 text-rose-200 text-xs font-mono font-bold transition-all shadow-xl active:scale-95 backdrop-blur-md"
-            title="Fire equipped pistol (Key G)"
-          >
-            <span>SHOOT ({stats.weaponAmmo})</span>
-            <span className="text-[9px] bg-rose-900/90 px-1 rounded text-rose-100">G</span>
-          </button>
-        )}
-
-        <div className="hidden md:flex items-center gap-2 bg-zinc-950/85 backdrop-blur-md border border-zinc-800/80 rounded-lg px-3 py-1.5 shadow-2xl text-[11px] font-mono text-zinc-300 pointer-events-none">
-          <Gamepad2 className="w-4 h-4 text-emerald-400 shrink-0" />
-          <span><strong className="text-white">W:</strong> Forward</span>
-          <span className="text-zinc-600">|</span>
-          <span><strong className="text-white">A/D:</strong> Turn</span>
-          <span className="text-zinc-600">|</span>
-          <span><strong className="text-white">S:</strong> Back</span>
-          <span className="text-zinc-600">|</span>
-          <span><strong className="text-white">SPACE:</strong> Jump</span>
-          <span className="text-zinc-600">|</span>
-          <span><strong className="text-white">F:</strong> Punch</span>
-          {stats.hasWeapon && (
-            <>
-              <span className="text-zinc-600">|</span>
-              <span><strong className="text-rose-300">G:</strong> Shoot</span>
-            </>
-          )}
-        </div>
-      </div>
-
-      {/* 3D In-World Jail / Gun Shop / Vehicle / Elevator Interaction Hint */}
-      {stats.isJailed ? (
-        <div className="absolute top-28 left-1/2 -translate-x-1/2 z-40 pointer-events-auto flex flex-col sm:flex-row items-center gap-3 bg-zinc-950/95 border-2 border-rose-500/80 rounded-xl px-4 py-3 shadow-2xl font-mono text-xs backdrop-blur-md max-w-lg w-[92%] sm:w-auto">
-          <ShieldAlert className="w-5 h-5 text-rose-400 animate-pulse shrink-0" />
-          <div className="flex-1 text-center sm:text-left">
-            <div className="font-bold text-rose-300 tracking-wide">ARRESTED · {stats.jailLocationName.toUpperCase()}</div>
-            <div className="text-[11px] text-zinc-300 mt-0.5">
-              Charge: {stats.jailReason || 'Police Arrest'} · Release in{' '}
-              <strong className="text-amber-300">{stats.jailTimeLeft.toFixed(1)}s</strong>
-            </div>
-          </div>
-          {onReleaseFromJail && (
+      {/* Top Right: 3rd Person Action Controls (Hidden during Arrest Escort/Transport/Paper) */}
+      {!isCustodyLocked && stats.custodyStage !== 'RELEASE_PAPER' && (
+        <div className="absolute top-2 right-2 z-20 pointer-events-auto flex flex-col items-end gap-1.5 select-none">
+          <div className="flex items-center gap-2">
+            {/* Toggle Running HUD Button */}
             <button
               type="button"
-              onClick={onReleaseFromJail}
-              className="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-bold text-[11px] active:scale-95 transition-all shadow shrink-0"
+              onTouchStart={(e) => {
+                e.stopPropagation();
+                triggerToggleRunImmediate();
+              }}
+              onPointerDown={(e) => {
+                if (e.pointerType === 'touch') return;
+                e.preventDefault();
+                e.stopPropagation();
+                triggerToggleRunImmediate();
+              }}
+              onClick={() => {
+                if (performance.now() - lastRunTriggerRef.current > 400) {
+                  triggerToggleRunImmediate();
+                }
+              }}
+              className={`touch-none select-none flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-mono font-bold transition-all shadow-xl active:scale-95 ${
+                isRunning
+                  ? 'bg-amber-500/90 hover:bg-amber-400 border-amber-300 text-zinc-950 shadow-amber-500/30'
+                  : 'bg-zinc-900/90 hover:bg-zinc-800 border-zinc-700 text-zinc-300 backdrop-blur-md'
+              }`}
+              title="Toggle between Walking and Running mode (or hold SHIFT)"
             >
-              PAY BAIL / RELEASE
+              <Zap className={`w-3.5 h-3.5 ${isRunning ? 'text-zinc-950 fill-zinc-950' : 'text-amber-400'}`} />
+              <span>{isRunning ? 'RUN (ON)' : 'WALK (OFF)'}</span>
+            </button>
+
+            {/* Punch Button in Desktop HUD */}
+            <button
+              type="button"
+              onTouchStart={(e) => {
+                e.stopPropagation();
+                triggerPunchImmediate();
+              }}
+              onPointerDown={(e) => {
+                if (e.pointerType === 'touch') return;
+                e.preventDefault();
+                e.stopPropagation();
+                triggerPunchImmediate();
+              }}
+              onClick={() => {
+                if (performance.now() - lastPunchTriggerRef.current > 400) {
+                  triggerPunchImmediate();
+                }
+              }}
+              className="touch-none select-none flex items-center gap-1 px-3 py-1.5 rounded-lg border border-orange-500/50 bg-orange-950/80 hover:bg-orange-900/80 text-orange-300 text-xs font-mono font-bold transition-all shadow-xl active:scale-95 backdrop-blur-md"
+              title="Punch moveable crates and barrels in front of player (Key F)"
+            >
+              <span>PUNCH</span>
+              <span className="text-[9px] bg-orange-900/80 px-1 rounded text-orange-200">F</span>
+            </button>
+
+            {/* Jump Button in Desktop HUD */}
+            <button
+              type="button"
+              onTouchStart={(e) => {
+                e.stopPropagation();
+                triggerJumpImmediate();
+              }}
+              onPointerDown={(e) => {
+                if (e.pointerType === 'touch') return;
+                e.preventDefault();
+                e.stopPropagation();
+                triggerJumpImmediate();
+              }}
+              onClick={() => {
+                if (performance.now() - lastJumpTriggerRef.current > 400) {
+                  triggerJumpImmediate();
+                }
+              }}
+              className="touch-none select-none flex items-center gap-1 px-3 py-1.5 rounded-lg border border-cyan-500/50 bg-cyan-950/80 hover:bg-cyan-900/80 text-cyan-300 text-xs font-mono font-bold transition-all shadow-xl active:scale-95 backdrop-blur-md"
+              title="Perform Jump with character animation"
+            >
+              <span>JUMP</span>
+              <span className="text-[9px] bg-cyan-900/80 px-1 rounded text-cyan-200">SPACE</span>
+            </button>
+
+            {/* Shoot Weapon HUD Button (when Pistol equipped from Downtown Gun Shop) */}
+            {stats.hasWeapon && !stats.isDriving && !stats.isJailed && (
+              <button
+                type="button"
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                  if (onFireWeapon) onFireWeapon();
+                }}
+                className="touch-none select-none flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-rose-500/60 bg-rose-950/85 hover:bg-rose-900/85 text-rose-200 text-xs font-mono font-bold transition-all shadow-xl active:scale-95 backdrop-blur-md"
+                title="Fire equipped pistol (Key G)"
+              >
+                <span>SHOOT ({stats.weaponAmmo})</span>
+                <span className="text-[9px] bg-rose-900/90 px-1 rounded text-rose-100">G</span>
+              </button>
+            )}
+
+            <div className="hidden md:flex items-center gap-2 bg-zinc-950/85 backdrop-blur-md border border-zinc-800/80 rounded-lg px-3 py-1.5 shadow-2xl text-[11px] font-mono text-zinc-300 pointer-events-none">
+              <Gamepad2 className="w-4 h-4 text-emerald-400 shrink-0" />
+              <span><strong className="text-white">W:</strong> Forward</span>
+              <span className="text-zinc-600">|</span>
+              <span><strong className="text-white">A/D:</strong> Turn</span>
+              <span className="text-zinc-600">|</span>
+              <span><strong className="text-white">S:</strong> Back</span>
+              <span className="text-zinc-600">|</span>
+              <span><strong className="text-white">SPACE:</strong> Jump</span>
+              <span className="text-zinc-600">|</span>
+              <span><strong className="text-white">F:</strong> Punch</span>
+              {stats.hasWeapon && (
+                <>
+                  <span className="text-zinc-600">|</span>
+                  <span><strong className="text-rose-300">G:</strong> Shoot</span>
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* Probation Community Service Tracker */}
+          {stats.socialWorkActive && (
+            <div className="bg-emerald-950/90 border border-emerald-500/60 rounded-lg px-3 py-1 text-[11px] font-mono text-emerald-200 shadow-lg backdrop-blur-md pointer-events-none">
+              PROBATION CLEANUP: <strong>{stats.socialWorkCollected}/{stats.socialWorkRequired}</strong> PERIPHERY GARBAGE
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Custody Cinematic Lock Banner / Release Paper Modal / Real Cell / Vehicle / Garbage Prompts */}
+      {isCustodyLocked ? (
+        <div className="absolute top-16 left-1/2 -translate-x-1/2 z-40 pointer-events-none flex items-center gap-3 bg-zinc-950/95 border-2 border-sky-400/85 rounded-xl px-5 py-3 shadow-2xl font-mono text-xs backdrop-blur-md max-w-lg w-[92%] sm:w-auto">
+          <ShieldAlert className="w-5 h-5 text-sky-400 animate-pulse shrink-0" />
+          <div>
+            <div className="font-bold text-sky-300 tracking-wide">
+              UNDER ARREST · CONTROLS DISABLED
+            </div>
+            <div className="text-[11px] text-zinc-200 mt-0.5">
+              {stats.custodyStage === 'ESCORT_TO_CAR'
+                ? `Police officer escorting suspect to waiting patrol car (${stats.custodyDistLeft}m)`
+                : stats.custodyStage === 'DRIVING_TO_STATION'
+                ? `Transporting in police cruiser to City 0 Police Station (${stats.custodyDistLeft}m)`
+                : `Walking into Police Station holding cell (${stats.custodyDistLeft}m)`}
+            </div>
+            <div className="text-[10px] text-zinc-400 mt-0.5">
+              Charge: {stats.jailReason || 'Police Arrest'} · Offense #{Math.max(1, stats.offenseCount)}
+            </div>
+          </div>
+        </div>
+      ) : stats.custodyStage === 'RELEASE_PAPER' ? (
+        <div
+          onPointerDown={(e) => e.stopPropagation()}
+          className="absolute inset-0 z-50 flex items-center justify-center bg-zinc-950/70 backdrop-blur-sm p-4 pointer-events-auto"
+        >
+          <div className="max-w-md w-full bg-stone-100 text-zinc-900 rounded-xl border-2 border-zinc-400 shadow-2xl p-5 font-mono text-xs">
+            <div className="border-b-2 border-zinc-800 pb-2 mb-3 flex items-start justify-between gap-2">
+              <div>
+                <div className="text-[10px] font-bold tracking-widest text-zinc-600">
+                  METRO CITY 0 POLICE DEPARTMENT
+                </div>
+                <div className="text-sm font-extrabold text-zinc-950 tracking-tight">
+                  CONDITIONAL RELEASE &amp; OBLIGATIONS ORDER
+                </div>
+              </div>
+              <span className="px-2 py-0.5 bg-zinc-900 text-amber-300 font-bold text-[10px] rounded">
+                CASE #{String(Math.max(1, stats.offenseCount)).padStart(4, '0')}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 gap-1.5 bg-stone-200/80 border border-zinc-300 rounded p-2 mb-3 text-[11px]">
+              <div><span className="text-zinc-600">Facility:</span> <strong>P.Station Prison</strong></div>
+              <div><span className="text-zinc-600">Charge:</span> <strong>{stats.jailReason || 'Minor Offense'}</strong></div>
+              <div><span className="text-zinc-600">Status:</span> <strong className="text-emerald-700">{stats.firstHooliganEligible ? '1st Hooligan Caution' : 'Sentence Served'}</strong></div>
+              <div><span className="text-zinc-600">Max Prison:</span> <strong>Inactive</strong></div>
+            </div>
+
+            <div className="font-bold text-[11px] uppercase tracking-wide text-zinc-800 mb-1.5">
+              Mandatory Real-World Release Obligations:
+            </div>
+            <ol className="list-decimal list-inside space-y-1.5 text-[11px] text-zinc-800 mb-4 leading-relaxed">
+              <li>
+                <strong>Community Service Cleanup:</strong> Pick up <strong>{stats.socialWorkRequired}</strong> dumped garbage piles along outer city streets &amp; rear alleys (<strong>[E]</strong>).
+              </li>
+              <li>
+                <strong>Firearms Prohibition:</strong> Weapons confiscated. Carrying or firing guns inside Metro City 0 is strictly prohibited.
+              </li>
+              <li>
+                <strong>Public Peace &amp; Police Yielding:</strong> Keep clear of moving police cruisers and commit no violence against citizens or officers.
+              </li>
+              <li>
+                <strong>Active Patrol &amp; CCTV Probation:</strong> Municipal surveillance and North/South Patrols monitor your conditional release.
+              </li>
+            </ol>
+
+            <button
+              type="button"
+              onClick={() => onSignReleasePaper && onSignReleasePaper()}
+              className="w-full py-2.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 active:scale-[0.99] text-emerald-300 font-bold text-xs tracking-wide transition-all shadow-lg"
+            >
+              SIGN &amp; ACCEPT OBLIGATIONS (UNLOCK CELL DOOR)
+            </button>
+          </div>
+        </div>
+      ) : stats.isJailed ? (
+        <div className="absolute top-28 left-1/2 -translate-x-1/2 z-40 pointer-events-auto flex flex-col sm:flex-row items-center gap-3 bg-zinc-950/95 border-2 border-rose-500/80 rounded-xl px-4 py-3 shadow-2xl font-mono text-xs backdrop-blur-md max-w-xl w-[92%] sm:w-auto">
+          <ShieldAlert className="w-5 h-5 text-rose-400 animate-pulse shrink-0" />
+          <div className="flex-1 text-center sm:text-left">
+            <div className="font-bold text-rose-300 tracking-wide">JAILED · CITY 0 POLICE STATION PRISON</div>
+            <div className="text-[11px] text-zinc-300 mt-0.5">
+              Charge: {stats.jailReason || 'Police Arrest'} · Release Paper in{' '}
+              <strong className="text-amber-300">{formatMmSs(stats.jailTimeLeft)}</strong>
+            </div>
+            <div className="text-[10px] text-emerald-300/90 mt-0.5">
+              Controls active — walk freely inside the holding cell until gate unlocks
+            </div>
+          </div>
+          {stats.firstHooliganEligible && (onDirectHooliganRelease || onReleaseFromJail) && (
+            <button
+              type="button"
+              onClick={() => (onDirectHooliganRelease ? onDirectHooliganRelease() : onReleaseFromJail?.())}
+              className="px-3 py-1.5 rounded-lg bg-amber-400 hover:bg-amber-300 text-zinc-950 font-bold text-[11px] active:scale-95 transition-all shadow shrink-0"
+            >
+              FIRST HOOLIGAN · DIRECT RELEASE
             </button>
           )}
         </div>
@@ -503,6 +606,18 @@ export const ViewportHUD: React.FC<ViewportHUDProps> = ({
             className="px-2 py-0.5 rounded bg-rose-500/25 hover:bg-rose-500/40 border border-rose-400/60 text-rose-200 font-bold text-[11px] active:scale-95 transition-all"
           >
             EXIT CAR [E]
+          </button>
+        </div>
+      ) : stats.garbageNearby ? (
+        <div className="absolute bottom-14 left-1/2 -translate-x-1/2 z-20 pointer-events-auto flex items-center gap-2.5 bg-zinc-950/92 border border-amber-400/75 rounded-full px-4 py-1.5 shadow-2xl text-xs font-mono text-amber-100 backdrop-blur-md">
+          <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
+          <span className="font-bold text-amber-300">STREET GARBAGE</span>
+          <button
+            type="button"
+            onClick={() => onPickUpGarbage && onPickUpGarbage()}
+            className="px-2.5 py-0.5 rounded bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-bold text-[11px] active:scale-95 transition-all shadow"
+          >
+            PICK UP GARBAGE [E]
           </button>
         </div>
       ) : stats.gunShopNearby ? (
@@ -547,19 +662,29 @@ export const ViewportHUD: React.FC<ViewportHUDProps> = ({
         </div>
       )}
 
+      {/* First Police Strike Slowed Alert */}
+      {stats.custodyStage === 'SLOWED' && !isCustodyLocked && !stats.isJailed && (
+        <div className="absolute top-28 left-1/2 -translate-x-1/2 z-30 pointer-events-none flex items-center gap-2.5 bg-zinc-950/95 border-2 border-amber-400 rounded-xl px-4 py-2 shadow-2xl font-mono text-xs backdrop-blur-md animate-pulse">
+          <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0" />
+          <span className="font-bold text-amber-200">
+            POLICE FIRST PUNCH · MOVEMENT SLOWED — OFFICER TAKING INTO CUSTODY
+          </span>
+        </div>
+      )}
+
       {/* Police Car Blocking Siren Countdown Alert */}
-      {stats.policeSirenWarningActive && !stats.isJailed && (
+      {stats.policeSirenWarningActive && !stats.isJailed && !isCustodyLocked && (
         <div className="absolute top-24 left-1/2 -translate-x-1/2 z-30 pointer-events-none flex items-center gap-2.5 bg-zinc-950/95 border-2 border-sky-400 rounded-xl px-4 py-2 shadow-2xl font-mono text-xs backdrop-blur-md animate-pulse">
           <ShieldAlert className="w-4 h-4 text-rose-400 shrink-0" />
           <span className="font-bold text-amber-300">
-            POLICE SIREN: STEP ASIDE FROM CRUISER — ARREST IN{' '}
+            POLICE SIREN: STEP ASIDE FROM CRUISER — OFFICER DEPLOY IN{' '}
             <span className="text-rose-400">{stats.policeSirenCountdown.toFixed(1)}s</span>
           </span>
         </div>
       )}
 
       {/* 911 Police Dispatch & Surveillance Alert Banner */}
-      {stats.policeAlertActive && (
+      {stats.policeAlertActive && !isCustodyLocked && (
         <div className="absolute top-14 left-1/2 -translate-x-1/2 z-30 pointer-events-none flex items-center gap-3 bg-zinc-950/92 border border-rose-500/70 rounded-xl px-3.5 py-2 shadow-2xl font-mono text-xs backdrop-blur-md">
           <div className="flex items-center gap-1.5 text-rose-400 font-bold animate-pulse">
             <ShieldAlert className="w-4 h-4 text-rose-400" />
@@ -586,36 +711,38 @@ export const ViewportHUD: React.FC<ViewportHUDProps> = ({
         </div>
       )}
 
-      {/* Mobile Touch Joystick & Action Buttons (Bottom Left & Bottom Right) */}
-      <div
-        onPointerDown={(e) => e.stopPropagation()}
-        className={`absolute bottom-6 left-6 z-30 pointer-events-auto select-none ${isCoarsePointer ? 'block' : 'md:hidden'}`}
-      >
-        <div
-          ref={joystickContainerRef}
-          onTouchStart={handleTouchStart}
-          onTouchMove={handleTouchMove}
-          onTouchEnd={handleTouchEnd}
-          onTouchCancel={handleTouchEnd}
-          className="w-32 h-32 rounded-full bg-zinc-950/70 border-2 border-cyan-500/40 backdrop-blur-md flex items-center justify-center relative shadow-2xl touch-none"
-        >
-          <div className="w-12 h-12 rounded-full bg-cyan-500/20 border border-cyan-400/60" />
+      {/* Mobile Touch Joystick & Action Buttons (Hidden during arrest custody lock & paper modal) */}
+      {!isCustodyLocked && stats.custodyStage !== 'RELEASE_PAPER' && (
+        <>
           <div
-            style={{
-              transform: `translate(${joystickPos.x}px, ${joystickPos.y}px)`,
-            }}
-            className={`w-12 h-12 rounded-full bg-cyan-400 shadow-lg shadow-cyan-500/50 absolute top-1/2 left-1/2 -mt-6 -ml-6 pointer-events-none ${
-              isTouchingUI ? '' : 'transition-transform duration-100'
-            }`}
-          />
-        </div>
-      </div>
+            onPointerDown={(e) => e.stopPropagation()}
+            className={`absolute bottom-6 left-6 z-30 pointer-events-auto select-none ${isCoarsePointer ? 'block' : 'md:hidden'}`}
+          >
+            <div
+              ref={joystickContainerRef}
+              onTouchStart={handleTouchStart}
+              onTouchMove={handleTouchMove}
+              onTouchEnd={handleTouchEnd}
+              onTouchCancel={handleTouchEnd}
+              className="w-32 h-32 rounded-full bg-zinc-950/70 border-2 border-cyan-500/40 backdrop-blur-md flex items-center justify-center relative shadow-2xl touch-none"
+            >
+              <div className="w-12 h-12 rounded-full bg-cyan-500/20 border border-cyan-400/60" />
+              <div
+                style={{
+                  transform: `translate(${joystickPos.x}px, ${joystickPos.y}px)`,
+                }}
+                className={`w-12 h-12 rounded-full bg-cyan-400 shadow-lg shadow-cyan-500/50 absolute top-1/2 left-1/2 -mt-6 -ml-6 pointer-events-none ${
+                  isTouchingUI ? '' : 'transition-transform duration-100'
+                }`}
+              />
+            </div>
+          </div>
 
-      <div
-        onPointerDown={(e) => e.stopPropagation()}
-        className={`absolute bottom-6 right-6 z-30 pointer-events-auto select-none items-center gap-3 ${isCoarsePointer ? 'flex' : 'flex md:hidden'}`}
-      >
-        {/* Mobile Run / Boost Toggle Button (Multi-touch immediate touchstart) */}
+          <div
+            onPointerDown={(e) => e.stopPropagation()}
+            className={`absolute bottom-6 right-6 z-30 pointer-events-auto select-none items-center gap-3 ${isCoarsePointer ? 'flex' : 'flex md:hidden'}`}
+          >
+            {/* Mobile Run / Boost Toggle Button (Multi-touch immediate touchstart) */}
         <button
           type="button"
           onTouchStart={(e) => {
@@ -704,6 +831,8 @@ export const ViewportHUD: React.FC<ViewportHUDProps> = ({
           {stats.isDriving ? 'BRAKE' : 'JUMP'}
         </button>
       </div>
+        </>
+      )}
     </>
   );
 };

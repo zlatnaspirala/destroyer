@@ -52,6 +52,7 @@ export class PlayerController {
   public knockbackVelX = 0;      // Police kick/shove horizontal impulse X
   public knockbackVelZ = 0;      // Police kick/shove horizontal impulse Z
   public knockbackCooldown = 0;  // Prevents continuous stunlocking
+  public arrestSlowdownTimer = 0; // First police punch slows player for realistic catch
 
   // 3rd Person Camera settings (Theta = horizontal yaw, Phi = vertical pitch)
   public cameraDistance = 7.5;
@@ -105,28 +106,30 @@ export class PlayerController {
         }
         if (e.code === 'Space') {
           e.preventDefault();
-          if (this.activeVehicleIndex < 0) {
+          if (this.activeVehicleIndex < 0 && !this.engine.isCustodyLocked()) {
             this.jump();
           }
         }
         if (e.code === 'KeyF' && !e.repeat) {
           e.preventDefault();
-          if (this.activeVehicleIndex < 0) {
+          if (this.activeVehicleIndex < 0 && !this.engine.isCustodyLocked()) {
             this.punch();
           }
         }
         if (e.code === 'KeyG' && !e.repeat) {
           e.preventDefault();
-          if (this.activeVehicleIndex < 0) {
+          if (this.activeVehicleIndex < 0 && !this.engine.isCustodyLocked()) {
             this.fireWeapon();
           }
         }
 
-        // E key: Exit car / Enter nearby car / Equip Gun Shop pistol / Press elevator button
-        if (e.code === 'KeyE' && !e.repeat) {
+        // E key: Exit car / Enter nearby car / Pick up periphery garbage / Equip Gun Shop pistol / Press elevator button
+        if (e.code === 'KeyE' && !e.repeat && !this.engine.isCustodyLocked()) {
           if (!this.toggleVehicleEntry()) {
-            if (!this.engine.tryInteractGunShop()) {
-              this.interactWith3DElevatorButton();
+            if (!this.engine.tryPickUpGarbage()) {
+              if (!this.engine.tryInteractGunShop()) {
+                this.interactWith3DElevatorButton();
+              }
             }
           }
         }
@@ -384,12 +387,18 @@ export class PlayerController {
     this.knockbackCooldown = 0.65;
   }
 
+  public applyPoliceSlowdown(duration = 3.2): void {
+    this.arrestSlowdownTimer = Math.max(this.arrestSlowdownTimer, duration);
+  }
+
   public jump(): void {
+    if (this.engine.isCustodyLocked() || this.arrestSlowdownTimer > 0) return;
     this.jumpBufferTimer = 0.18;
     this.tryExecuteJump();
   }
 
   private tryExecuteJump(): boolean {
+    if (this.arrestSlowdownTimer > 0) return false;
     const canCoyoteJump = this.coyoteTimer > 0 && !this.isJumping;
     if ((this.isGrounded || canCoyoteJump) && this.energy >= 0.05) {
       this.velocityY = this.jumpStrength;
@@ -444,6 +453,89 @@ export class PlayerController {
   public update(deltaSec: number): void {
     if (this.entityId < 0 || this.engine.isDeviceLost) return;
 
+    // Custody Cinematic Lock: player controls disabled during arrest escort, cruiser drive & station cell walk,
+    // while camera continuously follows the player/police car in render (zero teleport!)
+    if (this.engine.isCustodyLocked()) {
+      this.isPunching = false;
+      this.isJumping = false;
+      this.jumpRequested = false;
+      this.punchRequested = false;
+      this.gunFireRequested = false;
+      this.nearbyVehicleIndex = -1;
+
+      if (this.engine.isCustodyPlayerVisible()) {
+        const halfYaw = this.rotationY * 0.5;
+        Mat4.fromTRSValues(
+          this.position[0], this.position[1], this.position[2],
+          0, Math.sin(halfYaw), 0, Math.cos(halfYaw),
+          1, 1, 1,
+          this.scratchPlayerMat
+        );
+        this.engine.entityManager.updateEntityMatrixXYZ(
+          this.entityId,
+          this.scratchPlayerMat,
+          this.position[0],
+          this.position[1],
+          this.position[2],
+          2.5
+        );
+        const extras = this.extraEntityIds;
+        for (let i = 0; i < extras.length; i++) {
+          this.engine.entityManager.updateEntityMatrixXYZ(
+            extras[i],
+            this.scratchPlayerMat,
+            this.position[0],
+            this.position[1],
+            this.position[2],
+            2.5
+          );
+        }
+      }
+
+      const camera = this.engine.camera;
+      const focus = this.engine.custodyCameraTarget;
+      const desiredDist = this.engine.isCustodyDrivingStage() ? 9.6 : 5.8;
+      this.cameraDistance += (desiredDist - this.cameraDistance) * Math.min(1.0, deltaSec * 6.0);
+
+      if (!this.isPointerDragging && this.engine.isCustodyDrivingStage()) {
+        const desiredTheta = this.rotationY + Math.PI;
+        let diff = desiredTheta - this.cameraTheta;
+        while (diff > Math.PI) diff -= Math.PI * 2;
+        while (diff < -Math.PI) diff += Math.PI * 2;
+        this.cameraTheta += diff * Math.min(1.0, deltaSec * 3.5);
+        this.cameraPhi += (1.18 - this.cameraPhi) * Math.min(1.0, deltaSec * 3.5);
+      }
+
+      camera.target[0] += (focus[0] - camera.target[0]) * Math.min(1.0, deltaSec * 12.0);
+      camera.target[1] += (focus[1] - camera.target[1]) * Math.min(1.0, deltaSec * 12.0);
+      camera.target[2] += (focus[2] - camera.target[2]) * Math.min(1.0, deltaSec * 12.0);
+
+      let finalRadius = this.cameraDistance;
+      if (this.engine.physics) {
+        const sinPhi = Math.sin(this.cameraPhi);
+        const cosPhi = Math.cos(this.cameraPhi);
+        this.scratchRayDir[0] = sinPhi * Math.sin(this.cameraTheta);
+        this.scratchRayDir[1] = cosPhi;
+        this.scratchRayDir[2] = sinPhi * Math.cos(this.cameraTheta);
+        this.scratchRayOrigin[0] = camera.target[0];
+        this.scratchRayOrigin[1] = camera.target[1];
+        this.scratchRayOrigin[2] = camera.target[2];
+        const occluded = this.engine.physics.raycastBoxes(this.scratchRayOrigin, this.scratchRayDir, finalRadius);
+        if (occluded < finalRadius) {
+          finalRadius = Math.max(1.3, occluded - 0.25);
+        }
+      }
+      camera.theta = this.cameraTheta;
+      camera.phi = this.cameraPhi;
+      camera.radius = finalRadius;
+      camera.updatePositionFromSpherical();
+      return;
+    }
+
+    if (this.arrestSlowdownTimer > 0) {
+      this.arrestSlowdownTimer = Math.max(0, this.arrestSlowdownTimer - deltaSec);
+    }
+
     // If driving a car, run dedicated zero-alloc vehicle simulation & chase camera
     if (this.activeVehicleIndex >= 0 && this.activeVehicleIndex < this.engine.vehicles.length) {
       this.updateDriving(deltaSec);
@@ -455,7 +547,7 @@ export class PlayerController {
 
     // Energy regeneration and consumption
     this.energy = Math.min(1.0, this.energy + this.energyRegenRate * deltaSec);
-    const canRun = this.isRunning && this.energy > 0.05;
+    const canRun = this.isRunning && this.energy > 0.05 && this.arrestSlowdownTimer <= 0;
 
     // 1. Handle A / D Rotation and Proportional Mobile Joystick Turning
     const joyRawX = this.joystickVec[0];
@@ -569,23 +661,24 @@ export class PlayerController {
       joyThrottle = Math.pow(normY, 1.25) * 0.58;
     }
 
+    const slowedCap = this.arrestSlowdownTimer > 0 ? 2.35 : 99.0;
     let targetSpeed = 0;
     if (keyForward) {
-      targetSpeed = canRun ? this.runSpeedForward : this.walkSpeedForward;
+      targetSpeed = Math.min(slowedCap, canRun ? this.runSpeedForward : this.walkSpeedForward);
       if (canRun) {
         this.energy = Math.max(0, this.energy - this.runEnergyCost * deltaSec);
       }
     } else if (keyBackward) {
-      targetSpeed = -this.moveSpeedBackward;
+      targetSpeed = Math.max(-slowedCap, -this.moveSpeedBackward);
     } else if (joyThrottle > 0) {
       if (joyRawY < 0) {
         const baseForward = canRun ? this.runSpeedForward : this.walkSpeedForward;
-        targetSpeed = baseForward * joyThrottle;
+        targetSpeed = Math.min(slowedCap, baseForward * joyThrottle);
         if (canRun) {
           this.energy = Math.max(0, this.energy - this.runEnergyCost * deltaSec);
         }
       } else {
-        targetSpeed = -this.moveSpeedBackward * joyThrottle;
+        targetSpeed = Math.max(-slowedCap, -this.moveSpeedBackward * joyThrottle);
       }
     }
 

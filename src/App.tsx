@@ -105,6 +105,14 @@ export default function App() {
     weaponAmmo: 0,
     gunShopNearby: false,
     activePatrolCount: 2,
+    custodyStage: 'NONE',
+    custodyDistLeft: 0,
+    offenseCount: 0,
+    firstHooliganEligible: false,
+    socialWorkActive: false,
+    socialWorkCollected: 0,
+    socialWorkRequired: 5,
+    garbageNearby: false,
   });
 
   // Touch & Pointer state for orbit controls
@@ -723,6 +731,24 @@ export default function App() {
                 onReleaseFromJail={() => {
                   if (engineRef.current) {
                     engineRef.current.releaseFromJail();
+                    setStats({ ...engineRef.current.stats });
+                  }
+                }}
+                onDirectHooliganRelease={() => {
+                  if (engineRef.current) {
+                    engineRef.current.requestFirstHooliganDirectRelease();
+                    setStats({ ...engineRef.current.stats });
+                  }
+                }}
+                onSignReleasePaper={() => {
+                  if (engineRef.current) {
+                    engineRef.current.signReleasePaperAndExit();
+                    setStats({ ...engineRef.current.stats });
+                  }
+                }}
+                onPickUpGarbage={() => {
+                  if (engineRef.current) {
+                    engineRef.current.tryPickUpGarbage();
                     setStats({ ...engineRef.current.stats });
                   }
                 }}
